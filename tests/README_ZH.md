@@ -1,43 +1,51 @@
-# 端到端测试 (E2E Tests)
+# LiteLLM on Azure验证
 
-本目录包含了用于验证代理网关（LiteLLM 和 APIM）部署与功能的测试脚本，以确保所有模型请求均能被正确路由。
+[English](README.md) | [项目总览](../README_ZH.md) | [客户迁移指南](../docs/customer-migration-guide-zh.md)
 
-## 测试文件说明
+测试覆盖客户配置、迁移门禁、Azure/Kubernetes模板契约、认证/审计代理和LiteLLM运行时行为。离线验证、隔离运行时验证和客户真实环境验收必须分开。
 
-- `test_all_deployments.py`: 统一的端到端网络测试脚本，同时兼容发往 LiteLLM 或 APIM 代理的大型语言模型验证。验证能力涵盖文本、图片和视频模型的可用性，同时覆盖了对标准 OpenAI API 格式以及 Azure OpenAI API 格式路由的请求兼容。
-- `test_codex_cache_affinity.py`: 使用真实 Codex CLI 在不同输入 Token 档位创建并续接会话，统计 Azure Prompt Cache 命中率，并可通过 LiteLLM Spend Logs 验证两轮请求命中同一后端 `model_id`。
+## 离线验证
 
-## 环境要求
-
-运行测试脚本前，请确保代理服务已经在运行中。这些脚本只依赖 Python 的标准库（如 `urllib`, `json`, `argparse` 等），因此无需安装任何外部依赖（如 `requests` 或 `openai`）。
-
-## 使用指南
-
-### 1. 测试基础网关代理 (LiteLLM / APIM)
-
-需要提供针对不同代理的部署配置 `azure-openai.json` 文件的路径、代理服务的基础 URL (Base URL) 以及访问该代理服务的对应 API Key。
+在仓库根目录运行，需已安装[Python依赖](../requirements.txt)、Node.js 24及auth-proxy依赖、Azure CLI/Bicep和kubectl：
 
 ```bash
-python test_all_deployments.py \
-  --config ../LiteLLM/azure-openai.json \
-  --base-url http://<GATEWAY_EXTERNAL_IP_OR_DOMAIN>:<PORT> \
-  --api-key <YOUR_GATEWAY_API_KEY>
+make validate-stage9
+.venv/bin/python -m unittest tests.test_customer_migration tests.test_customer_templates tests.test_public_config
 ```
 
-**可选参数:**
-- `--config`: 用于指定对应的模型部署配置映射文件（如 LiteLLM 或 APIM 目录下的 `azure-openai.json`）的路径。
-- `--base-url`: 代理对外暴露的基础请求端点。
-- `--api-key`: 发送请求所需的代理认证 API Key。（注：脚本内置了同时发送 `Authorization: Bearer` 和 `api-key:` Header 的功能，天然兼容 LiteLLM 或 APIM 的鉴权机制）
-- `--prompt`: （可选）文本模型测试时的自定义提示词。默认为: "请只回复: ok"。
-- `--image-prompt`: （可选）图片生成模型验证时的自定义提示词。
+- Stage9包含全部前序门禁：Bicep编译、Kustomize渲染、安全策略、Node测试及合成L3闭环，不部署资源。
+- 客户测试验证配置/证据绑定、目标隔离、workflow约束及生成参数与Bicep契约的一致性。
+- 发布检查拒绝非示例身份和明显凭据，不读取忽略的客户文件。
+- 旧部署单元测试使用模拟Azure/Kubernetes调用，覆盖订阅、配置兼容、探针、PVC和Salt保护。
 
-## 测试覆盖特性
+## 隔离OSS回调验证
 
-1. **文本模型 (Chat API)**: 在标准的 OpenAI 端点 (`/v1/chat/completions`) 以及 Azure OpenAI 端点 (`/openai/deployments/...`) 路径下双向发送请求。
-2. **图片模型 (Image API)**: 验证标准 OpenAI 的画图端点 (`/v1/images/generations`) 和对应的 Azure OpenAI 路由。
-3. **视频模型 (例如 Sora)**: 通过向网关代理的模型注册表列出接口 (`/v1/models`) 请求，验证注册内容是否存在。
+```bash
+make validate-oss-callbacks
+```
+
+需要Docker和固定版本LiteLLM镜像；容器无外部网络，使用合成loopback上游验证SDK及真实Proxy，不向宿主环境安装LiteLLM。未缓存镜像可能需要下载。范围和限制见[回调实测记录](../docs/litellm-oss-callback-validation-2026-09-07.md)。
+
+## 旧网关真实环境测试
+
+[test_all_deployments.py](test_all_deployments.py)是仅用标准库的CLI，会向明确指定的旧网关发送真实模型请求并可能产生费用。它不是Entra登录客户端，也不是新安全入口的验收套件。需要批准的HTTPS入口、客户模型配置和受限Virtual Key。
+
+从客户秘密管理系统向进程注入`API_KEY`后，在仓库根目录运行：
+
+```bash
+python tests/test_all_deployments.py \
+  --config LiteLLM/azure-openai.loc.json \
+  --base-url "https://<approved-legacy-gateway-host>" \
+  --prompt "synthetic validation"
+```
+
+不要把Master Key放进命令行，不使用客户真实Prompt，不上传原始响应到公开日志。脚本为旧路由同时发送Bearer和`api-key`头。Chat和图像分别测试OpenAI/Azure风格路径；Sora仅检查模型注册，不证明视频生成功能正常。
+
+新认证代理只允许有限的Entra授权路径。旧网关的Azure风格路径、图像/视频、WebSocket或加密多轮测试结果不能证明新入口兼容，更不能作为绕过策略的理由；真实租户、客户必需Codex协议、私网/身份、数据库迁移、L3可靠恢复和回退须通过对应[阶段门禁](../docs/customer-migration-guide-zh.md)。
 
 ## Codex 缓存命中与会话亲和测试
+
+以下操作会调用真实Codex和模型服务；应在批准的旧基线或隔离环境中执行，模型名称使用客户实际别名，结果保留在Git之外。示例数值不是客户性能承诺。
 
 ### 前置条件
 

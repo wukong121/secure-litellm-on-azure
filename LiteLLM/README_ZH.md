@@ -1,8 +1,8 @@
-# LiteLLM on Azure Kubernetes Service (AKS)
+# LiteLLM旧网关参考与OSS集成
 
-在 AKS 群集上自动化部署 [LiteLLM](https://github.com/BerriAI/litellm)，以实现 Azure OpenAI 负载均衡、故障重试、用量统计和按用户/团队的预算控制。
+本目录保留原LiteLLM on AKS部署脚本与运维手册，作为既有客户网关的迁移基线；同时包含尚未接入部署或可靠接收器的[OSS审计回调适配器](observability/oss_audit_callback.py)。
 
-已有网关的客户应先阅读[安全增强迁移指南](../docs/customer-migration-guide-zh.md)，使用客户Environment变量与阶段workflow。下面的旧部署脚本用于原方案，不是安全增强版的原地升级入口，不能不经备份和差异审查直接重跑生产部署。
+当前客户方案入口见[项目总览](../README_ZH.md)和[安全增强迁移指南](../docs/customer-migration-guide-zh.md)，通过[Bicep](../infra/README_ZH.md)、[Kustomize](../deploy/README_ZH.md)和客户Environment配置交付。以下旧脚本不是安全增强版的原地升级入口，不得不经备份和差异审查直接重跑生产部署。旧公网入口、集群内单副本数据库与直接UI访问说明不代表新安全基线。
 
 ## 📂 结构
 
@@ -18,7 +18,9 @@
 
 *注：测试与依赖项已整合至项目根目录 (`../tests/` 与 `../requirements.txt`)。*
 
-## ⚙️ 使用说明
+## 旧网关参考用法
+
+仅用于已批准的旧环境维护或隔离参考部署。真实配置使用忽略的本地文件，旧凭据必须在重新运行前从客户秘密管理系统正确注入。
 
 部署脚本生成的 LiteLLM Deployment现在包含 startup、readiness和 liveness probes，以及保守的 `250m/1Gi` requests和 `1000m/2Gi` limits。集群内 PostgreSQL使用 `pg_isready`作为三类探针。当前两个工作负载均为单副本，应用这些 Pod模板变更会触发滚动重启，必须在维护窗口内逐个更新和验证。
 
@@ -45,11 +47,11 @@ if (-not (Test-Path .\azure-openai.loc.json)) {
 
 编辑 `azure-openai.loc.json`，填写实际的区域、资源组、Azure OpenAI 资源和模型 deployment。脚本默认优先读取该文件；不存在时才读取模板 `azure-openai.json`，因此不需要在两者之间手工复制更新。
 
-脚本会在 `azure-openai.loc.json` 的 `apim_resource_group` 中创建或复用 Resource Group、Managed Identity 和 AKS。LiteLLM 方案中该字段是历史命名，实际表示 AKS/Managed Identity 所在的资源组，并不是 APIM 资源组。脚本还会根据 `azure-openai-list[].subscription_id`，为跨订阅 Azure OpenAI Resource 分配 Managed Identity 权限。
+新配置使用`resource_group`指定创建或复用Resource Group、Managed Identity和AKS的资源组。旧`apim_resource_group`仅作为向后兼容输入保留；新旧字段同时存在且不同会在部署前拒绝。模板已移除不使用的`apim_name`。脚本还会根据`azure-openai-list[].subscription_id`为跨订阅Azure OpenAI资源分配Managed Identity权限。
 
 ### 2. 设置部署环境变量
 
-以下是绑定域名并启用 HTTPS 的推荐生产配置。`LETSENCRYPT_EMAIL` 是 Let's Encrypt 的 ACME 账户和证书通知邮箱，不是自签名证书邮箱。
+以下仅为旧网关绑定域名和HTTPS的参考设置，不是安全增强版的推荐生产部署入口。`LETSENCRYPT_EMAIL`是Let's Encrypt的ACME账户和证书通知邮箱。
 
 ```powershell
 # Azure 和 AKS

@@ -1,8 +1,8 @@
-# LiteLLM on Azure Kubernetes Service (AKS)
+# LiteLLM Legacy Gateway Reference and OSS Integration
 
-Deploy [LiteLLM](https://github.com/BerriAI/litellm) on AKS to load-balance Azure OpenAI deployments, retry transient failures, track spend, and manage per-user or per-team budgets.
+This directory preserves the original LiteLLM on AKS deployment and operational runbooks as a migration baseline. It also contains the opt-in [OSS audit callback adapter](observability/oss_audit_callback.py), which is not yet wired into deployment or a durable audit receiver.
 
-Existing gateway customers should use the [staged hardening migration guide](../docs/customer-migration-guide-zh.md) and customer-owned Environment configuration. The legacy deployment script below is not an in-place security upgrade command; retain a verified backup and rollback path.
+For the current customer solution, start with the [project overview](../README.md) and [staged migration guide](../docs/customer-migration-guide-zh.md). The target platform uses [Bicep](../infra/README_ZH.md), [Kustomize](../deploy/README_ZH.md) and customer Environment configuration. The legacy script below is not an in-place security upgrade command; retain a verified backup and rollback path. Its public ingress, single in-cluster database and direct UI instructions do not describe the new security baseline.
 
 ## Structure
 
@@ -15,7 +15,9 @@ Existing gateway customers should use the [staged hardening migration guide](../
 
 *Tests and dependencies are located at the project root (`../tests/` and `../requirements.txt`).*
 
-## Usage
+## Legacy Deployment Usage
+
+Use only in an approved legacy maintenance or isolated reference environment. Populate an ignored local copy of [azure-openai.json](azure-openai.json) first; the committed file contains placeholders. Preserve existing credentials before any rerun.
 
 ```powershell
 # 1. Install dependencies from the project root
@@ -29,9 +31,9 @@ $env:AZURE_SUBSCRIPTION_ID = "<AKS-subscription-id>"
 # 3. Optionally override the default LiteLLM 1.95.0 image
 $env:LITELLM_IMAGE = "<acr-name>.azurecr.io/litellm:1.95.0"
 
-# 4. Deploy from the LiteLLM directory
+# 4. Use the reviewed local legacy configuration
 cd .\LiteLLM
-python .\deploy_mi_aks_litellm.py
+python .\deploy_mi_aks_litellm.py .\azure-openai.loc.json
 ```
 
 The default image is `docker.litellm.ai/berriai/litellm:1.95.0`. It has been verified with API-key-authenticated HTTPS (HTTP 200) and a Responses WebSocket upgrade (HTTP 101). When migrating from `micl/litellm:mi-fix-image-gen`, separately regression-test Managed Identity authentication for Azure image generation because the legacy image contained a custom Bearer-token patch for that path.
@@ -40,14 +42,14 @@ The generated LiteLLM Deployment includes startup, readiness, and liveness probe
 
 When the deployment script updates `litellm-env`, it preserves an existing `LITELLM_SALT_KEY` but does not retain arbitrary unmanaged keys. This prevents a future permanent Salt from being silently removed without allowing stale Secret fields to accumulate. It does not make Salt migration safe by itself: existing encrypted database objects must still pass isolated compatibility and Master Key decoupling tests before production sets the Salt.
 
-The script creates or reuses the Resource Group, Managed Identity, and AKS cluster named by the configuration. In the LiteLLM configuration, `apim_resource_group` is a legacy field name: it means the AKS/Managed Identity Resource Group, not an APIM Resource Group.
+The script creates or reuses the Resource Group, Managed Identity and AKS cluster named by the configuration. New configurations use `resource_group` for the AKS/identity resource group. Existing `apim_resource_group` values remain readable for backward compatibility only; conflicting old/new values are rejected before deployment. The obsolete `apim_name` field is no longer included in the template or needed by this script.
 
 The default AKS settings are:
 
 ```text
-Region: eastus2
+Region: supplied by the customer configuration
 Nodes: 1
-VM size: Standard_B2s
+VM size: Standard_D2s_v3
 ```
 
 Override the VM size when needed:
@@ -92,17 +94,16 @@ Changing `PG_STORAGE` does not resize an existing claim unless `EXPAND_EXISTING_
 
 ## Testing
 
-The actual unified test file is `../tests/test_all_deployments.py`:
+The [legacy gateway smoke test](../tests/test_all_deployments.py) makes live model requests. Inject a restricted Virtual Key as `API_KEY` through the customer secret manager, use synthetic inputs and an approved endpoint; do not pass a Master Key on the command line:
 
 ```powershell
 python ..\tests\test_all_deployments.py `
-  --config .\azure-openai.json `
-  --base-url "http://<AKS LoadBalancer IP>:4000" `
-  --api-key "<LiteLLM Virtual Key>" `
+  --config .\azure-openai.loc.json `
+  --base-url "https://<approved-legacy-gateway-host>" `
   --prompt ok
 ```
 
-The test validates both OpenAI-style and Azure OpenAI-style Chat routes. On Windows consoles using `cp1252`, pass an ASCII prompt to avoid an encoding error before the first request.
+The test exercises OpenAI-style and Azure-style legacy routes, not the new Entra proxy's authorization contract. See the [test guide](../tests/README.md). On Windows consoles using `cp1252`, pass an ASCII prompt to avoid an encoding error before the first request.
 
 ## Notes
 

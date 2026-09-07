@@ -23,7 +23,8 @@ trap 'rm -rf "$output_dir"' EXIT
 echo "[1/6] Python unit tests"
 "$python_bin" -m unittest \
   tests.test_litellm_subscription \
-  tests.test_config_templates
+  tests.test_config_templates \
+  tests.test_project_docs
 
 echo "[2/6] Bicep templates"
 while IFS= read -r file; do

@@ -150,7 +150,15 @@ def load_config(config_path: str) -> dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    required_fields = ["region", "apim_resource_group", "azure-openai-list", "deployment_list"]
+    legacy_resource_group = cfg.pop("apim_resource_group", None)
+    resource_group = cfg.get("resource_group", legacy_resource_group)
+    if not isinstance(resource_group, str) or not resource_group.strip():
+        raise ValueError("Config must include non-empty 'resource_group'")
+    if legacy_resource_group is not None and legacy_resource_group != resource_group:
+        raise ValueError("Conflicting 'resource_group' and legacy resource group fields")
+    cfg["resource_group"] = resource_group
+
+    required_fields = ["region", "resource_group", "azure-openai-list", "deployment_list"]
     for field in required_fields:
         if field not in cfg or not cfg[field]:
             raise ValueError(f"Config must include non-empty '{field}'")
@@ -1112,7 +1120,7 @@ def main():
     # Load configuration
     cfg = load_config(args.config)
     region = cfg["region"]
-    rg_name = cfg["apim_resource_group"]
+    rg_name = cfg["resource_group"]
     mi_name = cfg.get("managed_identity") or DEFAULT_CONFIG["mi_name"]
 
     # Merge with defaults

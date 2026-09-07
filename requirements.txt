@@ -1,5 +1,5 @@
 # =============================================================================
-# Break AOAI Quota - Project Dependencies
+# Security-Enhanced LiteLLM on Azure - Project Dependencies
 # =============================================================================
 
 # Utilities & Testing
@@ -15,7 +15,6 @@ azure-mgmt-msi>=7.0.0
 azure-mgmt-authorization>=4.0.0
 
 # Azure SDK for Python - Specific Services
-azure-mgmt-apimanagement
 azure-mgmt-cognitiveservices>=13.5.0
 azure-mgmt-containerservice>=29.0.0
 azure-mgmt-compute>=30.0.0

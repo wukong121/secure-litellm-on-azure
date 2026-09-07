@@ -12,7 +12,7 @@
 
 | 资源 | 脚本行为 | 删除注意事项 |
 |---|---|---|
-| `apim_resource_group` 指定的 Resource Group | 创建或复用 | 只有专用且不含其他资源时才能整组删除 |
+| `resource_group` 指定的 Resource Group | 创建或复用 | 只有专用且不含其他资源时才能整组删除 |
 | User Assigned Managed Identity | 创建或复用 | 删除前先保存 Principal ID、清理 RBAC；共享身份不能删除 |
 | AKS Cluster | 创建或复用 | 删除 AKS 会同时删除 AKS 托管的节点 Resource Group |
 | AKS 节点 VMSS | 把 UAMI 附加到 VMSS | 保留 AKS 时必须先从所有 VMSS 移除该身份 |
@@ -87,7 +87,11 @@ $configPath = ".\LiteLLM\azure-openai.loc.json"
 $config = Get-Content $configPath -Raw | ConvertFrom-Json
 
 $subscriptionId = "<AKS 所在订阅 ID>"
-$resourceGroup = $config.apim_resource_group
+if ($config.resource_group -and $config.apim_resource_group -and $config.resource_group -ne $config.apim_resource_group) {
+  throw "Conflicting resource group fields; verify the deployment inventory first."
+}
+$resourceGroup = if ($config.resource_group) { $config.resource_group } else { $config.apim_resource_group }
+if (-not $resourceGroup) { throw "Customer resource_group is required." }
 $aksName = "litellm-mi-aks"
 $identityName = if ($config.managed_identity) {
   $config.managed_identity

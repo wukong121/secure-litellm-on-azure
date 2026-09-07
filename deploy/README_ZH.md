@@ -1,5 +1,7 @@
 # LiteLLM Kustomize 应用层
 
+本目录是[安全增强客户方案](../README_ZH.md)的Kubernetes组件，不是旧部署脚本的替代执行命令。请按[客户迁移指南](../docs/customer-migration-guide-zh.md)完成前置基础设施、客户配置与阶段验收，再生成专用overlay；验证目录不等于可直接上线的部署清单。
+
 ## Stage 9边缘入口准备
 
 `components/stage9-edge`在API ingress中只保留6个推理Exact路径及私有`/readyz`，API代理增加`FRONT_DOOR_ID`补充检查；admin保持独立私有ingress。`validation/stage9`组合前序组件，未加入环境overlay。运行`make validate-stage9`和域名生成器`--stage 9`验证；占位ID、镜像与IngressClass必须经批准替换。
@@ -110,7 +112,7 @@ ServiceAccount Client ID保持占位符，必须由受保护的Bicep部署输出
 
 ## Stage 7双子域与认证代理
 
-`components/stage7-identity`与`validation/stage7`保留`llm-api.example.com`、`llm-admin.example.com`通用模板。主域通过环境参数`baseDomain`配置：当前验证域存于忽略的`auth-proxy/domain.local.json`，客户独立提供自己的值。运行`./.venv/bin/python scripts/render_stage7_domain.py`生成忽略的`temp/stage7-domain`预览overlay；它同步更新代理Host、Ingress/TLS与OIDC回调，不部署资源，其他占位符仍需补齐。两个入口对应独立Deployment、ServiceAccount、CSI挂载和NetworkPolicy，后端只允许代理访问，不再允许ingress直达。
+`components/stage7-identity`与`validation/stage7`保留`llm-api.example.com`、`llm-admin.example.com`通用模板。客户workflow从`CUSTOMER_CONFIG_JSON`的`baseDomain`生成域名；本地单独预览可运行`./.venv/bin/python scripts/render_stage7_domain.py --base-domain <客户域名>`。生成内容只写忽略的`temp/`，同步代理Host、Ingress/TLS与OIDC回调，不部署资源，身份和镜像等占位符仍需补齐。两个入口对应独立Deployment、ServiceAccount、CSI挂载和NetworkPolicy，后端只允许代理访问，不再允许ingress直达。
 
 源码和配置契约见`auth-proxy/README_ZH.md`；Node 24，首次执行`npm ci --prefix auth-proxy --ignore-scripts`，再运行`make validate-stage7`。尚未加入任何环境overlay。
 

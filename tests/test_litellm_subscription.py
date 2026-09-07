@@ -1,7 +1,8 @@
+import json
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, mock_open
 from unittest.mock import patch
 
 import yaml
@@ -13,8 +14,32 @@ from LiteLLM.deploy_mi_aks_litellm import (
     build_postgres_deployment,
     generate_litellm_config,
     get_subscription_id,
+    load_config,
     parse_affinity_checks,
 )
+
+
+class LegacyConfigCompatibilityTests(unittest.TestCase):
+    def load(self, fields):
+        config = {"region": "westus", "azure-openai-list": [{"name": "synthetic"}], "deployment_list": [{"model": "synthetic"}], **fields}
+        with patch("builtins.open", mock_open(read_data=json.dumps(config))):
+            return load_config("synthetic.json")
+
+    def test_new_and_legacy_resource_group_fields_are_normalized(self):
+        for fields in ({"resource_group": "rg-synthetic"}, {"apim_resource_group": "rg-synthetic"}, {"resource_group": "rg-synthetic", "apim_resource_group": "rg-synthetic"}):
+            with self.subTest(fields=fields):
+                config = self.load(fields)
+                self.assertEqual(config["resource_group"], "rg-synthetic")
+                self.assertNotIn("apim_resource_group", config)
+
+    def test_conflicting_resource_groups_fail_before_deployment(self):
+        with self.assertRaisesRegex(ValueError, "Conflicting"):
+            self.load({"resource_group": "rg-new", "apim_resource_group": "rg-old"})
+
+    def test_missing_or_invalid_resource_group_is_rejected(self):
+        for fields in ({}, {"resource_group": " "}, {"resource_group": None}, {"resource_group": 42}, {"resource_group": "", "apim_resource_group": "rg-old"}):
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, "resource_group"):
+                self.load(fields)
 
 
 class SubscriptionSelectionTests(unittest.TestCase):

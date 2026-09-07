@@ -1,84 +1,94 @@
-# Azure OpenAI 负载均衡与配额突破方案
+# 安全增强版 LiteLLM on Azure
 
-本项目提供了一个完整的解决方案，用于突破单一 Azure 订阅中 Azure OpenAI 服务的配额限制。通过实现具备负载均衡功能的反向代理，将请求分发到多个 Azure OpenAI 资源上，并能够稳健地处理 **429 (Too Many Requests)**、**500** 和 **503** 等常见错误。
+[English](README.md) | [客户迁移指南](docs/customer-migration-guide-zh.md)
 
-## 已有LiteLLM的安全增强迁移
+面向客户交付的 Azure 上 [LiteLLM](https://github.com/BerriAI/litellm) 网关部署与迁移项目。方案将 Azure 基础设施即代码、Kubernetes 部署组件、客户自有 Microsoft Entra 认证、审计治理与分阶段交付流程整合在同一仓库。
 
-面向客户的分阶段入口见[客户迁移指南](docs/customer-migration-guide-zh.md)：使用GitHub Environment variables/secrets配置客户环境，通过 **Customer staged migration** 引导阶段0至9的准备、预检、What-if和人工受控替换。安全增强路线不使用APIM或LiteLLM Enterprise；不是旧部署脚本的一键原地升级。尚未完成的集成会阻断上线，旧环境保留用于回退。
+适用于客户的平台、安全和运维团队，重点支持从已有 LiteLLM 网关迁移到新的安全增强环境。模型路由可以在已授权的多个 Azure OpenAI 资源之间分配负载，但仍受各资源配额约束，不绕过 Azure 服务限额。
 
-## 🌟 核心特性
+> **交付状态**：已提供阶段指导、配置预检、只读 Azure 预览及离线测试；生产集成和客户验收尚未全部完成。这不是一键原地升级工具，未完成项仍是上线阻断条件。
 
-- **突破配额**: 聚合多个 Azure OpenAI 资源/订阅的吞吐量，突破单实例瓶颈。
-- **自动容错**: 针对 429、500和503 错误提供零延迟的自动重试、切换路由逻辑。
-- **模型路由兼容**: 深度适配普通 Chat 请求、DALL-E 图像端点，并对 Sora 等特定模型的非标准路径规则进行精准处理。
-- **协议兼容**: 同时原生支持 Azure OpenAI 格式 API、OpenAI 兼容格式 API 以及最新的低延迟 Response API 路由。
-- **多部署选项**:
-  1. **Azure API Management (APIM)**: 全托管、云原生的 Azure 解决方案。
-  2. **LiteLLM on AKS**: 高性价比的开源代理方案。
+## 目标架构
 
-## 📂 项目结构
+```text
+API客户端 -> llm-api.<客户域名> -> Front Door / WAF -> 私有API入口
+                                                     -> Entra API认证代理
+管理员 -> 私网 llm-admin.<客户域名> -> Entra管理代理
+                                                  |
+                                       Private AKS上的LiteLLM
+                                                  |
+                                      Azure OpenAI / Foundry
 
-- **`requirements.txt`**: 根目录统一项目的依赖文件。
-- **`tests/`**: 统一的端到端（E2E）测试框架文件夹。
-
-### 1. Azure API Management (APIM)
-位于 [`APIM/`](./APIM/) 目录。该方案使用 Azure 原生 API Management 服务智能管理流量。
-
-### 2. LiteLLM on AKS
-位于 [`LiteLLM/`](./LiteLLM/) 目录。该方案将开源 OpenAI 代理库部署在 AKS 上。
-
-## 💰 成本分析 (估算)
-
-以下是两种方案的月预估成本分析。价格基于 **East US 2** 区域（2026年参考价），实际费用可能随区域和使用量波动。
-
-### 方案 1: Azure API Management (Standard v2)
-
-部署脚本中默认使用了 APIM 的 **Standard v2** SKU，该 SKU 适用于流量较大的生产级负载（约 $700/月）。
-
-| 资源项 | SKU | 单价 (估算) | 用量 | 月费用 |
-| :--- | :--- | :--- | :--- | :--- |
-| **API Management** | Standard v2 | ~$0.96 / 小时 | 730 小时 | **~$700.00** |
-| **流量数据** | - | 极低 | - | (包含 50M API 请求/月) |
-| **合计** | | | | **~$700.00 / 月** |
-
-*注意：**Standard v2** 提供了 5000 万次/月的 API 请求配额。如果是小规模生产环境，您可以考虑修改部署脚本，将 SKU 改为 **Basic v2** (约 $150/月，包含 1000 万次请求/月)，以大幅降低成本。*
-
-### 方案 2: LiteLLM on AKS
-
-LiteLLM 方案部署了一个轻量级 AKS 集群。参数均在 `LiteLLM/deploy_mi_aks_litellm.py` 定义。
-*   **VM 规格**: `Standard_B2s` (2 vCPU, 4GB RAM)
-*   **节点数**: 1
-
-| 资源项 | 规格 / SKU | 单价 (估算) | 月费用 |
-| :--- | :--- | :--- | :--- |
-| **AKS 集群管理** | 标准层 (SLA) | ~$0.10 / 小时 | ~$73.00 |
-| **虚拟机** | Standard_B2s | ~$0.023 / 小时 | ~$17.00 |
-| **托管磁盘** | Standard SSD (128GB) | ~$0.06 / GB | ~$8.00 |
-| **负载均衡器** | Standard Load Balancer | ~$0.025 / 小时 | ~$18.00 |
-| **公网 IP** | Standard Public IP | ~$0.005 / 小时 | ~$3.65 |
-| **合计** | | | **~$119.65 / 月** |
-
-### 总结
-
-- **最具性价比**：**LiteLLM on AKS** (~$120/月) 适合中小型规模或对成本敏感的场景。
-- **最省心维护**：**APIM** (~$700/月) 适合企业级生产环境，尤其是需要零服务器运维的场景。
-
----
-
-*免责声明：以上价格仅供参考，不作为最终计费依据。最新定价请访问 [Azure 定价计算器](https://azure.microsoft.com/zh-cn/pricing/calculator/)。*
-
-## ⚙️ 快速上手
-
-**1. 安装全局依赖:**
-```bash
-pip install -r requirements.txt
+配套服务：Key Vault、PostgreSQL Flexible Server、Managed Redis、
+私有ACR、Azure Monitor和独立L3审计存储。
 ```
 
-**2. 查阅模块部署指南:**
-- 分别进入 `APIM/` 或 `LiteLLM/` 目录执行自动化搭建。
+| 领域 | 设计与实现范围 |
+| --- | --- |
+| 网络隔离 | Private AKS、Private Endpoint/DNS、受控出口和默认拒绝网络策略 |
+| 身份授权 | Entra认证、API/admin分离、Workload Identity及客户自有授权逻辑 |
+| 数据与秘密 | Key Vault/CSI、托管PostgreSQL和Redis模板、备份与恢复控制 |
+| 运行基线 | 固定镜像digest、非Root/只读容器、高可用及路由组件 |
+| 审计与观测 | Trace关联、L3采集/查询/留存代码、OSS回调、输入Content Safety及检测模板 |
+| 客户交付 | Environment配置、OIDC、阶段证据门禁、IaC预览及离线验证 |
 
-**3. 执行全局验证测试:**
-- 当部署完成后，使用 `tests/test_all_deployments.py` 执行验证脚本。
-## LiteLLM 部署补充
+以上描述目标能力，不表示全部组件已部署或生产就绪。方案仅使用Azure服务、OSS和客户自有代码，不依赖LiteLLM Enterprise；原APIM部署实现已移除。
 
-LiteLLM 部署前请先执行 `az login`，并通过环境变量 `AZURE_SUBSCRIPTION_ID` 指定创建 AKS、Managed Identity 和资源组所使用的订阅。LiteLLM 的用户预算、Team、Virtual Key 和模型权限配置见 [`LiteLLM/USER_BUDGET_AND_MODEL_ACCESS_ZH.md`](./LiteLLM/USER_BUDGET_AND_MODEL_ACCESS_ZH.md)。
+## 客户从这里开始
+
+1. 阅读[客户迁移指南](docs/customer-migration-guide-zh.md)，确认前置准备、责任人、阶段操作、验收证据和回退方案。
+2. 在客户仓库创建受保护的GitHub Environments：`dev`、`test`、`prod`，并建立Environment范围的Azure OIDC身份。
+3. 按[客户配置模板](config/customer.example.json)填写`CUSTOMER_CONFIG_JSON` Environment variable，配置`AZURE_CLIENT_ID`、`AZURE_TENANT_ID`、`AZURE_SUBSCRIPTION_ID`；阶段证据放入`MIGRATION_EVIDENCE_JSON` Environment secret。
+4. 打开 **Customer staged migration** workflow，先选择阶段`0`、模式`guide`、组件`none`，再逐步执行`preflight`和获准的`what-if`。
+5. 在旧网关旁建设并验证新环境。实际部署、数据库迁移、切流和退役分别经过客户审批。
+
+workflow不会自动部署资源、修改DNS或删除旧环境。Master Key、Salt、数据库凭据、OIDC秘密应保存在客户Key Vault，不写入仓库或非秘密配置JSON。API/admin域名由客户自己的`baseDomain`生成。
+
+## 迁移阶段
+
+| 阶段 | 客户里程碑 |
+| --- | --- |
+| 0-2 | 现状盘点、可恢复备份、旧环境最小加固和架构决策 |
+| 3-5 | 供应链、隔离目标基础设施、私网与数据迁移演练 |
+| 6-8 | HA/路由、Entra与双域名、协议授权、L3审计与观测 |
+| 9 | 批准试点、切流及验证回退窗口；资源退役另立变更 |
+
+回退条件满足前保留旧数据库、网关、身份和Master/Salt路径。禁止将候选版本直接连接旧生产数据库执行自动schema migration。
+
+## 仓库导航
+
+| 路径 | 用途 |
+| --- | --- |
+| [config](config/customer.example.json) | 通用客户配置与证据示例，不含真实客户值 |
+| [.github](.github/README_ZH.md) | 验证、分阶段迁移和镜像晋级workflow |
+| [infra](infra/README_ZH.md) | Bicep平台、备份、监控、审计与边缘入口模板 |
+| [deploy](deploy/README_ZH.md) | Kustomize基础清单、阶段组件与验证overlay |
+| [auth-proxy](auth-proxy/README_ZH.md) | 客户自有Entra API/admin认证代理与审计治理代码 |
+| [LiteLLM](LiteLLM/README_ZH.md) | 旧网关参考实现、运维手册及OSS回调适配器 |
+| [tests](tests/README_ZH.md) | 离线检查、隔离运行时验证及显式执行的真实环境测试 |
+| [scripts](scripts/customer_migration.py) | 客户预检、参数生成和验证工具 |
+
+## 本地验证
+
+需要Python 3.10+、Node.js 24、Azure CLI及Bicep、kubectl和make。OSS回调测试还需要Docker。在仓库根目录运行：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+npm ci --prefix auth-proxy --ignore-scripts
+make validate-stage9
+make validate-oss-callbacks
+.venv/bin/python -m unittest tests.test_customer_migration tests.test_customer_templates tests.test_public_config
+```
+
+这些检查不部署资源或调用客户网关；依赖安装和未缓存镜像需要下载访问。真实协议、私网、Entra及Azure数据面验收需使用单独批准的环境，详见[测试说明](tests/README_ZH.md)。
+
+## 上线边界与成本
+
+- 新安全入口有明确的路由白名单。旧网关的图像、视频、WebSocket和Codex验证结果，不能替代新授权层的兼容性验收。
+- L3是首发必需能力，但当前RAM缓冲采集仍有崩溃丢失风险；OSS适配器尚未接入受信持久化接收器，回调success不证明流完整或审计可靠交付。
+- 私有入口/controller、身份/Vault接线、PostgreSQL认证/HA和监控集成等仍需完成与验收。不能将带占位符的validation overlay直接用于生产。
+
+当前边界见[代码收尾台账](docs/litellm-code-completion-backlog-2026-09-07.md)、[安全架构](docs/litellm-azure-security-hardening-zh.md)和[实施路线](docs/litellm-security-hardening-implementation-roadmap-zh.md)。历史阶段记录是参考证据，不是客户验收报告。
+
+成本请结合[安全增强版BOM](docs/litellm-bom-cost-comparison-zh.md)与[Azure定价计算器](https://azure.microsoft.com/zh-cn/pricing/calculator/)评估。区域、HA、Firewall、Private Endpoint、边缘流量、数据库容量及审计留存均影响费用，旧单节点网关报价不适用于本架构。

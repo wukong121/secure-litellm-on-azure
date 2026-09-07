@@ -17,10 +17,15 @@ PLACEHOLDER_MARKERS = ("<", "your-", "example", "placeholder")
 
 
 class AzureConfigTemplateSafetyTests(unittest.TestCase):
+    def test_litellm_template_uses_gateway_neutral_resource_group(self):
+        config = json.loads((ROOT / "LiteLLM/azure-openai.json").read_text(encoding="utf-8"))
+        self.assertIn("resource_group", config)
+        self.assertNotIn("apim_resource_group", config)
+        self.assertNotIn("apim_name", config)
+
     def test_tracked_templates_do_not_contain_real_subscription_ids_or_endpoints(self):
         for relative_path in (
             Path("LiteLLM/azure-openai.json"),
-            Path("APIM/azure-openai.json"),
         ):
             config = json.loads((ROOT / relative_path).read_text(encoding="utf-8"))
             for resource in config.get("azure-openai-list", []):

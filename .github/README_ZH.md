@@ -12,11 +12,12 @@
 
 在Pull Request和`main` push时执行：
 
-- Python单元测试；
+- Python单元测试、客户配置/证据门禁及README导航检查；
 - 所有Bicep和Bicep参数编译；
 - dev/test/prod Kustomize渲染；
 - manifest安全策略检查；
-- APIM资源声明和明显凭据扫描；
+- LiteLLM方案范围检查、个人信息和明显凭据扫描；
+- Node认证/审计测试及固定版本OSS回调矩阵；
 - Pull Request依赖审查。
 
 CI不登录Azure，不部署资源。

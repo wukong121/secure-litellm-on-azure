@@ -1,6 +1,5 @@
 {
-    "apim_name": "your-apim-name-here",
-    "apim_resource_group": "<your-aks-resource-group>",
+    "resource_group": "<your-aks-resource-group>",
     "region": "<your-azure-region>",
     "azure-openai-list": [
         {

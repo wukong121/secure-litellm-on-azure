@@ -1,4 +1,6 @@
-# Entra认证代理
+# LiteLLM客户自有Entra认证与审计代理
+
+本组件属于[安全增强版LiteLLM on Azure](../README_ZH.md)。客户部署入口为[分阶段迁移指南](../docs/customer-migration-guide-zh.md)，从受保护Environment注入配置；不能把本地合成测试通过当作生产身份、协议和审计验收。
 
 ## 阶段9回源补充检查
 
@@ -34,7 +36,7 @@ docker build -t litellm-entra-auth-proxy:stage7-check auth-proxy
 
 ## 配置契约
 
-主域名是环境参数，不在公共代码中固定为某个客户域。当前本地值在Git忽略的`auth-proxy/domain.local.json`中；执行`./.venv/bin/python scripts/render_stage7_domain.py`生成`temp/stage7-domain`，再通过`kubectl kustomize temp/stage7-domain`预览。客户可传入`--base-domain <客户主域名>`或自己的`--config`文件。
+主域名由客户Environment的`CUSTOMER_CONFIG_JSON.baseDomain`提供，不固定为某个个人或客户域。本地单独预览时运行`./.venv/bin/python scripts/render_stage7_domain.py --base-domain <客户主域名>`生成`temp/stage7-domain`，再用`kubectl kustomize temp/stage7-domain`查看。也可显式传入自己的忽略配置文件；客户workflow不依赖个人本地文件。
 
 生成器同时更新代理Host、Ingress Host/TLS及管理OIDC回调，保留其他安全配置和占位符。ConfigMap使用Kustomize内容hash，域名变化会更新Deployment引用。生成只在忽略的`temp/`子目录中进行，不修改模板、不部署；后续受控发布流程还需补齐身份、凭据、IngressClass和镜像参数。
 
