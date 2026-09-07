@@ -505,13 +505,20 @@ class KubernetesManager:
                 raise
 
     def apply_secret(self, name: str, data: dict[str, str]) -> None:
-        """Create or update a Secret."""
+        """Create or update a Secret without dropping an existing permanent Salt."""
         secret = k8s_client.V1Secret(
             metadata=k8s_client.V1ObjectMeta(name=name, namespace=self.namespace),
             string_data=data,
         )
         try:
-            self.core_v1.read_namespaced_secret(name, self.namespace)
+            existing = self.core_v1.read_namespaced_secret(name, self.namespace)
+            secret.metadata.resource_version = existing.metadata.resource_version
+            existing_data = existing.data or {}
+            secret.data = (
+                {"LITELLM_SALT_KEY": existing_data["LITELLM_SALT_KEY"]}
+                if "LITELLM_SALT_KEY" in existing_data
+                else {}
+            )
             self.core_v1.replace_namespaced_secret(name, self.namespace, secret)
         except ApiException as e:
             if e.status == 404:
@@ -774,6 +781,7 @@ def build_postgres_deployment(pg_user: str, pg_password: str, pg_db: str) -> k8s
         metadata=k8s_client.V1ObjectMeta(name="postgres"),
         spec=k8s_client.V1DeploymentSpec(
             replicas=1,
+            strategy=k8s_client.V1DeploymentStrategy(type="Recreate"),
             selector=k8s_client.V1LabelSelector(match_labels={"app": "postgres"}),
             template=k8s_client.V1PodTemplateSpec(
                 metadata=k8s_client.V1ObjectMeta(labels={"app": "postgres"}),
@@ -795,6 +803,42 @@ def build_postgres_deployment(pg_user: str, pg_password: str, pg_db: str) -> k8s
                             resources=k8s_client.V1ResourceRequirements(
                                 requests={"cpu": "100m", "memory": "128Mi"},
                                 limits={"cpu": "500m", "memory": "256Mi"},
+                            ),
+                            startup_probe=k8s_client.V1Probe(
+                                _exec=k8s_client.V1ExecAction(
+                                    command=[
+                                        "sh",
+                                        "-c",
+                                        'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"',
+                                    ]
+                                ),
+                                period_seconds=10,
+                                timeout_seconds=5,
+                                failure_threshold=30,
+                            ),
+                            readiness_probe=k8s_client.V1Probe(
+                                _exec=k8s_client.V1ExecAction(
+                                    command=[
+                                        "sh",
+                                        "-c",
+                                        'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"',
+                                    ]
+                                ),
+                                period_seconds=10,
+                                timeout_seconds=5,
+                                failure_threshold=3,
+                            ),
+                            liveness_probe=k8s_client.V1Probe(
+                                _exec=k8s_client.V1ExecAction(
+                                    command=[
+                                        "sh",
+                                        "-c",
+                                        'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"',
+                                    ]
+                                ),
+                                period_seconds=20,
+                                timeout_seconds=5,
+                                failure_threshold=6,
                             ),
                         )
                     ],
@@ -845,10 +889,44 @@ def build_litellm_deployment(
                         k8s_client.V1Container(
                             name="litellm",
                             image=image,
-                            image_pull_policy="Always",
+                            image_pull_policy="IfNotPresent",
                             command=["litellm"],
                             args=["--config", "/app/config/config.yaml", "--port", "4000"],
                             ports=[k8s_client.V1ContainerPort(container_port=4000)],
+                            resources=k8s_client.V1ResourceRequirements(
+                                requests={"cpu": "250m", "memory": "1Gi"},
+                                limits={"cpu": "1000m", "memory": "2Gi"},
+                            ),
+                            startup_probe=k8s_client.V1Probe(
+                                http_get=k8s_client.V1HTTPGetAction(
+                                    path="/health/liveliness",
+                                    port=4000,
+                                    scheme="HTTP",
+                                ),
+                                period_seconds=10,
+                                timeout_seconds=5,
+                                failure_threshold=30,
+                            ),
+                            readiness_probe=k8s_client.V1Probe(
+                                http_get=k8s_client.V1HTTPGetAction(
+                                    path="/health/readiness",
+                                    port=4000,
+                                    scheme="HTTP",
+                                ),
+                                period_seconds=10,
+                                timeout_seconds=5,
+                                failure_threshold=3,
+                            ),
+                            liveness_probe=k8s_client.V1Probe(
+                                http_get=k8s_client.V1HTTPGetAction(
+                                    path="/health/liveliness",
+                                    port=4000,
+                                    scheme="HTTP",
+                                ),
+                                period_seconds=20,
+                                timeout_seconds=5,
+                                failure_threshold=6,
+                            ),
                             env_from=[
                                 k8s_client.V1EnvFromSource(secret_ref=k8s_client.V1SecretEnvSource(name="litellm-env"))
                             ],

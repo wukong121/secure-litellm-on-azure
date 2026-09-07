@@ -1,0 +1,115 @@
+name: Customer staged migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Protected customer environment
+        required: true
+        type: choice
+        options: [dev, test, prod]
+      stage:
+        description: Migration stage (0 baseline through 9 approved cutover)
+        required: true
+        type: choice
+        options: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+      mode:
+        description: Guide, local readiness checks, or read-only Azure preview
+        required: true
+        type: choice
+        options: [guide, preflight, what-if]
+      component:
+        description: IaC component (none for guidance or application-stage readiness)
+        required: true
+        type: choice
+        options: [none, backup, monitoring, platform, audit, origin, edge]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: customer-migration-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out reviewed revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Install configuration parser
+        run: python -m pip install PyYAML==6.0.3
+      - name: Show prerequisites or verify customer readiness
+        env:
+          CUSTOMER_CONFIG_JSON: ${{ vars.CUSTOMER_CONFIG_JSON }}
+          MIGRATION_EVIDENCE_JSON: ${{ secrets.MIGRATION_EVIDENCE_JSON }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          MIGRATION_STAGE: ${{ inputs.stage }}
+          MIGRATION_MODE: ${{ inputs.mode == 'guide' && 'guide' || 'preflight' }}
+          MIGRATION_COMPONENT: ${{ inputs.component }}
+          CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
+        run: >-
+          python -m scripts.customer_migration --stage "$MIGRATION_STAGE"
+          --mode "$MIGRATION_MODE" --component "$MIGRATION_COMPONENT"
+          --environment "$CUSTOMER_ENVIRONMENT"
+      - name: Record non-sensitive next steps
+        run: |
+          printf '%s\n' 'See docs/customer-migration-guide-zh.md for stage prerequisites and exit checks.' >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' 'Readiness is not deployment approval. No configuration, raw plan, backup or secret is uploaded as an artifact.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove generated customer files
+        if: always()
+        run: rm -rf -- temp/customer-migration
+
+  preview:
+    if: inputs.mode == 'what-if'
+    needs: prepare
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out reviewed revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Install configuration parser
+        run: python -m pip install PyYAML==6.0.3
+      - name: Sign in with environment-scoped OIDC
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Ensure Bicep CLI
+        run: az bicep install
+      - name: Recheck evidence and preview without deployment
+        env:
+          CUSTOMER_CONFIG_JSON: ${{ vars.CUSTOMER_CONFIG_JSON }}
+          MIGRATION_EVIDENCE_JSON: ${{ secrets.MIGRATION_EVIDENCE_JSON }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          MIGRATION_STAGE: ${{ inputs.stage }}
+          MIGRATION_COMPONENT: ${{ inputs.component }}
+          CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
+        run: >-
+          python -m scripts.customer_migration --stage "$MIGRATION_STAGE"
+          --mode what-if --component "$MIGRATION_COMPONENT"
+          --environment "$CUSTOMER_ENVIRONMENT"
+      - name: Remove private plan and parameters
+        if: always()
+        run: rm -rf -- temp/customer-migration

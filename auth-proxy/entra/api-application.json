@@ -1,0 +1,26 @@
+{
+  "displayName": "llm-api",
+  "signInAudience": "AzureADMyOrg",
+  "api": {
+    "requestedAccessTokenVersion": 2,
+    "oauth2PermissionScopes": [{
+      "id": "81800000-0000-4000-8000-000000000001",
+      "value": "llm.invoke",
+      "type": "Admin",
+      "isEnabled": true,
+      "adminConsentDisplayName": "Invoke approved LLM deployments",
+      "adminConsentDescription": "Invoke models authorized by the gateway identity mapping."
+    }]
+  },
+  "appRoles": [{
+    "id": "81800000-0000-4000-8000-000000000002",
+    "value": "Llm.Invoke",
+    "displayName": "LLM application invocation",
+    "description": "Application invocation, subject to an explicit gateway identity mapping.",
+    "allowedMemberTypes": ["Application"],
+    "isEnabled": true
+  }],
+  "optionalClaims": {
+    "accessToken": [{"name": "idtyp", "essential": false}]
+  }
+}

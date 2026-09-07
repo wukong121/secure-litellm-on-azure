@@ -2,10 +2,12 @@
 
 在 AKS 群集上自动化部署 [LiteLLM](https://github.com/BerriAI/litellm)，以实现 Azure OpenAI 负载均衡、故障重试、用量统计和按用户/团队的预算控制。
 
+已有网关的客户应先阅读[安全增强迁移指南](../docs/customer-migration-guide-zh.md)，使用客户Environment变量与阶段workflow。下面的旧部署脚本用于原方案，不是安全增强版的原地升级入口，不能不经备份和差异审查直接重跑生产部署。
+
 ## 📂 结构
 
 - `deploy_mi_aks_litellm.py`: AKS、Managed Identity、PostgreSQL 和 LiteLLM Proxy 部署脚本。
-- `azure-openai.json`: 可提交到仓库的 Azure OpenAI 配置模板。
+- `azure-openai.json`: 只能保存可提交的占位模板，禁止填写真实订阅 ID、资源名或 Endpoint。
 - `azure-openai.loc.json`: 本机实际部署配置（已被 `.gitignore` 忽略，不要提交）。
 - `USER_BUDGET_AND_MODEL_ACCESS_ZH.md`: 用户、Team、Virtual Key、预算和模型权限配置指南。
 - FOUNDRY_MODEL_SYNC_ZH.md: Foundry 新增模型 deployment 后同步到 LiteLLM 的操作指南。
@@ -17,6 +19,10 @@
 *注：测试与依赖项已整合至项目根目录 (`../tests/` 与 `../requirements.txt`)。*
 
 ## ⚙️ 使用说明
+
+部署脚本生成的 LiteLLM Deployment现在包含 startup、readiness和 liveness probes，以及保守的 `250m/1Gi` requests和 `1000m/2Gi` limits。集群内 PostgreSQL使用 `pg_isready`作为三类探针。当前两个工作负载均为单副本，应用这些 Pod模板变更会触发滚动重启，必须在维护窗口内逐个更新和验证。
+
+部署脚本更新 `litellm-env` 时仅保留既有 `LITELLM_SALT_KEY`，避免永久 Salt被整份 Secret替换时静默删除，同时不会累积未知或过期键。该保护不代表可以直接进行 Salt迁移：生产设置 Salt前仍必须在隔离数据库中验证旧密文兼容性和 Master Key解耦。
 
 ### 1. 准备本地配置
 

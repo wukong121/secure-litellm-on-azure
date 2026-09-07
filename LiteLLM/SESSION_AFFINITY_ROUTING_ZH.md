@@ -177,7 +177,7 @@ kubectl rollout status deployment/litellm-mi-proxy -n litellm --timeout=10m
 ```toml
 [model_providers.litellm]
 name = "LiteLLM"
-base_url = "https://litellm.wangpeter.asia/v1"
+base_url = "https://litellm.example.com/v1"
 env_key = "LITELLM_API_KEY"
 wire_api = "responses"
 supports_websockets = true
@@ -297,4 +297,4 @@ Codex 本地 `thread_id` 不一定原样写入 LiteLLM Spend Logs 的 `session_i
 Remove-Item Env:LITELLM_API_KEY
 ```
 
-本环境实测结果：两轮请求均命中 `wangpeter-3454-agent-resource` 的相同 `model_id`，第二轮 `cached_input_tokens=15347`。
+本环境实测结果：两轮请求均命中 `example-agent-resource` 的相同 `model_id`，第二轮 `cached_input_tokens=15347`。

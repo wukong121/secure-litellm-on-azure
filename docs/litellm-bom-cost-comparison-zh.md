@@ -215,7 +215,7 @@
 
 ## 8. 不在本估算中的费用
 
-- LiteLLM Enterprise许可证或第三方 Guardrail/观测产品许可；
+- 客户自有Entra认证代理的开发运维成本，以及经批准的Azure AI Guardrail/观测服务成本；本方案不包含LiteLLM Enterprise许可证；
 - Microsoft Entra ID P1/P2、Conditional Access、PIM、Purview等用户/租户许可；
 - Azure支持计划、税费、EA/MCA折扣、Azure Hybrid Benefit；
 - 域名、公共证书或客户自有 PKI；

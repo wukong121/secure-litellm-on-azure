@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-api-proxy
+spec:
+  template:
+    spec:
+      containers:
+        - name: auth-proxy
+          env:
+            - name: STAGE8_CONFIG
+              value: /etc/stage8/config.json
+          resources:
+            requests: {memory: 256Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - name: stage8
+              mountPath: /etc/stage8
+              readOnly: true
+      volumes:
+        - name: stage8
+          configMap: {name: stage8-config}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-admin-proxy
+spec:
+  template:
+    spec:
+      containers:
+        - name: auth-proxy
+          env:
+            - name: STAGE8_CONFIG
+              value: /etc/stage8/config.json
+          volumeMounts:
+            - name: stage8
+              mountPath: /etc/stage8
+              readOnly: true
+            - name: approvals
+              mountPath: /etc/audit-approvals
+              readOnly: true
+      volumes:
+        - name: stage8
+          configMap: {name: stage8-config}
+        - name: approvals
+          configMap: {name: audit-approvals}

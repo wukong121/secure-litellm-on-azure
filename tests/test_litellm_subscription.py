@@ -10,6 +10,7 @@ from LiteLLM.deploy_mi_aks_litellm import (
     AzureResourceManager,
     KubernetesManager,
     build_litellm_deployment,
+    build_postgres_deployment,
     generate_litellm_config,
     get_subscription_id,
     parse_affinity_checks,
@@ -25,6 +26,10 @@ class SubscriptionSelectionTests(unittest.TestCase):
 
     def test_falls_back_to_active_azure_cli_subscription(self):
         with patch.dict(os.environ, {}, clear=True), \
+             patch(
+                 "LiteLLM.deploy_mi_aks_litellm._resolve_tool",
+                 return_value="az",
+             ), \
              patch(
                  "LiteLLM.deploy_mi_aks_litellm.subprocess.check_output",
                  return_value="cli-sub\n",
@@ -110,6 +115,55 @@ class SubscriptionSelectionTests(unittest.TestCase):
             first.spec.template.metadata.annotations["litellm.config-hash"],
             second.spec.template.metadata.annotations["litellm.config-hash"],
         )
+
+    def test_litellm_deployment_has_stage1_resources_and_probes(self):
+        deployment = build_litellm_deployment(
+            "litellm@test", "config-hash", "secret-hash"
+        )
+        container = deployment.spec.template.spec.containers[0]
+
+        self.assertEqual(container.resources.requests["cpu"], "250m")
+        self.assertEqual(container.resources.requests["memory"], "1Gi")
+        self.assertEqual(container.resources.limits["cpu"], "1000m")
+        self.assertEqual(container.resources.limits["memory"], "2Gi")
+        self.assertEqual(container.image_pull_policy, "IfNotPresent")
+        self.assertEqual(container.startup_probe.http_get.path, "/health/liveliness")
+        self.assertEqual(container.readiness_probe.http_get.path, "/health/readiness")
+        self.assertEqual(container.liveness_probe.http_get.path, "/health/liveliness")
+
+    def test_postgres_deployment_has_pg_isready_probes(self):
+        deployment = build_postgres_deployment("litellm", "password", "litellm")
+        container = deployment.spec.template.spec.containers[0]
+
+        self.assertEqual(deployment.spec.strategy.type, "Recreate")
+        for probe in (
+            container.startup_probe,
+            container.readiness_probe,
+            container.liveness_probe,
+        ):
+            self.assertIn("pg_isready", probe._exec.command[-1])
+
+    def test_secret_update_preserves_unmanaged_existing_keys(self):
+        manager = KubernetesManager.__new__(KubernetesManager)
+        manager.namespace = "litellm"
+        manager.core_v1 = Mock()
+        manager.core_v1.read_namespaced_secret.return_value = SimpleNamespace(
+            metadata=SimpleNamespace(resource_version="42"),
+            data={
+                "LITELLM_SALT_KEY": "existing-base64-value",
+                "UNMANAGED_STALE_KEY": "must-not-be-preserved",
+            },
+        )
+
+        manager.apply_secret("litellm-env", {"LITELLM_MASTER_KEY": "new-value"})
+
+        replacement = manager.core_v1.replace_namespaced_secret.call_args.args[2]
+        self.assertEqual(replacement.metadata.resource_version, "42")
+        self.assertEqual(
+            replacement.data["LITELLM_SALT_KEY"], "existing-base64-value"
+        )
+        self.assertNotIn("UNMANAGED_STALE_KEY", replacement.data)
+        self.assertEqual(replacement.string_data["LITELLM_MASTER_KEY"], "new-value")
 
     def test_affinity_checks_reject_unknown_values(self):
         with self.assertRaisesRegex(ValueError, "Unsupported LITELLM_AFFINITY_CHECKS"):

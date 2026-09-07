@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+spec:
+  template:
+    spec:
+      containers:
+        - name: litellm
+          env:
+            - name: REDIS_HOST
+              value: REPLACE_FROM_PROTECTED_DEPLOYMENT_OUTPUT
+            - name: REDIS_PORT
+              value: "10000"
+            - name: REDIS_USERNAME
+              value: REPLACE_WITH_WORKLOAD_IDENTITY_OBJECT_ID
+          volumeMounts:
+            - name: key-vault-secrets
+              mountPath: /mnt/secrets-store
+              readOnly: true
+      volumes:
+        - name: key-vault-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: litellm-key-vault

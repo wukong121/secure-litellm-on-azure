@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+data:
+  config.yaml: |
+    model_list: []
+    router_settings:
+      routing_strategy: simple-shuffle
+      num_retries: 2
+      redis_host: os.environ/REDIS_HOST
+      redis_port: os.environ/REDIS_PORT
+      cache_kwargs:
+        username: os.environ/REDIS_USERNAME
+        azure_redis_ad_token: true
+        ssl: true
+        ssl_cert_reqs: CERT_REQUIRED
+        ssl_check_hostname: true
+        max_connections: 100
+    general_settings:
+      disable_spend_logs: false
+      store_prompts_in_spend_logs: false
+      maximum_spend_logs_retention_period: 7d
+      maximum_spend_logs_retention_interval: 1d

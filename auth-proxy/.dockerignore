@@ -1,0 +1,4 @@
+node_modules
+test
+*.local.json
+.env*

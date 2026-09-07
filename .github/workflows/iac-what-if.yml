@@ -1,0 +1,19 @@
+name: Azure IaC what-if entrypoint
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migration-entrypoint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Use the stage-aware customer workflow
+        run: |
+          echo 'Use Customer staged migration with mode=what-if and a protected dev/test/prod Environment.'
+          echo 'Configuration: CUSTOMER_CONFIG_JSON; approvals: MIGRATION_EVIDENCE_JSON.'
+          echo 'See docs/customer-migration-guide-zh.md. This legacy entrypoint cannot bypass stage gates.'
+          exit 1

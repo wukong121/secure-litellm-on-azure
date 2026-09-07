@@ -1,0 +1,118 @@
+name: Promote LiteLLM image
+
+on:
+  workflow_dispatch:
+    inputs:
+      acr_name:
+        description: Target Premium ACR name
+        required: true
+        type: string
+      source_image:
+        description: Source image pinned by digest
+        required: true
+        default: docker.litellm.ai/berriai/litellm@sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4
+        type: string
+      target_tag:
+        description: Target repository tag
+        required: true
+        default: litellm:1.98.0
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: prod
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Require digest-pinned source
+        env:
+          SOURCE_IMAGE: ${{ inputs.source_image }}
+        run: |
+          [[ "$SOURCE_IMAGE" == *@sha256:* ]] || {
+            echo 'Source image must be pinned by sha256 digest.' >&2
+            exit 1
+          }
+
+      - name: Sign in to Azure with OIDC
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Import image into ACR
+        env:
+          ACR_NAME: ${{ inputs.acr_name }}
+          SOURCE_IMAGE: ${{ inputs.source_image }}
+          TARGET_TAG: ${{ inputs.target_tag }}
+        run: az acr import --name "$ACR_NAME" --source "$SOURCE_IMAGE" --image "$TARGET_TAG" --force
+
+      - name: Sign in to ACR
+        env:
+          ACR_NAME: ${{ inputs.acr_name }}
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Resolve immutable target digest
+        id: image
+        env:
+          ACR_NAME: ${{ inputs.acr_name }}
+          TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          repository="${TARGET_TAG%%:*}"
+          tag="${TARGET_TAG##*:}"
+          digest="$(az acr manifest list-metadata --registry "$ACR_NAME" --name "$repository" --query "[?tags[?@=='$tag']].digest | [0]" -o tsv)"
+          [[ "$digest" == sha256:* ]]
+          echo "reference=${ACR_NAME}.azurecr.io/${repository}@${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Pull promoted image
+        env:
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: docker pull "$IMAGE_REFERENCE"
+
+      - name: Generate SBOM
+        env:
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: syft "$IMAGE_REFERENCE" --output spdx-json=litellm-sbom.spdx.json
+
+      - name: Block critical vulnerabilities
+        env:
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed "$IMAGE_REFERENCE"
+
+      - name: Sign promoted digest
+        env:
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: cosign sign --yes "$IMAGE_REFERENCE"
+
+      - name: Upload SBOM evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: litellm-sbom-${{ github.run_id }}
+          path: litellm-sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Require manifest update through pull request
+        env:
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: |
+          echo "Promoted immutable image: $IMAGE_REFERENCE"
+          echo 'Update the target Kustomize overlay by pull request; this workflow does not deploy Kubernetes resources.'

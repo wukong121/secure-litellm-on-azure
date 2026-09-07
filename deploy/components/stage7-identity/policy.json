@@ -1,0 +1,9 @@
+{
+  "tenantId": "REPLACE_ENTRA_TENANT_ID",
+  "apiHost": "llm-api.example.com",
+  "adminHost": "llm-admin.example.com",
+  "apiAudience": "REPLACE_DATA_API_AUDIENCE",
+  "apiClientIds": ["REPLACE_APPROVED_CLIENT_ID"],
+  "adminClientId": "REPLACE_ADMIN_OIDC_CLIENT_ID",
+  "bindings": []
+}

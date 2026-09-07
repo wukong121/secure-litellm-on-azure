@@ -1,0 +1,16 @@
+{
+  "phase": "prepare",
+  "baseDomain": "example.com",
+  "environmentName": "test",
+  "privateOrigin": {
+    "privateLinkServiceId": "REPLACE_API_PRIVATE_LINK_SERVICE_ID",
+    "privateLinkLocation": "westus"
+  },
+  "logAnalyticsWorkspaceName": "REPLACE_LOG_ANALYTICS_WORKSPACE",
+  "frontDoorId": "REPLACE_EXPECTED_FRONT_DOOR_ID",
+  "rateLimitPerMinute": 600,
+  "wafMode": "Detection",
+  "changeTicket": "REPLACE_APPROVED_CHANGE_TICKET",
+  "approvedBy": [],
+  "checks": {}
+}

@@ -133,7 +133,7 @@ flowchart TB
     PLS --> ILB[AKS Internal Load Balancer<br/>Ingress Controller]
 
     subgraph AKS[Private AKS Cluster]
-        ILB --> AUTH[Entra JWT 验证层<br/>或 LiteLLM 支持的 JWT 认证]
+        ILB --> AUTH[客户自有 Entra 认证代理<br/>JWT验证、App Roles、Header反伪造]
         AUTH --> LLM[LiteLLM Pods<br/>Virtual Key、Team、预算、模型 ACL]
         LLM --> GUARD[AI 安全 Guardrail<br/>Prompt Shields、PII、内容策略]
         NP[Azure CNI powered by Cilium<br/>NetworkPolicy] -.隔离.-> LLM
@@ -184,7 +184,7 @@ flowchart TB
   -> 全链路写入不含敏感原文的审计元数据
 ```
 
-WAF 不能替代 JWT 身份认证。若当前 LiteLLM 版本或许可证不能直接验证 Entra JWT，应在 ingress 后增加一个轻量认证代理，或由内部认证服务验证 JWT 后为请求注入不可伪造的用户/Team 身份。该组件必须删除客户端自行提交的同名身份 Header。
+WAF不能替代身份认证。本方案明确不使用LiteLLM Enterprise原生JWT能力。在ingress后部署客户自有的轻量Entra认证代理，验证JWT后为请求注入不可伪造的用户/Team身份，并删除客户端自行提交的同名身份、内部凭据和路由Header。代理代码、镜像、配置和运维责任归客户所有，不引入LiteLLM付费许可证依赖。
 
 ## 6. 风险点与 Azure 产品映射
 
@@ -604,7 +604,7 @@ Defender for Cloud Regulatory Compliance Dashboard 用于持续展示控制符�
 | 工作项 | Azure 产品/控制 | 退出标准 |
 | --- | --- | --- |
 | 部署 WAF 私有源站 | Front Door Premium / App Gateway WAF | 无公网源站；WAF Prevention 生效；WebSocket/SSE 回归通过 |
-| Entra API 身份 | Entra App Registration / JWT 验证层 | 不使用共享 Key 也可完成用户和应用认证 |
+| Entra API 身份 | Entra App Registration / 客户自有认证代理 | 不依赖LiteLLM付费JWT即可完成用户和应用认证 |
 | AI Guardrail | AI Content Safety、AI Language PII | Prompt Injection/PII 测试集达到批准阈值 |
 | 日志分层与 Purview 治理 | Log Analytics、ADLS、Purview、CMK | 元数据默认、原文 opt-in、访问审批和删除策略生效 |
 | Sentinel 关联与 SOAR | Sentinel、Logic Apps | 至少 5 个核心检测场景和 3 个可逆自动响应上线 |
@@ -636,9 +636,9 @@ Defender for Cloud Regulatory Compliance Dashboard 用于持续展示控制符�
 9. 一人/一应用/一凭据，并设置模型 ACL、预算、RPM/TPM 和并发上限。
 10. Sentinel 或等效 SOC 能检测 Key 滥用、管理变更、Pod 异常和敏感数据事件。
 
-### 11.2 Mature Enterprise（增强项）
+### 11.2 成熟安全增强项
 
-- Entra JWT 替代客户端长期 Virtual Key；
+- 客户自有Entra认证代理在边界验证JWT，后端Virtual Key不暴露给客户端；
 - Prompt Shields、PII 和 Secret 内联检测；
 - Purview 标签驱动的 Prompt/日志策略；
 - 镜像签名、SBOM 和 Admission 验证；
@@ -788,7 +788,7 @@ Defender for Cloud Regulatory Compliance Dashboard 用于持续展示控制符�
 5. Azure OpenAI / Foundry 使用 Global、Data Zone 还是区域部署，数据驻留要求是什么？
 6. 是否存在跨云模型或外部 MCP，允许的出口域名和国家/地区是什么？
 7. 安全日志的留存、CMK、不可变性和 SOC 响应 SLA 是什么？
-8. LiteLLM 使用的版本/许可证是否支持所需 JWT、Guardrail 和审计能力？
+8. LiteLLM OSS版本是否覆盖所需Router、基础Guardrail和审计回调；付费能力是否均已由Azure原生、客户自有组件或OSS方案替代？
 9. RTO、RPO、可用区和跨区域恢复目标是什么？
 10. 哪些自动响应可以无人工批准执行？
 

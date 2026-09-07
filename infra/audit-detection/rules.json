@@ -1,0 +1,27 @@
+[
+  {
+    "name": "gateway-authentication-failures",
+    "severity": "Medium",
+    "query": "ContainerLogV2 | where TimeGenerated > ago(15m) and PodNamespace == 'litellm' and ContainerName == 'auth-proxy' | extend event = parse_json(tostring(LogMessage)) | where toint(event.status) in (401, 403) | summarize Failures=count() by Plane=tostring(event.plane), bin(TimeGenerated, 5m) | where Failures >= 10"
+  },
+  {
+    "name": "l3-write-gap",
+    "severity": "High",
+    "query": "ContainerLogV2 | where TimeGenerated > ago(15m) and PodNamespace == 'litellm' and ContainerName == 'auth-proxy' | extend event = parse_json(tostring(LogMessage)) | where event.event == 'l3_gap' | project TimeGenerated, TraceId=tostring(event.traceId), Reason=tostring(event.reason)"
+  },
+  {
+    "name": "l3-partial-or-retention-failure",
+    "severity": "High",
+    "query": "ContainerLogV2 | where TimeGenerated > ago(15m) and PodNamespace == 'litellm' and ContainerName in ('auth-proxy', 'retention') | extend event = parse_json(tostring(LogMessage)) | where event.event in ('l3_partial', 'l3_maintenance_failed') or (event.event == 'l3_maintenance' and (toint(event.gaps) > 0 or tobool(event.scanTruncated))) | project TimeGenerated, Event=tostring(event.event), TraceId=tostring(event.traceId), Gaps=toint(event.gaps)"
+  },
+  {
+    "name": "content-safety-findings-or-outage",
+    "severity": "Medium",
+    "query": "ContainerLogV2 | where TimeGenerated > ago(15m) and PodNamespace == 'litellm' and ContainerName == 'auth-proxy' | extend event = parse_json(tostring(LogMessage)) | where event.event in ('guardrail_flagged', 'guardrail_unavailable') | project TimeGenerated, Event=tostring(event.event), Mode=tostring(event.mode), TraceId=tostring(event.traceId)"
+  },
+  {
+    "name": "l3-unauthorized-read-attempt",
+    "severity": "High",
+    "query": "ContainerLogV2 | where TimeGenerated > ago(15m) and PodNamespace == 'litellm' and ContainerName == 'auth-proxy' | extend event = parse_json(tostring(LogMessage)) | where (event.event == 'l3_access' and event.outcome == 'denied_or_failed') or event.event == 'l3_access_log_failed' | project TimeGenerated, Action=tostring(event.action), PodName"
+  }
+]

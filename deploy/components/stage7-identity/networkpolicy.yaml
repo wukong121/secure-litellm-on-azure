@@ -1,0 +1,58 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-api-proxy-ingress
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: entra-auth-proxy, plane: api}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: llm-api-ingress}
+          podSelector:
+            matchLabels: {app.kubernetes.io/component: controller}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-admin-proxy-ingress
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: entra-auth-proxy, plane: admin}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: llm-admin-ingress}
+          podSelector:
+            matchLabels: {app.kubernetes.io/component: controller}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-auth-proxy-egress
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: entra-auth-proxy}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: litellm
+              app.kubernetes.io/component: gateway
+      ports: [{protocol: TCP, port: 4000}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+      ports: [{protocol: TCP, port: 443}]

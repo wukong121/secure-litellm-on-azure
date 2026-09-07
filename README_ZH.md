@@ -2,6 +2,10 @@
 
 本项目提供了一个完整的解决方案，用于突破单一 Azure 订阅中 Azure OpenAI 服务的配额限制。通过实现具备负载均衡功能的反向代理，将请求分发到多个 Azure OpenAI 资源上，并能够稳健地处理 **429 (Too Many Requests)**、**500** 和 **503** 等常见错误。
 
+## 已有LiteLLM的安全增强迁移
+
+面向客户的分阶段入口见[客户迁移指南](docs/customer-migration-guide-zh.md)：使用GitHub Environment variables/secrets配置客户环境，通过 **Customer staged migration** 引导阶段0至9的准备、预检、What-if和人工受控替换。安全增强路线不使用APIM或LiteLLM Enterprise；不是旧部署脚本的一键原地升级。尚未完成的集成会阻断上线，旧环境保留用于回退。
+
 ## 🌟 核心特性
 
 - **突破配额**: 聚合多个 Azure OpenAI 资源/订阅的吞吐量，突破单实例瓶颈。

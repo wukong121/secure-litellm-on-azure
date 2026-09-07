@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+data:
+  config.yaml: |
+    # Git owns model groups, stable deployment IDs, Router behavior, and security policy.
+    # Protected deployment automation must replace REPLACE_* values before applying.
+    model_list:
+      - model_name: REPLACE_MODEL_GROUP
+        litellm_params:
+          model: azure/REPLACE_MODEL_DEPLOYMENT_A
+          api_base: os.environ/AZURE_OPENAI_ENDPOINT_A
+          api_version: v1
+        model_info:
+          id: REPLACE_STABLE_DEPLOYMENT_ID_A
+      - model_name: REPLACE_MODEL_GROUP
+        litellm_params:
+          model: azure/REPLACE_MODEL_DEPLOYMENT_B
+          api_base: os.environ/AZURE_OPENAI_ENDPOINT_B
+          api_version: v1
+        model_info:
+          id: REPLACE_STABLE_DEPLOYMENT_ID_B
+    litellm_settings:
+      enable_azure_ad_token_refresh: true
+    router_settings:
+      routing_strategy: simple-shuffle
+      num_retries: 2
+      allowed_fails: 2
+      cooldown_time: 30
+      redis_host: os.environ/REDIS_HOST
+      redis_port: os.environ/REDIS_PORT
+      cache_kwargs:
+        username: os.environ/REDIS_USERNAME
+        azure_redis_ad_token: true
+        ssl: true
+        ssl_cert_reqs: CERT_REQUIRED
+        ssl_check_hostname: true
+        max_connections: 100
+      optional_pre_call_checks:
+        - encrypted_content_affinity
+        - responses_api_deployment_check
+        - session_affinity
+        - deployment_affinity
+      model_group_affinity_config:
+        REPLACE_MODEL_GROUP:
+          - encrypted_content_affinity
+          - responses_api_deployment_check
+          - session_affinity
+          - deployment_affinity
+      deployment_affinity_ttl_seconds: 3600
+    general_settings:
+      disable_spend_logs: false
+      store_prompts_in_spend_logs: false
+      maximum_spend_logs_retention_period: 7d
+      maximum_spend_logs_retention_interval: 1d

@@ -2,10 +2,13 @@
 
 Deploy [LiteLLM](https://github.com/BerriAI/litellm) on AKS to load-balance Azure OpenAI deployments, retry transient failures, track spend, and manage per-user or per-team budgets.
 
+Existing gateway customers should use the [staged hardening migration guide](../docs/customer-migration-guide-zh.md) and customer-owned Environment configuration. The legacy deployment script below is not an in-place security upgrade command; retain a verified backup and rollback path.
+
 ## Structure
 
 - `deploy_mi_aks_litellm.py`: Deploys AKS, Managed Identity, PostgreSQL, and the LiteLLM Proxy.
-- `azure-openai.json`: Azure OpenAI resources and deployment mappings.
+- `azure-openai.json`: Commit-safe placeholder template only; never add real subscription IDs, resource names, or endpoints.
+- `azure-openai.loc.json`: Ignored local deployment configuration. Copy the template here and keep all real Azure values in this file only.
 - `USER_BUDGET_AND_MODEL_ACCESS_ZH.md`: Chinese guide for users, teams, virtual keys, budgets, and model access.
 - FOUNDRY_MODEL_SYNC_ZH.md: Guide for syncing new Foundry/Azure OpenAI deployments into LiteLLM.
 - `litellm.config.yaml`: Generated LiteLLM configuration; do not edit it manually because the deployment script regenerates it.
@@ -32,6 +35,10 @@ python .\deploy_mi_aks_litellm.py
 ```
 
 The default image is `docker.litellm.ai/berriai/litellm:1.95.0`. It has been verified with API-key-authenticated HTTPS (HTTP 200) and a Responses WebSocket upgrade (HTTP 101). When migrating from `micl/litellm:mi-fix-image-gen`, separately regression-test Managed Identity authentication for Azure image generation because the legacy image contained a custom Bearer-token patch for that path.
+
+The generated LiteLLM Deployment includes startup, readiness, and liveness probes plus conservative `250m/1Gi` requests and `1000m/2Gi` limits. The in-cluster PostgreSQL Deployment uses `pg_isready` for all three probes. Updating either Deployment rolls its single current replica, so use a maintenance window and validate one workload at a time.
+
+When the deployment script updates `litellm-env`, it preserves an existing `LITELLM_SALT_KEY` but does not retain arbitrary unmanaged keys. This prevents a future permanent Salt from being silently removed without allowing stale Secret fields to accumulate. It does not make Salt migration safe by itself: existing encrypted database objects must still pass isolated compatibility and Master Key decoupling tests before production sets the Salt.
 
 The script creates or reuses the Resource Group, Managed Identity, and AKS cluster named by the configuration. In the LiteLLM configuration, `apim_resource_group` is a legacy field name: it means the AKS/Managed Identity Resource Group, not an APIM Resource Group.
 

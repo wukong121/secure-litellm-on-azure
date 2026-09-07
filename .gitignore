@@ -225,6 +225,25 @@ docs/superpowers/
 !docs/litellm-azure-security-hardening-zh.md
 !docs/litellm-security-hardening-change-list-zh.md
 !docs/litellm-bom-cost-comparison-zh.md
+!docs/litellm-security-hardening-implementation-roadmap-zh.md
+!docs/litellm-stage0-baseline-2026-09-01.md
+!docs/litellm-stage1-emergency-hardening-2026-09-01.md
+!docs/litellm-stage2-decisions-and-spikes-2026-09-02.md
+!docs/litellm-stage3-iac-cicd-supply-chain-2026-09-03.md
+!docs/litellm-stage4-private-network-aks-identity-2026-09-03.md
+!docs/litellm-stage5-keyvault-postgresql-redis-2026-09-03.md
+!docs/litellm-stage6-ha-routing-2026-09-03.md
+!docs/litellm-stage7-entra-proxy-domains-2026-09-07.md
+!docs/litellm-stage8-l3-audit-observability-2026-09-07.md
+!docs/litellm-stage9-edge-cutover-preparation-2026-09-07.md
+!docs/litellm-code-completion-backlog-2026-09-07.md
+!docs/litellm-oss-callback-validation-2026-09-07.md
+
+auth-proxy/node_modules/
+auth-proxy/*.local.json
+config/*.local.json
+
+!docs/customer-migration-guide-zh.md
 
 # Temporary local artifacts
 temp/

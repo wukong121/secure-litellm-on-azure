@@ -1,0 +1,25 @@
+export const auditPage = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>L3 Audit</title><link rel="stylesheet" href="/audit/style.css"></head>
+<body><header><h1>L3 Audit</h1><span id="identity"></span></header>
+<main><form id="search"><label>Approval ID<input name="approvalId" required maxlength="36" autocomplete="off"></label>
+<label>Trace ID<input name="traceId" maxlength="32" autocomplete="off"></label>
+<button type="submit">Search</button><button type="button" id="next" disabled>Next</button></form>
+<p role="status" id="status"></p>
+<div class="results"><table><thead><tr><th>Time</th><th>Team</th><th>Model</th><th>Status</th><th>Record</th></tr></thead><tbody id="records"></tbody></table></div>
+<section><h2>Record</h2><pre id="detail"></pre></section></main>
+<script type="module" src="/audit/client.js"></script></body></html>`;
+
+export const auditStyle = `:root{font-family:"IBM Plex Sans","Noto Sans",sans-serif;color:#202723;background:#f2f5f3;font-size:15px;letter-spacing:0}body{margin:0}header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;background:#163c2b;color:white;border-bottom:4px solid #e4bb46}h1{font-size:22px;margin:0}main{max-width:1200px;margin:auto;padding:24px}form{display:flex;align-items:end;gap:12px;flex-wrap:wrap}label{display:grid;gap:6px;flex:1;min-width:180px}input{padding:10px;border:1px solid #859b8c;font:inherit;min-width:0}button{background:#246548;color:white;border:0;padding:11px 16px;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}button:focus,input:focus{outline:3px solid #c79118;outline-offset:2px}.results{overflow-x:auto}table{width:100%;border-collapse:collapse;background:#fff}td,th{text-align:left;padding:10px;border-bottom:1px solid #d0ddd5;font-size:14px}td button{max-width:260px;overflow-wrap:anywhere;text-align:left}h2{font-size:18px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#fff;border-left:3px solid #246548;padding:16px;min-height:100px;font-size:13px}#status{min-height:22px}#identity{overflow-wrap:anywhere;max-width:50%;font-size:13px}@media(max-width:600px){main{padding:16px}header{padding:16px}table{min-width:640px}form button{flex:1}}`;
+
+export const auditClient = `const form=document.querySelector('#search');
+const status=document.querySelector('#status');
+const next=document.querySelector('#next');
+const detail=document.querySelector('#detail');
+let csrf; let cursor; let query; let busy=false;
+async function post(path,body){const response=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json','x-csrf-token':csrf},body:JSON.stringify(body),cache:'no-store'});if(!response.ok)throw new Error('Request denied or unavailable ('+response.status+')');return response.json()}
+function state(value){busy=value;form.querySelector('button[type=submit]').disabled=value;next.disabled=value||!cursor}
+async function search(continuation){if(busy)return;state(true);detail.textContent='';status.textContent='';try{if(!continuation){query=Object.fromEntries([...new FormData(form)].filter(([,value])=>value));cursor=null;}const result=await post('/audit/search',{...query,...(continuation?{cursor}: {})});cursor=result.nextCursor;const rows=document.querySelector('#records');rows.replaceChildren();for(const record of result.records){const row=document.createElement('tr');for(const value of [record.createdAt,record.teamId,record.model,record.complete?'complete':'partial']){const cell=document.createElement('td');cell.textContent=value;row.append(cell)}const cell=document.createElement('td');const button=document.createElement('button');button.textContent=record.id;button.addEventListener('click',async()=>{if(busy)return;state(true);detail.textContent='';try{const raw=await post('/audit/view',{approvalId:query.approvalId,id:record.id});detail.textContent=JSON.stringify(raw,null,2)}catch(error){status.textContent=error.message}finally{state(false)}});cell.append(button);row.append(cell);rows.append(row)}status.textContent=result.records.length+' records';}catch(error){status.textContent=error.message;cursor=null;}finally{state(false)}}
+form.addEventListener('submit',event=>{event.preventDefault();search(false)});next.addEventListener('click',()=>search(true));
+try{const response=await fetch('/auth/session',{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error('Session expired');const session=await response.json();csrf=session.csrf;document.querySelector('#identity').textContent=session.role;}catch(error){status.textContent=error.message;state(true)}
+window.addEventListener('pagehide',()=>{detail.textContent='';document.querySelector('#records').replaceChildren()});`;

@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-api-proxy
+spec:
+  template:
+    spec:
+      containers:
+        - name: auth-proxy
+          env:
+            - name: FRONT_DOOR_ID
+              value: REPLACE_EXPECTED_FRONT_DOOR_ID

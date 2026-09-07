@@ -53,7 +53,10 @@ Kubernetes 平台与应用层（Helm/Kustomize 或受控 manifests）
   LiteLLM Deployment / Service / Ingress / PDB / HPA / ConfigMap
 
 LiteLLM 逻辑配置层
-  Models / Router / Guardrails / JWT / SSO / Team / Budget / Spend retention
+  Models / Router / OSS Guardrails / SSO / Team / Budget / Spend retention
+
+独立身份与策略层
+  客户自有 Entra 认证代理 / App Roles / Team 映射 / Header反伪造
 ```
 
 由于目标变化同时涉及 Private Cluster、网络插件/策略、节点身份、数据库和入口，建议优先采用“新建安全生产环境 -> 数据迁移 -> 灰度切流”，避免在现有 PoC 集群上一次性原地改造。现有集群可保留为回归和迁移源。
@@ -95,8 +98,8 @@ LiteLLM 逻辑配置层
 - 盘点现有订阅、区域、配额、Policy、VNet、DNS、ExpressRoute/VPN、Azure OpenAI/Foundry 资源和数据驻留要求；
 - 确认公网模式（Front Door Premium）或纯内网模式（Application Gateway WAF v2），不同时建设两套主入口；
 - 明确 API 数据面和 Admin 管理面的域名、访问人群和网络来源；
-- 明确客户端认证目标：Entra JWT、Virtual Key，或过渡期双轨；
-- 核验 LiteLLM 版本和许可证对 JWT、SSO、Guardrail、审计、Key 管理的支持边界；
+- 明确客户端认证目标：客户自有Entra认证代理；仅在代理到LiteLLM的受控内部链路使用受限Virtual Key；
+- 核验LiteLLM OSS能力边界，并将所有Enterprise付费能力排除或替换为Azure原生、客户自有组件或OSS方案；
 - 明确 Prompt/Response 是否允许落盘、日志留存和数据出境限制；
 - 明确 RTO、RPO、可用区、跨区域恢复和维护窗口；
 - 形成数据流图、信任边界图、端口/FQDN 清单和责任矩阵。
@@ -190,14 +193,14 @@ scripts/
 - 建立 `proxy_admin`、`proxy_admin_viewer`、`internal_user` 等 App Roles；
 - 通过受控安全组分配角色，管理员权限结合 PIM；
 - 配置 Conditional Access、MFA、合规设备、登录风险和会话策略；
-- 设计数据面 JWT 验证：优先使用 LiteLLM 原生 JWT；不满足时使用独立认证代理；
+- 设计数据面JWT验证：固定使用客户自有独立认证代理，不启用LiteLLM原生JWT；
 - JWT 必须校验 issuer、audience、tenant、signature、expiry、roles/scopes；
 - 后台应用使用 Client Credentials、Managed Identity 或 Workload Identity，不共享用户 Virtual Key；
 - 设计 Entra identity 到 LiteLLM Team、模型 ACL、预算和 Virtual Key 的映射；
 - 定义离职、应用停用、组变更后的访问回收 SLA；
 - 保留 `/fallback/login` 仅作为受控 Break Glass，并限制来源与告警。
 
-**需先验证**：LiteLLM 当前版本/许可证是否能在 Responses、WebSocket、Chat、Embeddings、Files 等全部目标路由统一执行 JWT 和授权检查。
+**需先验证**：独立认证代理能否在Responses、WebSocket、Chat、SSE、Embeddings、Files和MCP/Tools等全部目标路由统一执行JWT和授权检查，并正确删除伪造Header、保护后端凭据和保持流式传输。
 
 **验收**：禁用 Entra 用户/应用后访问失效；跨 Team/模型访问被拒绝；Token 中角色变化重新登录后生效。
 
@@ -478,7 +481,7 @@ general_settings:
 - `rpm`、`tpm` 和 `max_parallel_requests` 必须来自每个 Foundry deployment的实际配额与压测结果；缺失时 `usage-based-routing-v2` 无法做可靠容量决策；
 - `model_info.id` 必须显式、唯一且稳定，否则重启或配置重建后，已有 affinity 和 Responses ID不能可靠定位 deployment；
 - `model_group_affinity_config` 仅对长会话/Codex/Agent模型开启。批处理和无状态模型不启用 `deployment_affinity`，避免把大流量 Key长期压在单一后端；
-- `deployment_affinity` 使用 Virtual Key hash，不使用 OpenAI `user` 字段。完成 Entra JWT迁移后，要验证 JWT路径是否仍产生稳定归因键；否则以 `session_affinity` 为主，或增加受信身份到路由键的映射；
+- `deployment_affinity`使用内部Virtual Key hash，不使用OpenAI `user`字段。接入客户自有Entra认证代理后，要验证代理映射是否仍产生稳定归因键；否则以`session_affinity`为主，或增加受信身份到路由键的映射；
 - `REDIS_USERNAME` 使用 Azure Managed Redis数据访问策略对应身份的 Object ID；`azure_redis_ad_token: true` 需要 `azure-identity`，LiteLLM `1.98.0` 会通过 `AzureADCredentialProvider` 刷新 token。AKS Workload Identity必须验证初次认证、token过期刷新、连接池重连和 Redis故障转移；未通过前按 SEC-09 使用 Key Vault托管凭据，不得关闭 TLS或证书校验；
 - 多 LiteLLM Pod不配置共享 Redis时，只能保证单 Pod内 stickiness，不能作为生产缓存命中保证；
 - affinity 命中的 deployment如果处于 cooldown，必须按错误类型明确重试/失败策略，不能为追求缓存命中而持续请求不健康后端；
@@ -694,6 +697,8 @@ general_settings:
 
 **目标**：在合法、透明、最小化和可追责的前提下，审计经过 LiteLLM 网关的员工与 Agent 模型交互，用于安全调查、数据泄漏检测、合规审计和 Agent 风险治理，而不是默认用于个人绩效评价。
 
+> 2026-09-07需求确认：L3原文审计是客户近期重点功能，提升为阶段8首期必需交付。交付须包含采集、独立私有原文存储、元数据索引、`llm-admin`独立审计权限下的检索/查看、访问留痕、留存删除与故障完整性测试，不仅是文档或预留开关。先以合成数据实现和验收；生产默认关闭及治理批准要求不阻止功能开发，也不因客户提出需求就自动开启生产全文采集。具体首期范围见[实施路线图12.3节](litellm-security-hardening-implementation-roadmap-zh.md#123-l2l3-上下文审计)。
+
 **可审计范围**：
 
 - LiteLLM 实际接收到的 system、user、assistant messages；
@@ -874,8 +879,8 @@ general_settings:
 | D01 | 网关互联网可达还是仅企业内网 | 按真实客户端位置选择，不双建主入口 |
 | D02 | 公网入口使用 Front Door 还是内网 App Gateway | 互联网：Front Door Premium；内网：App Gateway WAF v2 |
 | D03 | Admin UI 是否必须独立内网域名 | 是 |
-| D04 | 数据面是否启用 Entra JWT | 是，Virtual Key作为过渡/内部授权载体 |
-| D05 | LiteLLM 原生 JWT 是否满足全部路由 | 先做兼容性 Spike；不满足则独立认证代理 |
+| D04 | 数据面是否启用Entra身份 | 是，由客户自有认证代理验证JWT；Virtual Key仅作为内部授权载体 |
+| D05 | 是否使用LiteLLM原生JWT | 否，已确认属于Enterprise付费能力，方案中禁止启用 |
 | D06 | 模型配置事实源使用 Git 还是 UI/DB | 生产优先 Git；若保留 UI则强制审批和导出 |
 | D07 | Prompt/Response 是否允许落盘 | 默认不允许，例外按业务审批 |
 | D08 | PG 认证使用 Entra 还是 Key Vault密码 | 优先 Entra，先验证 LiteLLM/Prisma兼容性 |
@@ -886,7 +891,7 @@ general_settings:
 | D13 | 是否采用新集群迁移而非原地改造 | 推荐新集群迁移 |
 | D14 | 日志平台、留存、区域和 CMK要求 | 客户安全/数据治理批准 |
 | D15 | 可自动执行哪些安全响应 | 仅低风险可逆动作默认自动化 |
-| D16 | LiteLLM 目标版本和许可证 | 在设计冻结时固定并验证能力 |
+| D16 | LiteLLM目标版本和产品边界 | 固定精确OSS版本与digest，不采购或依赖LiteLLM Enterprise能力 |
 | D17 | 上下文审计用于哪些目的和人群 | 仅安全、合规、数据保护和 Agent 风险治理；禁止默认用于绩效排名 |
 | D18 | 审计哪些内容和协议 | 明确 messages、Responses items、tool call/result、文件及 WebSocket覆盖范围 |
 | D19 | L3 原文保存位置和期限 | 独立加密存储、默认关闭、最短必要留存，不长期写 PG |
@@ -903,7 +908,7 @@ general_settings:
 3. 确认先做现有环境紧急加固，还是直接建设新生产环境；
 4. 选择 IaC 技术栈；
 5. 选择第一批实施工作包及其验收测试；
-6. 确认哪些能力受 LiteLLM 版本/许可证限制，需要先做技术 Spike；
+6. 确认LiteLLM OSS能力边界；仅Enterprise提供的能力必须从方案中删除或使用Azure原生、客户自有组件或OSS实现替代；
 7. 将批准后的工作包拆成详细设计、实施任务和变更窗口。
 
 ## 11. 当前已识别但不在首批实施范围的增强项

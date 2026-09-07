@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: l3-retention
+  annotations:
+    azure.workload.identity/client-id: REPLACE_RETENTION_CLIENT_ID
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: l3-retention
+spec:
+  schedule: "*/15 * * * *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 600
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: l3-retention
+            azure.workload.identity/use: "true"
+        spec:
+          restartPolicy: Never
+          serviceAccountName: l3-retention
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: retention
+              image: REPLACE_APPROVED_ACR_AUTH_PROXY_DIGEST
+              command: [node, audit-maintenance.mjs]
+              env:
+                - name: STAGE8_CONFIG
+                  value: /etc/stage8/config.json
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits: {cpu: "1", memory: 512Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - name: stage8
+                  mountPath: /etc/stage8
+                  readOnly: true
+                - name: approvals
+                  mountPath: /etc/audit-approvals
+                  readOnly: true
+          volumes:
+            - name: stage8
+              configMap: {name: stage8-config}
+            - name: approvals
+              configMap: {name: audit-approvals}

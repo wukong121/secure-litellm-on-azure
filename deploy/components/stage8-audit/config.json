@@ -1,0 +1,18 @@
+{
+  "l3": {
+    "enabled": false,
+    "storageUrl": "REPLACE_PRIVATE_AUDIT_BLOB_URL",
+    "storageResourceId": "REPLACE_AUDIT_STORAGE_RESOURCE_ID",
+    "retentionDays": 7
+  },
+  "guardrail": {
+    "enabled": false,
+    "mode": "observe",
+    "endpoint": "REPLACE_CONTENT_SAFETY_ENDPOINT",
+    "threshold": 4
+  },
+  "telemetry": {
+    "enabled": false,
+    "endpoint": "http://otel-collector.litellm.svc.cluster.local:4318/v1/traces"
+  }
+}

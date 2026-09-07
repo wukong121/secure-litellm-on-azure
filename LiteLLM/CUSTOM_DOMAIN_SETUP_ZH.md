@@ -143,7 +143,7 @@ $env:LETSENCRYPT_EMAIL = "you@example.com"
 
 # 可选：显式指定 master key（推荐生产环境由密钥管理系统注入）
 # 不设置时脚本会自动生成强随机 key，并在结尾打印一次
-# $env:LITELLM_MASTER_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+# $env:LITELLM_MASTER_KEY = "<LITELLM_MASTER_KEY_FROM_SECRET_STORE>"
 
 # 可选：按需调整启动等待时长（秒），默认 180
 # $env:LITELLM_STARTUP_WAIT_SECONDS = "300"

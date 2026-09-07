@@ -1,0 +1,39 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-api
+spec:
+  ingressClassName: REPLACE_PRIVATE_API_INGRESS_CLASS
+  tls:
+    - hosts: [llm-api.example.com]
+      secretName: llm-api-tls
+  rules:
+    - host: llm-api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: llm-api-proxy
+                port: {name: http}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-admin
+spec:
+  ingressClassName: REPLACE_PRIVATE_ADMIN_INGRESS_CLASS
+  tls:
+    - hosts: [llm-admin.example.com]
+      secretName: llm-admin-tls
+  rules:
+    - host: llm-admin.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: llm-admin-proxy
+                port: {name: http}

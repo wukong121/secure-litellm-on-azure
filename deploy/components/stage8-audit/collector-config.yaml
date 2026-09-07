@@ -1,0 +1,42 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  azure_auth:
+    scopes: [https://monitor.azure.com/.default]
+    workload_identity:
+      client_id: ${env:AZURE_CLIENT_ID}
+      tenant_id: ${env:AZURE_TENANT_ID}
+      federated_token_file: ${env:AZURE_FEDERATED_TOKEN_FILE}
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+  batch:
+    timeout: 5s
+  transform/allowlist:
+    error_mode: propagate
+    trace_statements:
+      - context: resource
+        statements:
+          - keep_keys(attributes, ["service.name"])
+      - context: span
+        statements:
+          - keep_keys(attributes, ["gateway.plane", "gateway.request_id", "gateway.outcome", "http.response.status_code"])
+exporters:
+  azuremonitor:
+    connection_string: ${env:APPLICATIONINSIGHTS_CONNECTION_STRING}
+    auth:
+      authenticator: azure_auth
+    spaneventsenabled: false
+service:
+  extensions: [health_check, azure_auth]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/allowlist, batch]
+      exporters: [azuremonitor]

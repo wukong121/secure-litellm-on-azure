@@ -1,0 +1,5 @@
+[
+  {"name": "notify-security-owner", "enabled": false, "action": "notification", "requires": ["approved recipient", "connector identity"], "rollback": "disable notification rule"},
+  {"name": "create-investigation-ticket", "enabled": false, "action": "ticket", "requires": ["approved ticket system", "idempotency key", "connector identity"], "rollback": "close duplicate ticket and disable rule"},
+  {"name": "tag-incident-for-review", "enabled": false, "action": "incident-tag", "requires": ["Sentinel incident identity", "approved tag"], "rollback": "remove the added tag"}
+]

@@ -1,3 +1,7 @@
+## Existing LiteLLM Customer Migration
+
+For an existing gateway, start with the [customer migration guide (Chinese)](docs/customer-migration-guide-zh.md). The **Customer staged migration** workflow uses customer-owned GitHub Environment variables/secrets, staged readiness checks and read-only Azure previews. Deployment, database migration and traffic cutover require separate customer approval; this is not an in-place one-click upgrade. The hardening path does not depend on APIM or LiteLLM Enterprise.
+
 # Azure OpenAI Load Balancer & Quota Breaker
 
 This project provides a comprehensive solution to bypass the quota limits of single Azure subscriptions for Azure OpenAI Service. By implementing a reverse proxy with load balancing capabilities, it distributes requests across multiple Azure OpenAI resources. It also robustly handles common errors like **429 (Too Many Requests)**, **500**, and **503**.

@@ -1,0 +1,14 @@
+[
+  {
+    "stage": 0,
+    "environment": "test",
+    "configSha256": "REPLACE_HASH_FROM_PREFLIGHT",
+    "revision": "REPLACE_FULL_REVIEWED_GIT_SHA",
+    "status": "pending",
+    "checks": ["inventory", "backup_restore", "key_salt_recovery", "protocol_baseline"],
+    "approvedBy": ["REPLACE_FIRST_APPROVER_OBJECT_ID", "REPLACE_SECOND_APPROVER_OBJECT_ID"],
+    "observedAt": "REPLACE_UTC_TIMESTAMP",
+    "reportUrl": "https://example.com/private-evidence/REPLACE_REPORT",
+    "reportSha256": "REPLACE_PRIVATE_REPORT_SHA256"
+  }
+]

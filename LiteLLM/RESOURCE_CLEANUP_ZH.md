@@ -1,3 +1,5 @@
+> 客户安全增强迁移期间不要执行本文删除步骤。以下资源名与所有权判断为已去标识化的参考案例，不能证明客户资源可删除。先完成[迁移与回退窗口](../docs/customer-migration-guide-zh.md)，再另行批准退役并重新盘点所有权。
+
 # 删除 LiteLLM 部署资源并验证清理完成
 
 本文用于删除 [`deploy_mi_aks_litellm.py`](./deploy_mi_aks_litellm.py) 创建或修改的 Azure 与 Kubernetes 资源，并验证不存在残留计费资源、权限和 DNS 指向。
@@ -36,18 +38,18 @@ DNS 记录和 ACR 可能由其他操作指南单独创建，只能在确认不�
 当前配置使用：
 
 ```text
-Deployment Resource Group : rg-wangpeter-2401-ai
+Deployment Resource Group : rg-example-legacy
 AKS                       : litellm-mi-aks
-AKS Node Resource Group   : MC_rg-wangpeter-2401-ai_litellm-mi-aks_westus
+AKS Node Resource Group   : MC_rg-example-legacy_litellm-mi-aks_westus
 Managed Identity          : litellm-managed-identity
 Kubernetes Namespace      : litellm
 ```
 
-`rg-wangpeter-2401-ai` 还包含 Azure OpenAI/Foundry Resource、Application Insights、Log Analytics、ACR `litellmacr2401` 和其他资源。
+`rg-example-legacy` 还包含 Azure OpenAI/Foundry Resource、Application Insights、Log Analytics、ACR `exampleacr` 和其他资源。
 
-> **当前环境禁止执行 `az group delete -n rg-wangpeter-2401-ai`。** 应使用“场景 B：保留共享 RG，删除专用 AKS”或按实际所有权使用“场景 C：保留共享 AKS”。
+> **当前环境禁止执行 `az group delete -n rg-example-legacy`。** 应使用“场景 B：保留共享 RG，删除专用 AKS”或按实际所有权使用“场景 C：保留共享 AKS”。
 
-节点 Resource Group `MC_rg-wangpeter-2401-ai_litellm-mi-aks_westus` 的 `managedBy` 指向 `litellm-mi-aks`。其中的 VMSS、VNet、NSG、Load Balancer、Public IP、节点 Managed Identity 和 PostgreSQL PVC Disk 都属于该 AKS，可以全部随网关删除。
+节点 Resource Group `MC_rg-example-legacy_litellm-mi-aks_westus` 的 `managedBy` 指向 `litellm-mi-aks`。其中的 VMSS、VNet、NSG、Load Balancer、Public IP、节点 Managed Identity 和 PostgreSQL PVC Disk 都属于该 AKS，可以全部随网关删除。
 
 > **不要在 AKS 仍存在时直接删除 `MC_...` 节点 Resource Group 或其中的单个资源。** 这会破坏仍被 Azure 控制面管理的集群，并可能留下不一致状态。正确顺序是先删除 `litellm-mi-aks`，等待 Azure 自动删除整个节点 Resource Group；只有 AKS 已不存在但节点 RG 异常残留时，才人工删除残留的 `MC_...` Resource Group。
 
@@ -56,14 +58,14 @@ Kubernetes Namespace      : litellm
 | Portal 中的资源 | 是否可删 | 判断依据 |
 |---|---|---|
 | `litellm-mi-aks` | **可以删除** | LiteLLM 专用 AKS；删除后节点 Resource Group 及其中的 VMSS、VNet、NSG、Load Balancer/Public IP 和 PostgreSQL Disk 会随之清理 |
-| `litellm-managed-identity` | **可以删除** | 只附加在该 AKS 节点 VMSS；当前直接 Role Assignment 是 `wangpeter-2401-ai-resource` Scope 的 `Cognitive Services OpenAI User`，应先删除该权限 |
-| `litellmacr2401` | **可以删除，但放在 AKS 和备份之后** | 当前只有 repository `litellm` 和旧 tag `mi-fix-image-gen`，无 Webhook/Task；直接 `AcrPull` Principal 是该 AKS kubelet；运行中的 LiteLLM 已改用外部官方镜像 `docker.litellm.ai/berriai/litellm:1.95.0` |
-| `wangpeter-2401-ai-resource` | **不可删除** | Foundry/Azure OpenAI 业务资源，不是 LiteLLM 脚本创建的 |
-| `wangpeter-2401-ai` Project | **不可删除** | 属于上述 Foundry Resource |
-| `wangpeter-9266-ai-resource` | **不可删除** | 独立 Foundry 业务资源 |
-| `wangpeter-9266-ai` Project | **不可删除** | 属于上述 Foundry Resource |
-| `wangpeter-2401-ai-resource-appinsights` | **不可删除** | Foundry/Application 的监控资源，不是 LiteLLM 专属资源 |
-| `wangpeter-2401-ai-resource-logs` | **不可删除** | Log Analytics Workspace，不是 LiteLLM 专属资源 |
+| `litellm-managed-identity` | **可以删除** | 只附加在该 AKS 节点 VMSS；当前直接 Role Assignment 是 `example-foundry-resource` Scope 的 `Cognitive Services OpenAI User`，应先删除该权限 |
+| `exampleacr` | **可以删除，但放在 AKS 和备份之后** | 当前只有 repository `litellm` 和旧 tag `mi-fix-image-gen`，无 Webhook/Task；直接 `AcrPull` Principal 是该 AKS kubelet；运行中的 LiteLLM 已改用外部官方镜像 `docker.litellm.ai/berriai/litellm:1.95.0` |
+| `example-foundry-resource` | **不可删除** | Foundry/Azure OpenAI 业务资源，不是 LiteLLM 脚本创建的 |
+| `example-project` Project | **不可删除** | 属于上述 Foundry Resource |
+| `example-secondary-foundry-resource` | **不可删除** | 独立 Foundry 业务资源 |
+| `example-secondary-project` Project | **不可删除** | 属于上述 Foundry Resource |
+| `example-appinsights` | **不可删除** | Foundry/Application 的监控资源，不是 LiteLLM 专属资源 |
+| `example-workspace` | **不可删除** | Log Analytics Workspace，不是 LiteLLM 专属资源 |
 | `Application Insights Smart Detection` | **不可单独删除** | 与 Application Insights 关联的 Action Group，不属于 LiteLLM 网关清理范围 |
 
 因此，Azure Portal 中应保留 Resource Group，只选择删除下面三个顶层资源：
@@ -71,7 +73,7 @@ Kubernetes Namespace      : litellm
 ```text
 litellm-mi-aks
 litellm-managed-identity
-litellmacr2401
+exampleacr
 ```
 
 推荐顺序是：停止 DNS 流量和备份 -> 删除 UAMI 的外部 RBAC -> 删除 AKS并等待节点 RG 消失 -> 删除 UAMI -> 删除 ACR。
@@ -363,7 +365,7 @@ az group wait `
 
 ### 场景 B：共享 Resource Group，删除专用 AKS
 
-**当前环境推荐此场景。** 保留 `rg-wangpeter-2401-ai` 中的 Azure OpenAI、ACR、监控和其他资源，只删除 AKS、节点 RG 和 LiteLLM UAMI。
+**当前环境推荐此场景。** 保留 `rg-example-legacy` 中的 Azure OpenAI、ACR、监控和其他资源，只删除 AKS、节点 RG 和 LiteLLM UAMI。
 
 ```powershell
 $confirmation = Read-Host "Type DELETE-$aksName to delete the AKS cluster"
@@ -400,8 +402,8 @@ az identity delete `
 不要删除：
 
 ```text
-wangpeter-2401-ai-resource
-litellmacr2401
+example-foundry-resource
+exampleacr
 Application Insights / Log Analytics
 其他 Azure OpenAI / Foundry Resource
 ```

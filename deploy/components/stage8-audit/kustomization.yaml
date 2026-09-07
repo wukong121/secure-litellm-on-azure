@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - maintenance.yaml
+  - collector.yaml
+  - networkpolicy.yaml
+configMapGenerator:
+  - name: stage8-config
+    files: [config.json]
+  - name: audit-approvals
+    files: [approvals.json, holds.json]
+  - name: otel-config
+    files: [collector-config.yaml]
+patches:
+  - path: proxy-patch.yaml
