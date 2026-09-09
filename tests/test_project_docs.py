@@ -9,6 +9,8 @@ READMES = (
     "README.md", "README_ZH.md", "LiteLLM/README.md", "LiteLLM/README_ZH.md",
     "tests/README.md", "tests/README_ZH.md", "infra/README_ZH.md",
     "deploy/README_ZH.md", "auth-proxy/README_ZH.md", ".github/README_ZH.md",
+    "docs/customer-deployment-workflows-zh.md",
+    "docs/litellm-content-audit-phase1-customer-brief-zh.md",
 )
 
 
@@ -38,3 +40,10 @@ class ProjectDocumentationTests(unittest.TestCase):
             with self.subTest(path=name):
                 self.assertFalse((ROOT / name).exists())
         self.assertNotIn("azure-mgmt-apimanagement", (ROOT / "requirements.txt").read_text())
+
+    def test_full_plan_covers_both_paths_and_runtime_acceptance(self):
+        text = (ROOT / "docs/customer-deployment-workflows-zh.md").read_text()
+        for number in range(1, 13):
+            self.assertIn(f"| A{number:02d} ", text)
+        for required in ("greenfield", "RTO/RPO", "Prisma", "OIDC", "Python", "Go", "MIGRATION_MANIFEST_YAML"):
+            self.assertIn(required, text)

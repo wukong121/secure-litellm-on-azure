@@ -242,8 +242,12 @@ docs/superpowers/
 auth-proxy/node_modules/
 auth-proxy/*.local.json
 config/*.local.json
+config/customer.json
+config/migration-evidence.json
 
 !docs/customer-migration-guide-zh.md
+!docs/customer-deployment-workflows-zh.md
+!docs/litellm-content-audit-phase1-customer-brief-zh.md
 
 # Temporary local artifacts
 temp/
