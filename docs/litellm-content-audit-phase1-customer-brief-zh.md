@@ -94,7 +94,74 @@ flowchart TB
 | 响应内容 | 复核模型输出 | 流式响应可能是汇总结果；可能存在截断、缺失或转换，不是网络逐字节归档 |
 | Token、费用、状态、耗时 | 用量统计与排障 | 费用是网关计算口径；成功状态不能单独证明客户端完整收到或日志无缺口 |
 
-### 不承诺保存后即可看到全部明文
+### 5.1 Spend Logs 的具体结构
+
+可以将一条 Spend Log 理解为一张“模型调用记录单”：**谁调用、何时调用、使用哪个模型、消耗多少，以及获准保存的输入输出**。下表依据项目固定 LiteLLM `1.98.0` 镜像中的 `LiteLLM_SpendLogs` 表结构整理，列出主要字段，不是 UI/API 保证返回的完整清单。
+
+| 字段组 | 实际字段名 | 客户可以怎样理解 |
+| --- | --- | --- |
+| 调用定位 | `request_id`、`call_type` | 日志主键与调用类型；用于查找和关联，不等同于一整个多轮会话 |
+| 时间与耗时 | `startTime`、`endTime`、`request_duration_ms`、`completionStartTime` | 开始、结束、耗时及可用时的开始生成时间；是否填充和计时边界须实测，不能直接当作客户端首 Token 时间 |
+| 调用凭据与归属 | `api_key`、`user`、`team_id`、`organization_id`、`end_user` | 凭据、内部用户、团队、组织与终端用户关联；`api_key` 是哈希标识，不是可调用的明文 Key；这些 ID 不自动等于 Entra 用户身份 |
+| 模型与路由 | `model`、`model_id`、`model_group`、`custom_llm_provider`、`api_base` | 模型、内部模型 ID、对外模型组、供应商与端点；可用于排查路由，但不据此假定所有重试都有独立完整记录 |
+| 用量与费用 | `prompt_tokens`、`completion_tokens`、`total_tokens`、`spend` | 输入、输出、合计 Token 与网关计算费用；不是供应商最终账单 |
+| 请求正文 | `messages` | 可用且允许记录时的请求消息；对话可能包含历史消息、代码和工具结果，不只是本轮提问 |
+| 响应正文 | `response` | 可用且允许记录时的模型响应；Chat Completions、Responses 等接口形状不同，不能统一假定都有 `choices` |
+| 请求补充信息 | `proxy_server_request` | 代理请求信息，可能包含经处理的请求体；也应纳入正文访问、留存和泄露检查范围 |
+| 状态与缓存 | `status`、`cache_hit`、`cache_key` | 日志状态及缓存关联；`cache_hit` 在该表中是字符串字段，`status` 不是客户端完整接收的证明 |
+| 扩展关联 | `metadata`、`request_tags`、`session_id`、`requester_ip_address` | 扩展元数据、标签、会话及来源地址；可能为空，也可能携带敏感信息，不能因名为 metadata 就当作公开数据 |
+
+其中 `messages`、`response`、`proxy_server_request`、`metadata`、`request_tags` 是 JSON 类型列。表中还存在 `agent_id`、`mcp_namespaced_tool_name` 等可选字段；**字段存在不代表当前网关已支持 Agent 执行、MCP 或完整 Codex 协议**。
+
+### 5.2 一条记录看起来是什么样
+
+下面是**完全虚构、仅选取部分字段的 Chat Completions 展示示例**，不是客户数据，也不是数据库导出或查询 API 的固定返回契约。为了便于阅读，将正文解码为 JSON 数组/对象；该版本写入路径会对部分 JSON 列的值作字符串序列化，实际查询可能需要解码。被截断的正文不保证仍能还原为完整 JSON。
+
+```json
+{
+    "request_id": "chatcmpl-example-001",
+    "call_type": "acompletion",
+    "startTime": "2026-09-10T02:00:00.000Z",
+    "endTime": "2026-09-10T02:00:01.000Z",
+    "request_duration_ms": 1000,
+    "api_key": "<hashed-key-id>",
+    "user": "user-demo-001",
+    "team_id": "team-demo",
+    "model": "model-demo",
+    "model_group": "coding",
+    "custom_llm_provider": "azure",
+    "prompt_tokens": 120,
+    "completion_tokens": 40,
+    "total_tokens": 160,
+    "spend": 0.00024,
+    "status": "success",
+    "messages": [
+        { "role": "system", "content": "请用中文简短回答。" },
+        { "role": "user", "content": "解释这段代码：print(1 + 1)" }
+    ],
+    "response": {
+        "id": "chatcmpl-example-001",
+        "object": "chat.completion",
+        "model": "model-demo",
+        "choices": [
+            {
+                "index": 0,
+                "message": { "role": "assistant", "content": "这段代码计算 1 加 1，并输出 2。" },
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": { "prompt_tokens": 120, "completion_tokens": 40, "total_tokens": 160 }
+    },
+    "metadata": {},
+    "request_tags": []
+}
+```
+
+向客户讲解时，可先看 `user` / `team_id` 确认归属，再看 `messages` / `response` 理解内容，最后看时间、Token 和费用。示例中的模型名、身份、Token 和金额均为演示值，不是实际分词结果或模型报价；可信归属仍依赖服务端身份映射，不能仅相信客户端传入的 `user`。
+
+此处省略 `proxy_server_request`、端点和来源地址等字段，不代表真实记录一定没有这些内容。关闭正文开关、调用失败、消息日志被关闭或发生截断时，正文可能为空、缺失或不完整；**元数据行存在不等于输入输出已经完整保存**。数据库有这些字段，也不等于普通用户或管理员能在现有 UI 中看到它们，查看范围仍按第 6 节验收。
+
+### 5.3 不承诺保存后即可看到全部明文
 
 - 加密上下文或供应商不公开的内容，保存后也可能仍不可读，不能承诺获取模型内部推理过程。
 - 图片、音频、文件和多模态内容可能以引用、编码或部分字段出现；不将 Spend Logs 描述成完整文件归档。
@@ -225,6 +292,8 @@ sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4
 ```
 
 对该镜像只读源码核对确认：存在 `store_prompts_in_spend_logs` 配置，描述为保存请求消息和响应；日志实现检查该配置及同名环境变量，并存在批量写入和正文截断保护路径。这是配置/源码事实，**不是所有协议的完整落库实测，也不是目标 UI/API 权限或生产部署验收**。
+
+第 5 节字段表另经同一镜像内 `/app/schema.prisma` 的 `LiteLLM_SpendLogs` 模型核对；JSON 序列化及补充请求体的说明依据镜像内 `litellm/proxy/spend_tracking/spend_tracking_utils.py`。示例仅作结构说明，没有读取客户数据库，也没有新增日志查询或正文采集功能。
 
 实际启用时须核对 YAML、数据库配置覆盖、环境变量、消息日志开关及客户端覆盖参数的一致性。特别是环境变量可能独立启用正文记录，不能只检查一处 YAML。不同 LiteLLM 版本、接口和许可证的字段、可见性和日志功能必须以目标版本实测为准。
 
