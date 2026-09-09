@@ -98,7 +98,7 @@ jobs:
         run: command -v cosign
       - name: Check audit plan artifact reader
         run: command -v gh
-      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+      - uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
         if: inputs.action != 'entra-apps' && !startsWith(inputs.action, 'admin-credentials') && inputs.action != 'entra-access' && inputs.action != 'entra-revoke' && inputs.action != 'certificate-renew'
         with:
           client-id: ${{ inputs.action == 'database-roles' && vars.AZURE_DATABASE_CLIENT_ID || vars.AZURE_RUNTIME_CLIENT_ID }}
@@ -116,14 +116,14 @@ jobs:
         run: test -n "$CERTIFICATE_CLIENT_ID" || { echo 'Configure the approved DNS challenge and API certificate Vault identity.' >&2; exit 1; }
       - name: Sign in with certificate identity
         if: inputs.action == 'certificate-renew'
-        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6
+        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c
         with:
           client-id: ${{ vars.AZURE_CERTIFICATE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Sign in with Entra bootstrap identity
         if: inputs.action == 'entra-apps' || startsWith(inputs.action, 'admin-credentials')
-        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
         with:
           client-id: ${{ vars.AZURE_ENTRA_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -135,7 +135,7 @@ jobs:
         run: test -n "$ENTRA_ACCESS_CLIENT_ID" || { echo 'Configure the separately approved Entra access grant OIDC identity.' >&2; exit 1; }
       - name: Sign in with access grant identity
         if: inputs.action == 'entra-access' || inputs.action == 'entra-revoke'
-        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
         with:
           client-id: ${{ vars.AZURE_ENTRA_ACCESS_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
