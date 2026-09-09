@@ -208,5 +208,6 @@ output edge object = {
   apiHost: apiHost
   adminHost: 'llm-admin.${baseDomain}'
   endpointHost: deployEdge ? endpoint!.properties.hostName : ''
+  routeId: deployEdge ? route!.id : ''
   profileId: deployEdge ? profile!.properties.frontDoorId : ''
 }

@@ -1,6 +1,9 @@
 @description('Private AKS cluster name.')
 param name string
 
+@description('Optional node resource group name. AKS creates it; immutable after cluster creation.')
+param nodeResourceGroupName string = ''
+
 @description('Azure region for the cluster.')
 param location string
 
@@ -125,7 +128,7 @@ resource cluster 'Microsoft.ContainerService/managedClusters@2025-01-01' = {
       podCidr: podCidr
       serviceCidr: serviceCidr
     }
-    nodeResourceGroup: '${resourceGroup().name}-${name}-nodes'
+    nodeResourceGroup: empty(nodeResourceGroupName) ? '${resourceGroup().name}-${name}-nodes' : nodeResourceGroupName
     oidcIssuerProfile: {
       enabled: true
     }

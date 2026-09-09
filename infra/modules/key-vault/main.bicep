@@ -9,6 +9,9 @@ param location string
 @description('LiteLLM Workload Identity principal ID.')
 param workloadPrincipalId string
 
+@description('Optional approved bootstrap runner principal ID for secret initialization; never the pod identity.')
+param bootstrapPrincipalId string = ''
+
 @description('Existing Log Analytics workspace resource ID.')
 param logAnalyticsWorkspaceId string
 
@@ -56,6 +59,17 @@ resource secretsUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
     principalId: workloadPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: keyVaultSecretsUserRoleId
+  }
+}
+
+resource bootstrapSecretsRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(bootstrapPrincipalId)) {
+  name: guid(vault.id, bootstrapPrincipalId, 'backend-secret-bootstrap')
+  scope: vault
+  properties: {
+    principalId: bootstrapPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7')
+    description: 'Approved bootstrap runner initializes secrets; workload identity remains read-only.'
   }
 }
 

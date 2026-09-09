@@ -16,7 +16,22 @@ L3首期实现包括按身份选择采集、私有Blob适配器、有界JSON/SSE
 
 原文查询与查看为同源CSRF保护的`POST /audit/search`和`POST /audit/view`，均需approvalId，view另需record id。`GET /audit`提供页面；普通proxy_admin不能进入。审批和hold配置必须由独立审批工作流发布，不能由申请人修改。
 
-内容暂存内存，写入失败/Pod崩溃可能形成显式缺口；不是持久化队列或零丢失保证。原文清除前使用ARM核对版本/软删除，部署和真实存储测试仍未执行。
+未设置`l3.deliveryMode`或设置为`buffered`时，沿用内容暂存内存的模式，写入失败/Pod崩溃可能形成显式缺口。`persist-before-forward`模式仍需显式选择；静态模板默认关闭，配置auditRuntime后的Stage8生成器按客户决策启用。两种模式都不是零丢失保证，原文清除前使用ARM核对版本/软删除，真实Azure存储与身份测试仍未执行。
+
+Stage8生成器保留API/admin的ServiceAccount主Client ID与原CSI凭据挂载，另在各自审计配置中填入独立writer/reader的l3.clientId；SDK显式选择此身份，不借用凭据Vault身份访问Blob。durable模式缺少Client ID或复用主身份会拒绝启动。留存作业使用独立配置与l3-retention身份。已有审批/保全ConfigMap不被应用发布覆盖，首次创建为空，默认无原文查看批准。collector自动接线尚未完成，审计专用发布不能覆盖已有启用的telemetry/guardrail。
+
+### 持久化前置交付与恢复核心
+
+- API请求在调用上游前保存受信上下文和脱敏请求。SSE仅在完整事件组的日志分片得到存储确认后转发，JSON在完整正文、结束标记和索引提交后转发；存储失败时不释放尚未记录的正文。已开始的流会中断，尚未发送响应时返回通用503。
+- 使用`eventsource-parser`解析事件并规范化SSE；注释心跳、retry和独立id字段不透传。必须使用有效UTF-8、未压缩JSON/SSE，SSE末尾须为完整空行边界。默认每请求2MiB、最多1024个分片、同时16个请求；超限拒绝继续输出，不是无界队列。每个分片增加Blob事务和往返延迟，需客户批准并实测成本/延迟预算。
+- 分片包含连续序号和前序哈希，结束标记绑定分片数量及末尾哈希；写入确认不确定时不生成矛盾结束标记。哈希链用于一致性检查，不是独立签名或针对可改写全部对象的管理员的防篡改保证。
+- `complete`仅表示已持久化内容的传输捕获终态；`modelOutcome`单独保留，`clientDelivery`始终为`unconfirmed`。`observedBytes`统计已保存分片脱敏前的规范化文本字节，不代表全部网络字节或尚未记录的数据。正文是脱敏/规范化版本，不是逐字节原始网络包；跨多个SSE事件拆开的凭据仍需额外脱敏设计，不能承诺任意秘密均能被检测。
+- `audit-recovery.mjs`可检查超过15分钟且未过期的请求、验证上下文/序号/哈希链、补索引或重建正文。缺少结束标记时仅恢复部分记录，不能因为看到`[DONE]`就推断进程完成或客户端收到。活动/过期记录不恢复；有保全的过期记录也不会因此重新开放原文读取。
+- `audit-recovery-job.mjs`保留内部有界计划/执行接口，`audit-recovery-worker.mjs`由专用Kubernetes Job调用。客户workflow通过audit-pause、audit-recover、audit-resume管理持久检查点，审批使用成功计划运行编号自动取artifact；每批最多25个请求，绑定代码、配置、镜像、存储、检查点和日志状态，只返回元数据。Job独立核验API副本为零、留存暂停且无活动写入Pod/Job，逐条修复前复核。15分钟年龄门槛不能替代暂停证明。
+- 独立恢复身份及RBAC已加入模板：显式audit.recoveryPrincipalId=auto后重新部署foundation及audit，恢复身份对content/index读写、pending只读、access只写，无删除权。现有API writer仍然只写，不能借用管理员reader或retention身份。Blob重复提交仅在有读取权限且原对象逐字节相同时认定幂等；只写身份遇到无法核对的重复提交会拒绝，而不会扩大权限或覆盖对象。
+- 留存删除包含请求、正文、索引和全部日志分片；保全覆盖这些副本。删除中途失败保留pending标记，下一次可继续清理。恢复必须在有检查点的停机窗口进行，失败后不自动恢复流量；普通application发布在窗口中被阻断。外部GitOps、额外写入程序和管理员操作仍须冻结，这不是分布式锁。存在API HPA或额外写入控制器时拒绝操作。
+
+本地测试覆盖真实HTTP存储确认顺序、失败拒绝、UTF-8/CRLF分片、未结束SSE尾部、结构化凭据字段脱敏、丢失写入确认、分页保全/删除续跑，以及子进程将合成日志同步写入临时磁盘后被SIGKILL的恢复。恢复workflow另有中断状态机、artifact审批、实际kubectl到本机HTTP的UID删除前置条件及Python/Node检查点哈希测试。Stage8审计清单另有身份/联邦/私网输出核验、CSI保持、治理登记保留、开关滚动更新及plan/execute模拟组合测试。磁盘测试不是Azure Blob故障证明；模型侧可信回调接收器、实际托管身份/私网/RBAC/CNI、跨事件脱敏、治理发布和collector仍未完成。流程和停机/授权要求见[客户部署指南](../docs/customer-deployment-workflows-zh.md#审计恢复维护窗口)。
 
 客户自有Node 24组件，使用`jose`验证JWT、`openid-client`完成OIDC Code + PKCE、`http-proxy-middleware`转发HTTP/SSE。不调用LiteLLM原生JWT、Enterprise RBAC或付费SSO。
 

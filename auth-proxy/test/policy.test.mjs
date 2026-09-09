@@ -34,6 +34,20 @@ test('admin requires a separate binding and matching role; viewer cannot write',
   assert.throws(() => authorizeRoute('admin', 'POST', '/key/block', admin));
 });
 
+test('typed bindings cannot exchange user and application credentials or delegated clients', () => {
+  const user = { ...binding, principalType: 'User', clientIds: [client] };
+  const typed = { ...config, bindings: [user] };
+  assert.equal(validateConfig(typed), typed);
+  assert.equal(bindingFor(typed, 'api', claims), user);
+  assert.throws(() => bindingFor(typed, 'api', { ...claims, idtyp: 'app', roles: ['Llm.Invoke'] }));
+  const application = { ...binding, principalType: 'ServicePrincipal' };
+  assert.throws(() => bindingFor({ ...config, bindings: [application] }, 'api', claims));
+  assert.equal(bindingFor({ ...config, bindings: [application] }, 'api', { ...claims, scp: undefined, idtyp: 'app', roles: ['Llm.Invoke'] }), application);
+  assert.throws(() => validateConfig({ ...config, bindings: [{ ...application, plane: 'admin', role: 'proxy_admin' }] }));
+  const otherClient = '44444444-4444-4444-8444-444444444444';
+  assert.throws(() => bindingFor({ ...typed, apiClientIds: [client, otherClient] }, 'api', { ...claims, azp: otherClient }));
+});
+
 test('allowlisted methods and paths reject management and normalization bypasses', () => {
   authorizeRoute('api', 'POST', '/v1/responses', binding);
   for (const path of ['/ui', '/fallback/login', '/key/generate', '/v1/files', '/mcp', '/v1/responses/id', '/V1/responses', '/v1/responses/', '/v1/%72esponses', '//v1/responses', '/v1/../v1/responses', '/v1/responses?api_key=bad']) assert.throws(() => authorizeRoute('api', 'POST', path, binding));

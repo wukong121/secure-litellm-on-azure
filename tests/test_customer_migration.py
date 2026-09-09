@@ -1,4 +1,5 @@
 import copy
+import io
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 import yaml
 
-from scripts.customer_migration import ROOT, STAGES, MigrationError, fingerprint, main, parameters_for, prepare, validate_config, validate_evidence, preview
+from scripts.customer_migration import ROOT, STAGES, MigrationError, active_stages, fingerprint, main, parameters_for, prepare, stage_checks, stage_fingerprint, validate_config, validate_evidence, preview
 
 
 def customer_config():
@@ -36,6 +37,46 @@ class CustomerMigrationTests(unittest.TestCase):
         self.config["target"]["resourceGroup"] = "RG-LEGACY"
         with self.assertRaises(ValueError):
             validate_config(self.config, "test")
+
+    def test_greenfield_requires_no_legacy_and_has_its_own_gates(self):
+        self.config["deploymentMode"] = "greenfield"
+        self.config.pop("legacy")
+        self.config["parameters"].pop("monitoring")
+        validate_config(self.config, "test")
+        self.assertEqual(active_stages(self.config), (0, 2, 3, 4, 5, 6, 7, 8, 9))
+        self.assertNotIn("backup_restore", stage_checks(0, self.config))
+        self.assertIn("database_schema", stage_checks(5, self.config))
+        record = {**self.record, "configSha256": fingerprint(self.config), "checks": stage_checks(0, self.config)}
+        validate_evidence([record], 2, self.config, self.revision, self.now)
+        with self.assertRaisesRegex(ValueError, "Prior stage evidence"):
+            validate_evidence([record], 3, self.config, self.revision, self.now)
+        for stage in (3, 4):
+            parameters_for(self.config, stage, "platform")
+        with self.assertRaisesRegex(ValueError, "does not apply"):
+            parameters_for(self.config, 1, "monitoring")
+        with self.assertRaisesRegex(ValueError, "does not apply"):
+            validate_evidence([record], 1, self.config, self.revision, self.now)
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            validate_evidence([{**record, "checks": list(STAGES[0][1])}], 2, self.config, self.revision, self.now)
+        self.config["legacy"] = customer_config()["legacy"]
+        with self.assertRaisesRegex(ValueError, "must omit legacy"):
+            validate_config(self.config, "test")
+
+    def test_migration_mode_still_requires_legacy_and_backup(self):
+        self.config["deploymentMode"] = "migration"
+        validate_config(self.config, "test")
+        self.assertIn("backup_restore", stage_checks(0, self.config))
+        self.config.pop("legacy")
+        with self.assertRaises(ValueError):
+            validate_config(self.config, "test")
+
+    def test_greenfield_guide_shows_initialization_without_cloud_calls(self):
+        with patch.dict("os.environ", {"CUSTOMER_CONFIG_JSON": json.dumps({"deploymentMode": "greenfield"})}, clear=True), patch("sys.argv", ["migration", "--stage", "5", "--mode", "guide", "--environment", "test"]), patch("sys.stdout", new_callable=io.StringIO) as output, patch("scripts.customer_migration.subprocess.run") as cloud:
+            main()
+            self.assertIn("database initialization", output.getvalue())
+            self.assertNotIn("pg_migration_restore", output.getvalue())
+            self.assertIn("0, 2, 3, 4, 5, 6, 7, 8, 9", output.getvalue())
+            cloud.assert_not_called()
 
     def test_placeholders_and_reserved_overrides_rejected(self):
         for mutate in (lambda config: config.update(ownerEmail="owner@example.com"), lambda config: config["parameters"]["platform"].update(deployStage5=True), lambda config: config["parameters"]["platform"].update(databasePassword="synthetic")):
@@ -81,6 +122,32 @@ class CustomerMigrationTests(unittest.TestCase):
         validate_evidence([self.record], 1, self.config, self.revision, self.now)
         with self.assertRaises(ValueError):
             validate_evidence([self.record], 2, self.config, self.revision, self.now)
+
+    def test_single_operator_requires_explicit_policy_and_real_check_results(self):
+        operator = self.record["approvedBy"][0]
+        self.config["governance"] = {"approvalMode": "single-operator", "approverObjectIds": [operator], "singleOperatorRiskAccepted": True}
+        validate_config(self.config, "test")
+        record = {**self.record, "binding": "stage-config", "configSha256": stage_fingerprint(self.config, 0), "approvalMode": "single-operator", "approvedBy": [operator]}
+        self.assertEqual(validate_evidence([record], 1, self.config, self.revision, self.now), {0})
+        for updates in ({"approvedBy": [self.record["approvedBy"][1]]}, {"approvalMode": "dual"}, {"status": "pending"}, {"checks": []}):
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                validate_evidence([{**record, **updates}], 1, self.config, self.revision, self.now)
+        self.config["governance"]["singleOperatorRiskAccepted"] = False
+        with self.assertRaises(ValueError):
+            validate_config(self.config, "test")
+
+    def test_stage_binding_ignores_future_outputs_but_not_existing_scope(self):
+        record = {**self.record, "binding": "stage-config", "configSha256": stage_fingerprint(self.config, 0)}
+        self.config["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"] = "/resolved/pls"
+        self.assertEqual(validate_evidence([record], 1, self.config, self.revision, self.now), {0})
+        self.config["legacy"]["resourceGroup"] = "different-legacy"
+        with self.assertRaises(ValueError):
+            validate_evidence([record], 1, self.config, self.revision, self.now)
+
+    def test_single_operator_is_not_described_as_dual_release(self):
+        self.config["governance"] = {"approvalMode": "single-operator", "approverObjectIds": [self.record["approvedBy"][0]], "singleOperatorRiskAccepted": True}
+        self.assertIn("single_operator_release", stage_checks(9, self.config))
+        self.assertNotIn("dual_owner_release", stage_checks(9, self.config))
 
     def test_evidence_bound_to_config_revision_approvals_checks_and_date(self):
         for updates in ({"configSha256": "c" * 64}, {"revision": "d" * 40}, {"checks": []}, {"observedAt": "2026-08-01T00:00:00Z"}, {"observedAt": "2026-09-08T00:00:00Z"}, {"approvedBy": [self.record["approvedBy"][0]] * 2}, {"reportUrl": "https://evidence.customer.invalid/report?sig=private"}, {"status": "pending"}):

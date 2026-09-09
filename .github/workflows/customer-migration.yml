@@ -9,7 +9,7 @@ on:
         type: choice
         options: [dev, test, prod]
       stage:
-        description: Migration stage (0 baseline through 9 approved cutover)
+        description: Stage 0-9; deploymentMode in customer config selects migration or greenfield (no Stage 1)
         required: true
         type: choice
         options: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
@@ -17,12 +17,12 @@ on:
         description: Guide, local readiness checks, or read-only Azure preview
         required: true
         type: choice
-        options: [guide, preflight, what-if]
+        options: [guide, config-check, preflight, what-if]
       component:
         description: IaC component (none for guidance or application-stage readiness)
         required: true
         type: choice
-        options: [none, backup, monitoring, platform, audit, origin, edge]
+        options: [none, bootstrap, network, backup, legacy-logging, monitoring, platform, proxy-foundation, audit-foundation, audit, observability, origin, edge]
 
 permissions:
   contents: read
@@ -36,7 +36,18 @@ jobs:
     environment: ${{ inputs.environment }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     steps:
+      - name: Require private protected default branch for artifact evidence
+        env:
+          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
+          CURRENT_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [[ "$PRIVATE_REPOSITORY" == true ]]
+          [[ "$CURRENT_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
       - name: Check out reviewed revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -49,12 +60,14 @@ jobs:
         run: python -m pip install PyYAML==6.0.3
       - name: Show prerequisites or verify customer readiness
         env:
-          CUSTOMER_CONFIG_JSON: ${{ vars.CUSTOMER_CONFIG_JSON }}
+          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON || vars.CUSTOMER_CONFIG_JSON }}
           MIGRATION_EVIDENCE_JSON: ${{ secrets.MIGRATION_EVIDENCE_JSON }}
+          MIGRATION_AUTO_EVIDENCE: 'true'
+          GH_TOKEN: ${{ github.token }}
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           MIGRATION_STAGE: ${{ inputs.stage }}
-          MIGRATION_MODE: ${{ inputs.mode == 'guide' && 'guide' || 'preflight' }}
+          MIGRATION_MODE: ${{ inputs.mode == 'what-if' && 'preflight' || inputs.mode }}
           MIGRATION_COMPONENT: ${{ inputs.component }}
           CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
         run: >-
@@ -63,7 +76,7 @@ jobs:
           --environment "$CUSTOMER_ENVIRONMENT"
       - name: Record non-sensitive next steps
         run: |
-          printf '%s\n' 'See docs/customer-migration-guide-zh.md for stage prerequisites and exit checks.' >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' 'See docs/customer-deployment-workflows-zh.md for migration/greenfield paths and stage exit checks.' >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' 'Readiness is not deployment approval. No configuration, raw plan, backup or secret is uploaded as an artifact.' >> "$GITHUB_STEP_SUMMARY"
       - name: Remove generated customer files
         if: always()
@@ -78,6 +91,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      actions: read
     steps:
       - name: Check out reviewed revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -99,8 +113,10 @@ jobs:
         run: az bicep install
       - name: Recheck evidence and preview without deployment
         env:
-          CUSTOMER_CONFIG_JSON: ${{ vars.CUSTOMER_CONFIG_JSON }}
+          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON || vars.CUSTOMER_CONFIG_JSON }}
           MIGRATION_EVIDENCE_JSON: ${{ secrets.MIGRATION_EVIDENCE_JSON }}
+          MIGRATION_AUTO_EVIDENCE: 'true'
+          GH_TOKEN: ${{ github.token }}
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           MIGRATION_STAGE: ${{ inputs.stage }}

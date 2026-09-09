@@ -1,0 +1,36 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { recoveryBatch } from '../audit-recovery-job.mjs';
+import { JournalAuditWriter, frameName } from '../audit-journal.mjs';
+import { MemoryAuditStore, metadata } from './audit-fixture.mjs';
+import { objectName } from '../audit-capture.mjs';
+
+test('recovery job binds plan to persisted state and only emits metadata', async () => {
+  const created = Date.parse('2026-09-09T00:00:00Z');
+  const clock = () => created + 16 * 60000;
+  const store = new MemoryAuditStore();
+  const writer = new JournalAuditWriter(store, { clock: () => created });
+  const capture = await writer.begin(metadata, { input: 'private synthetic text' }, {});
+  await capture.response({ format: 'sse', status: 200 });
+  await capture.frame('data: {"delta":"synthetic response"}\n\n');
+  const scope = { tenantId: metadata.tenantId, revision: 'a'.repeat(40), configSha256: 'b'.repeat(64), storageUrl: 'https://synthetic.blob.core.windows.net' };
+  const plan = await recoveryBatch(store, scope, { clock });
+  assert.ok(!JSON.stringify(plan).includes('private synthetic text'));
+  assert.ok(!JSON.stringify(plan).includes('synthetic response'));
+  assert.equal((await store.list('index', '')).names.length, 0);
+  await assert.rejects(recoveryBatch(store, scope, { clock, operation: 'execute', approved: 'f'.repeat(64) }), /plan changed/);
+  const changed = frameName(metadata.tenantId, metadata.id, 0);
+  const saved = store.blobs.get('content/' + changed);
+  store.blobs.set('content/' + changed, saved.replace('synthetic response', 'different response'));
+  await assert.rejects(recoveryBatch(store, scope, { clock, operation: 'execute', approved: plan.summary.planSha256 }), /plan changed/);
+  store.blobs.set('content/' + changed, saved);
+  await assert.rejects(recoveryBatch(store, scope, { clock, operation: 'execute', approved: plan.summary.planSha256 }), /orchestrator-controlled/);
+  assert.equal((await store.list('index', '')).names.length, 0);
+  await assert.rejects(recoveryBatch(store, { ...scope, password: 'synthetic-private-value' }, { clock }), /scope/);
+  let paused = false;
+  const result = await recoveryBatch(store, scope, { clock, operation: 'execute', approved: plan.summary.planSha256, runQuiesced: async action => { paused = true; await action(); } });
+  assert.equal(paused, true);
+  assert.equal(result.summary.applied, true);
+  assert.equal(result.summary.stageAccepted, false);
+  assert.equal((await store.get('content', objectName(metadata.tenantId, metadata.id))).complete, false);
+});

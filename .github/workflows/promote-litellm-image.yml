@@ -3,6 +3,12 @@ name: Promote LiteLLM image
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: Protected customer environment
+        type: choice
+        required: true
+        default: prod
+        options: [dev, test, prod]
       acr_name:
         description: Target Premium ACR name
         required: true
@@ -17,16 +23,42 @@ on:
         required: true
         default: litellm:1.98.0
         type: string
+      build_azure_runtime:
+        description: Build the reviewed non-DDL Azure runtime image before promotion
+        type: boolean
+        default: false
+      build_auth_proxy:
+        description: Build the reviewed API/admin auth proxy image; cannot combine with build_azure_runtime
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: customer-change-${{ inputs.environment }}
+  cancel-in-progress: false
+
 jobs:
-  promote:
+  authorize:
+    permissions:
+      contents: read
     runs-on: ubuntu-24.04
+    steps:
+      - name: Require a private repository and protected default branch
+        env:
+          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
+          CURRENT_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [[ "$PRIVATE_REPOSITORY" == true ]] || { echo 'Use a customer-controlled private repository.' >&2; exit 1; }
+          [[ "$CURRENT_REF" == "refs/heads/$DEFAULT_BRANCH" ]] || { echo 'Use reviewed code on the protected default branch.' >&2; exit 1; }
+  promote:
+    needs: authorize
+    runs-on: ${{ fromJSON(vars.MIGRATION_PRIVATE_RUNNER_LABELS) }}
     timeout-minutes: 45
-    environment: prod
+    environment: ${{ inputs.environment }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -36,11 +68,18 @@ jobs:
       - name: Require digest-pinned source
         env:
           SOURCE_IMAGE: ${{ inputs.source_image }}
+          ACR_NAME: ${{ inputs.acr_name }}
+          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON || vars.CUSTOMER_CONFIG_JSON }}
+          CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
+          BUILD_AZURE_RUNTIME: ${{ inputs.build_azure_runtime }}
+          BUILD_AUTH_PROXY: ${{ inputs.build_auth_proxy }}
         run: |
+          [[ "$BUILD_AZURE_RUNTIME" != true || "$BUILD_AUTH_PROXY" != true ]] || { echo 'Choose only one runtime build.' >&2; exit 1; }
           [[ "$SOURCE_IMAGE" == *@sha256:* ]] || {
             echo 'Source image must be pinned by sha256 digest.' >&2
             exit 1
           }
+          python3 -c 'import json,os; config=json.loads(os.environ["CUSTOMER_CONFIG_JSON"]); assert config["environment"] == os.environ["CUSTOMER_ENVIRONMENT"]; assert os.environ["ACR_NAME"] == config["parameters"]["platform"]["containerRegistryName"], "Target ACR differs from approved customer configuration"'
 
       - name: Sign in to Azure with OIDC
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
@@ -50,6 +89,7 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Import image into ACR
+        if: '!inputs.build_azure_runtime && !inputs.build_auth_proxy'
         env:
           ACR_NAME: ${{ inputs.acr_name }}
           SOURCE_IMAGE: ${{ inputs.source_image }}
@@ -60,6 +100,26 @@ jobs:
         env:
           ACR_NAME: ${{ inputs.acr_name }}
         run: az acr login --name "$ACR_NAME"
+
+      - name: Build and push the reviewed Azure application runtime
+        if: inputs.build_azure_runtime
+        env:
+          ACR_NAME: ${{ inputs.acr_name }}
+          TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          [[ "$TARGET_TAG" =~ ^[a-z0-9][a-z0-9/._-]*:[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || exit 1
+          docker build --network none -f LiteLLM/runtime/Dockerfile -t "$ACR_NAME.azurecr.io/$TARGET_TAG" .
+          docker push "$ACR_NAME.azurecr.io/$TARGET_TAG"
+
+      - name: Build and push the reviewed auth proxy
+        if: inputs.build_auth_proxy
+        env:
+          ACR_NAME: ${{ inputs.acr_name }}
+          TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          [[ "$TARGET_TAG" =~ ^[a-z0-9][a-z0-9/._-]*:[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || exit 1
+          docker build -f auth-proxy/Dockerfile -t "$ACR_NAME.azurecr.io/$TARGET_TAG" auth-proxy
+          docker push "$ACR_NAME.azurecr.io/$TARGET_TAG"
 
       - name: Resolve immutable target digest
         id: image
@@ -100,7 +160,17 @@ jobs:
       - name: Sign promoted digest
         env:
           IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
-        run: cosign sign --yes "$IMAGE_REFERENCE"
+          BUILD_AZURE_RUNTIME: ${{ inputs.build_azure_runtime }}
+          BUILD_AUTH_PROXY: ${{ inputs.build_auth_proxy }}
+          CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          if [[ "$BUILD_AZURE_RUNTIME" == true ]]; then
+            cosign sign --yes -a llmgw.runtime=azure -a "llmgw.revision=$GITHUB_SHA" -a "llmgw.environment=$CUSTOMER_ENVIRONMENT" "$IMAGE_REFERENCE"
+          elif [[ "$BUILD_AUTH_PROXY" == true ]]; then
+            cosign sign --yes -a llmgw.runtime=auth-proxy -a "llmgw.revision=$GITHUB_SHA" -a "llmgw.environment=$CUSTOMER_ENVIRONMENT" "$IMAGE_REFERENCE"
+          else
+            cosign sign --yes "$IMAGE_REFERENCE"
+          fi
 
       - name: Upload SBOM evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

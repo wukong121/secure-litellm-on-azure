@@ -1,4 +1,5 @@
 import json
+import copy
 from pathlib import Path
 import subprocess
 import unittest
@@ -30,13 +31,19 @@ def example_customer():
 class CustomerTemplateTests(unittest.TestCase):
     def test_generated_parameters_match_compiled_bicep_contracts(self):
         config = example_customer()
+        config["databaseAccess"] = {"migrationPrincipalId": "33333333-3333-4333-8333-333333333333"}
         for component, (first_stage, directory, _allowed) in COMPONENTS.items():
+            selected = copy.deepcopy(config)
+            if component == "network":
+                selected["parameters"]["network"] = {key: selected["parameters"]["backup"][key] for key in COMPONENTS["network"][2]}
+                selected["parameters"].pop("backup")
+                validate_config(selected, "test")
             result = subprocess.run(["az", "bicep", "build", "--file", str(ROOT / f"infra/{directory}/main.bicep"), "--stdout"], capture_output=True, text=True, check=True)
             compiled = json.loads(result.stdout)
             declarations = compiled["parameters"]
             for stage in ((3, 4, 5) if component == "platform" else (first_stage,)):
                 with self.subTest(component=component, stage=stage):
-                    _template, document = parameters_for(config, stage, component)
+                    _template, document = parameters_for(selected, stage, component)
                     parameters = document["parameters"]
                     self.assertFalse(set(parameters) - set(declarations))
                     self.assertFalse({name for name, declaration in declarations.items() if "defaultValue" not in declaration} - set(parameters))

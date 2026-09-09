@@ -4,9 +4,9 @@
 
 A customer deployment and migration project for a security-enhanced [LiteLLM](https://github.com/BerriAI/litellm) gateway on Azure. It combines Azure infrastructure as code, Kubernetes deployment components, customer-owned Microsoft Entra authentication, audit controls and staged delivery workflows.
 
-The project is intended for customer platform, security and operations teams, especially those replacing an existing LiteLLM gateway. Model routing can use multiple authorized Azure OpenAI resources within their allocated quotas; the project does not bypass Azure service limits.
+The delivery target covers both staged migration of existing gateways and greenfield deployment. Customers supply identities, resource IDs, domains and necessary decisions; workflows should perform deployment and verification without requiring customers to author manifests or test code. Model routing uses authorized Azure OpenAI resources within their quotas; the project does not bypass service limits.
 
-> **Delivery status:** staged guidance, configuration validation, read-only Azure previews and offline tests are available. Production integration and customer acceptance are not complete. This is not a one-click in-place upgrade; unresolved items remain release blockers.
+> **Delivery status:** migration/greenfield routing, guidance, configuration checks, infrastructure deployment and bounded private runtime operations are available. Automatic application rendering, runtime integration and fully automated customer verification are not complete. This is not a one-click in-place upgrade; unresolved items remain release blockers.
 
 ## Target Architecture
 
@@ -36,13 +36,13 @@ These are target capabilities, not claims that every component is deployed or pr
 
 ## Start Here
 
-1. Read the [customer migration guide](docs/customer-migration-guide-zh.md) for prerequisites, responsibilities, stage-by-stage actions, acceptance evidence and rollback.
+1. Choose migration or greenfield in the [deployment guide](docs/customer-deployment-workflows-zh.md). Existing gateway migration details are in the [migration guide](docs/customer-migration-guide-zh.md).
 2. Create protected customer GitHub Environments (`dev`, `test`, `prod`) and environment-scoped Azure OIDC identities.
-3. Fill in the [customer configuration template](config/customer.example.json) through the `CUSTOMER_CONFIG_JSON` Environment variable. Set `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID`; keep stage evidence in the `MIGRATION_EVIDENCE_JSON` Environment secret.
+3. Use the [migration template](config/customer.example.json) or [greenfield template](config/customer.greenfield.example.json) for the `CUSTOMER_CONFIG_JSON` Environment secret. Greenfield uses `deploymentMode=greenfield` and omits `legacy`. Configure deployment/runtime OIDC identities as documented; initialize `MIGRATION_EVIDENCE_JSON` to `[]`.
 4. Open **Customer staged migration**, select stage `0`, mode `guide`, component `none`, then proceed to `preflight` and approved `what-if` stages.
-5. Build and validate the new environment alongside the existing gateway. Deployments, database migration, traffic cutover and retirement require separate customer approval.
+5. Migration builds an isolated environment alongside the old gateway. Greenfield starts with Stage 0 `bootstrap` then `network` and skips the inapplicable Stage 1. Deployments and releases require approval; successful infrastructure deployment is not application acceptance.
 
-The workflow does not automatically apply resources, change DNS or delete the old environment. Runtime Master Key, Salt, database credentials and OIDC secrets belong in customer Key Vault, not repository files or the non-secret configuration JSON. API/admin hostnames are derived from the customer's `baseDomain`.
+The original migration workflow remains read-only. New [deployment and acceptance workflows](docs/customer-deployment-workflows-zh.md) provide plan-bound ARM deployment, private-runner backup/restore and manifest publishing, and explicit single-operator or dual approval. They do not automatically change DNS or retire the old environment, and outstanding runtime integration blockers still apply. Runtime credentials belong in customer Key Vault, never in the configuration JSON.
 
 ## Migration Stages
 

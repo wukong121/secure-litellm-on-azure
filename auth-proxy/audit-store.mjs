@@ -13,10 +13,20 @@ export class AzureAuditStore {
     return this.client.getContainerClient(containers[kind]);
   }
   async put(kind, name, value) {
-    await this.container(kind).getBlockBlobClient(name).uploadData(Buffer.from(JSON.stringify(value)), {
-      conditions: { ifNoneMatch: '*' }, abortSignal: AbortSignal.timeout(15000),
-      blobHTTPHeaders: { blobContentType: 'application/json', blobCacheControl: 'no-store' },
-    });
+    const data = Buffer.from(JSON.stringify(value));
+    const blob = this.container(kind).getBlockBlobClient(name);
+    try {
+      await blob.uploadData(data, {
+        conditions: { ifNoneMatch: '*' }, abortSignal: AbortSignal.timeout(15000),
+        blobHTTPHeaders: { blobContentType: 'application/json', blobCacheControl: 'no-store' },
+      });
+    } catch (error) {
+      if (![409, 412].includes(error.statusCode) || !['BlobAlreadyExists', 'ConditionNotMet'].includes(error.code)) throw error;
+      const properties = await blob.getProperties({ abortSignal: AbortSignal.timeout(15000) });
+      if (properties.contentLength !== data.length) throw new Error('Conflicting immutable audit object');
+      const existing = await blob.downloadToBuffer(0, data.length, { abortSignal: AbortSignal.timeout(15000), conditions: { ifMatch: properties.etag } });
+      if (!existing.equals(data)) throw new Error('Conflicting immutable audit object');
+    }
   }
   async get(kind, name) {
     const blob = this.container(kind).getBlockBlobClient(name);

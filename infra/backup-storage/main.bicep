@@ -26,6 +26,9 @@ param logAnalyticsWorkspaceName string
 @description('Microsoft Entra user object ID of the customer-approved backup owner. Do not infer it from the workflow identity.')
 param backupOwnerPrincipalId string
 
+@description('Optional object ID of the private backup runner service principal; never its client ID.')
+param backupAutomationPrincipalId string = ''
+
 @description('Human-readable owner identity recorded as resource metadata only.')
 param backupOwnerUpn string
 
@@ -451,6 +454,16 @@ resource backupOwnerDataRole 'Microsoft.Authorization/roleAssignments@2022-04-01
     principalType: 'User'
     roleDefinitionId: storageBlobDataOwnerRoleId
     description: 'Allows the designated LiteLLM PostgreSQL backup owner to read, write, restore, and delete backup blobs.'
+  }
+}
+
+resource automationBlobAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(backupAutomationPrincipalId)) {
+  scope: backupContainer
+  name: guid(backupContainer.id, backupAutomationPrincipalId, 'backup-automation')
+  properties: {
+    principalId: backupAutomationPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
   }
 }
 

@@ -1,12 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AuditWriter, digest, objectName, redactSecrets } from '../audit-capture.mjs';
+import { AuditWriter, digest, objectName, redactSecrets, requestObjectName } from '../audit-capture.mjs';
 import { MemoryAuditStore, metadata } from './audit-fixture.mjs';
 
 test('capture stores original/forwarded payloads, immutable completion and metadata-only index', async () => {
   const store = new MemoryAuditStore();
   const writer = new AuditWriter(store);
   const capture = await writer.begin(metadata, { input: 'synthetic original' }, { input: 'synthetic forwarded' });
+  const request = await store.get('content', requestObjectName(metadata.tenantId, metadata.id));
+  assert.equal(request.content.originalRequest.input, 'synthetic original');
+  assert.equal(request.recordType, 'request');
+  assert.equal(await store.get('content', objectName(metadata.tenantId, metadata.id)), null);
   capture.response({ format: 'json', status: 200 });
   capture.chunk(Buffer.from('{"output":"synthetic answer"}'));
   assert.equal(await capture.finish('upstream_end'), true);
@@ -63,4 +67,10 @@ test('capacity and intent failure deny capture; final storage failure leaves a d
   const failing = new MemoryAuditStore();
   failing.fail = 'pending';
   await assert.rejects(() => new AuditWriter(failing).begin(metadata, {}, {}));
+  const requestFailure = new MemoryAuditStore();
+  requestFailure.fail = 'content';
+  const blocked = new AuditWriter(requestFailure);
+  await assert.rejects(() => blocked.begin(metadata, { input: 'synthetic request' }, {}));
+  assert.equal(blocked.active, 0);
+  assert.ok(await requestFailure.get('pending', objectName(metadata.tenantId, metadata.id)));
 });

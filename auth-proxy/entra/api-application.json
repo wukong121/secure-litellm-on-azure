@@ -13,6 +13,13 @@
     }]
   },
   "appRoles": [{
+    "id": "81800000-0000-4000-8000-000000000006",
+    "value": "Llm.User",
+    "displayName": "LLM delegated user",
+    "description": "Delegated invocation requires user-specific consent and an explicit gateway binding.",
+    "allowedMemberTypes": ["User"],
+    "isEnabled": true
+  }, {
     "id": "81800000-0000-4000-8000-000000000002",
     "value": "Llm.Invoke",
     "displayName": "LLM application invocation",

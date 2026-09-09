@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { AuditWriter, objectName } from '../audit-capture.mjs';
 import { AuditReader, maintainAudit } from '../audit-reader.mjs';
 import { MemoryAuditStore, metadata } from './audit-fixture.mjs';
+import { JournalAuditWriter, journalPrefix } from '../audit-journal.mjs';
 
 const timestamp = Date.parse('2026-09-07T12:00:00Z');
 const claims = { tid: metadata.tenantId, oid: '33333333-3333-4333-8333-333333333333' };
@@ -76,4 +77,49 @@ test('retention follows stable cursors while deleting previous pages', async () 
   const second = await maintainAudit(store, { clock: () => timestamp + 8 * 86400000, limit: 1, cursor: first.nextCursor });
   assert.equal(first.deleted + second.deleted, 2);
   assert.equal((await store.list('pending', '')).names.length, 0);
+});
+
+test('retention covers durable journal fragments and holds protect all copies', async () => {
+  const store = new MemoryAuditStore();
+  const capture = await new JournalAuditWriter(store, { clock: () => timestamp }).begin(metadata, {}, {});
+  await capture.response({ format: 'sse', status: 200 });
+  for (let index = 0; index < 105; index += 1) await capture.frame(`data: {"delta":"synthetic-${index}"}\n\n`);
+  await capture.finish('client_disconnect');
+  const prefix = journalPrefix(metadata.tenantId, metadata.id);
+  const later = timestamp + 8 * 86400000;
+  const hold = { tenantId: metadata.tenantId, id: metadata.id, until: new Date(later + 86400000).toISOString(), caseId: 'SYNTHETIC-HOLD' };
+  assert.equal((await maintainAudit(store, { clock: () => later, holds: [hold] })).held, 1);
+  assert.equal((await store.list('content', prefix)).names.length, 107);
+  assert.equal((await maintainAudit(store, { clock: () => later })).deleted, 1);
+  assert.equal((await store.list('content', '')).names.length, 0);
+});
+
+test('interrupted journal deletion keeps the pending marker for the next retention run', async () => {
+  const store = new MemoryAuditStore();
+  const capture = await new JournalAuditWriter(store, { clock: () => timestamp }).begin(metadata, {}, {});
+  await capture.response({ format: 'sse', status: 200 });
+  await capture.frame('data: [DONE]\n\n');
+  await capture.finish('upstream_end');
+  const remove = store.remove.bind(store);
+  store.remove = async (kind, name) => {
+    if (name.endsWith('/end.json')) throw new Error('Synthetic deletion failure');
+    await remove(kind, name);
+  };
+  const clock = () => timestamp + 8 * 86400000;
+  await assert.rejects(maintainAudit(store, { clock }), /deletion failure/);
+  assert.ok(await store.get('pending', objectName(metadata.tenantId, metadata.id)));
+  store.remove = remove;
+  assert.equal((await maintainAudit(store, { clock })).deleted, 1);
+  assert.equal((await store.list('content', '')).names.length, 0);
+  assert.equal((await store.list('pending', '')).names.length, 0);
+});
+
+test('retention rejects mismatched request scope before deleting any object', async () => {
+  const store = await fixture();
+  const name = objectName(metadata.tenantId, metadata.id);
+  const pending = await store.get('pending', name);
+  store.blobs.set('pending/' + name, JSON.stringify({ ...pending, id: '77777777-7777-4777-8777-777777777777' }));
+  const before = [...store.blobs.entries()];
+  await assert.rejects(maintainAudit(store, { clock: () => timestamp + 8 * 86400000 }), /scope/);
+  assert.deepEqual([...store.blobs.entries()], before);
 });

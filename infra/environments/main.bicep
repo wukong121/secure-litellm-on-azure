@@ -17,6 +17,7 @@ type stage4NetworkConfiguration = {
 
 type stage4AksConfiguration = {
   name: string
+  nodeResourceGroupName: string?
   dnsPrefix: string
   kubernetesVersion: string
   systemNodeVmSize: string
@@ -77,6 +78,9 @@ param deployStage4 bool = false
 
 @description('Create Stage 5 Key Vault, PostgreSQL Flexible Server, Azure Managed Redis, Private Endpoints, diagnostics, and data-plane identity assignments. Requires deployStage4=true.')
 param deployStage5 bool = false
+
+@description('Approved migration runner principal ID allowed to initialize the backend Vault.')
+param bootstrapPrincipalId string = ''
 
 @description('Create the Stage 5 Key Vault private DNS zone. Keep false when the central zone already exists.')
 param createStage5KeyVaultPrivateDnsZone bool = false
@@ -224,6 +228,7 @@ module aksNetwork '../modules/aks-network/main.bicep' = if (deployStage4) {
 module privateAks '../modules/private-aks/main.bicep' = if (deployStage4) {
   params: {
     name: stage4Aks.name
+    nodeResourceGroupName: stage4Aks.?nodeResourceGroupName ?? ''
     location: location
     dnsPrefix: stage4Aks.dnsPrefix
     kubernetesVersion: stage4Aks.kubernetesVersion
@@ -300,6 +305,7 @@ module keyVault '../modules/key-vault/main.bicep' = if (stage5Enabled) {
     name: keyVaultName
     location: location
     workloadPrincipalId: workloadIdentity!.outputs.workloadIdentity.principalId
+    bootstrapPrincipalId: bootstrapPrincipalId
     logAnalyticsWorkspaceId: logAnalyticsWorkspace.id
     tags: tags
   }
@@ -380,6 +386,8 @@ output platform object = {
   stage4Deployed: deployStage4
   privateAksName: privateAks.?outputs.?aks.?name ?? stage4Aks.name
   workloadIdentityName: workloadIdentity.?outputs.?workloadIdentity.?name ?? 'id-litellm-workload-${environmentName}'
+  workloadIdentityClientId: workloadIdentity.?outputs.?workloadIdentity.?clientId ?? ''
+  workloadIdentityPrincipalId: workloadIdentity.?outputs.?workloadIdentity.?principalId ?? ''
   stage5Deployed: stage5Enabled
   keyVaultName: keyVault.?outputs.?keyVault.?name ?? keyVaultName
   postgresqlServerName: postgresql.?outputs.?postgresql.?name ?? postgresqlServerName

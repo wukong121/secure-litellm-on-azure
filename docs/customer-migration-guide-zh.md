@@ -2,7 +2,7 @@
 
 > 适用：客户已有LiteLLM on AKS网关，计划建设隔离的新安全环境并逐步替换。
 > 不适用：直接在旧生产AKS/数据库上执行整套模板，或把参考阶段记录当作客户验收报告。
-> 当前交付：可运行的阶段指导、客户配置预检、只读IaC What-if、离线验证，以及人工受控执行的操作流程。不是已完成全部集成的一键生产升级器。
+> 当前交付：阶段指导、配置检查、只读What-if、受批准的ARM实际部署、私网备份/恢复及应用清单发布、验收报告和证据账本生成。完整操作及人工ID清单见[客户部署与验收工作流](customer-deployment-workflows-zh.md)。这些入口不代表所有运行时集成已完成，不是一键生产切流器。
 
 ## 1. 迁移原则与入口
 
@@ -13,17 +13,18 @@
 | mode | 行为 | 不会执行 |
 | --- | --- | --- |
 | `guide` | 输出阶段目标、退出证据名称和本文入口，无需Azure登录或客户配置 | 不证明前置条件已满足 |
+| `config-check` | 检查选定组件配置，不要求前序验收证据 | 不查询云资源、不证明部署就绪 |
 | `preflight` | 校验客户配置、订阅/租户、旧新隔离和前序证据；选IaC组件时生成私有参数，阶段7至9选none时生成域名overlay | 不查询Azure真实状态，不补齐身份/Secret/镜像占位符 |
 | `what-if` | 重新执行预检，用OIDC做选定组件的真实Azure What-if，仅输出变更数量 | 不执行部署、数据库迁移、Kubernetes apply、DNS/WAF切流或资源删除 |
 
-原Azure IaC what-if入口已停用直接预览，只提示使用新入口，不能绕过阶段门禁。当前不提供通用自动apply：入口controller、PG认证、L3可靠交付等仍有[收尾阻断项](litellm-code-completion-backlog-2026-09-07.md)，自动执行会掩盖这些缺口。
+原Azure IaC what-if入口已停用直接预览。实际执行使用 **Customer infrastructure deployment** 的plan/deploy、**Customer private runtime operations** 的plan/execute；阶段验收使用 **Customer stage acceptance** 的draft/record。部署和验收分开，入口controller、PG认证、L3可靠交付等[收尾阻断项](litellm-code-completion-backlog-2026-09-07.md)未完成不能切流。不要将“运行了deploy”记录为所有checks均通过。
 
 ## 2. 客户首次准备
 
 1. 将仓库导入客户控制的私有仓库；保护主分支，要求PR审查及CI通过。不要将客户配置提交到这个公共项目。
-2. 建立`dev`、`test`、`prod` GitHub Environments。生产Environment要求审批人、禁止自我审批及受限部署分支；配置维护者与验收审批者分离。GitHub审批功能受客户套餐影响，缺失时使用等效外部双人变更流程，不宣称单次workflow审批等于双人签字。
+2. 建立`dev`、`test`、`prod` GitHub Environments，限制部署分支。默认双人策略应配置维护者与验收审批者分离、禁止自我审批；仅一位运维时可按新工作流指南显式启用single-operator并记录客户风险接受，不能宣称职责分离。GitHub审批受套餐影响，缺失时用客户外部变更流程。
 3. 为每个Environment配置独立Azure OIDC身份。Federated Credential issuer为`https://token.actions.githubusercontent.com`，audience为`api://AzureADTokenExchange`，subject精确到`repo:<customer-org>/<customer-repo>:environment:<environment>`。不要使用个人用户登录或client secret。
-4. 客户预先创建新专用目标资源组和需要的Log Analytics workspace，确认预算/配额。此版本要求目标RG与旧RG不同，引用的workspace/VNet/私有DNS/CMK Vault应符合模块的同RG假设；跨RG共享资源需先扩展模块并测试，不通过修改旧资源规避限制。
+4. 确认预算和配额，使用阶段0的bootstrap组件先plan、批准后deploy创建新目标RG和Log Analytics workspace；无需手工预建。已有同RG Workspace可显式选existing。目标RG必须与旧RG不同；跨RG共享资源仍需扩展和测试。旧网关没有日志库时由阶段1legacy-logging创建，再onboard监控。
 5. 由网络Owner批准区域、VM SKU、Kubernetes版本、CIDR、路由及私网执行位置。示例CIDR、HA Disabled、Redis规格均不是客户默认架构决策。
 6. 安装或批准Azure CLI/Bicep、kubectl、Python及Docker验证工具。部署到Private AKS和访问私有ACR/Blob需要客户受控私网终端或隔离self-hosted runner，不为GitHub-hosted runner开放生产公网。
 
@@ -34,7 +35,7 @@
 | `AZURE_CLIENT_ID` | Variable | 本Environment的OIDC应用/托管身份client ID，不是用户object ID |
 | `AZURE_TENANT_ID` | Variable | 必须与客户配置中的tenantId一致 |
 | `AZURE_SUBSCRIPTION_ID` | Variable | 必须与客户配置中的subscriptionId一致 |
-| `CUSTOMER_CONFIG_JSON` | Variable | 按[客户配置模板](../config/customer.example.json)填写完整JSON；只放非秘密元数据，不超过GitHub单变量限额 |
+| `CUSTOMER_CONFIG_JSON` | Secret推荐，兼容Variable | 按[客户配置模板](../config/customer.example.json)填写完整JSON；Secret优先，避免Actions打印step env；仍禁止运行时凭据 |
 | `MIGRATION_EVIDENCE_JSON` | Secret | 按[证据模板](../config/migration-evidence.example.json)保存阶段验收元数据；阶段0可为空数组；不要放报告原文、下载Token或备份 |
 
 配置中的`ownerEmail`用于资源标签、告警邮箱以及备份Owner描述，不用于推断RBAC。`backupOwnerPrincipalId`是客户明确批准的Entra用户object ID；当前备份模板的principalType为User，不能填workflow应用ID或用`az ad signed-in-user`推断。需组/服务主体时先修改并测试该角色边界。
@@ -43,19 +44,19 @@
 
 原环境Bicep参数中的`OWNER_EMAIL`、`LOG_ANALYTICS_WORKSPACE_NAME`、`AZURE_LOCATION`只用于独立编译/直接参数文件使用；其示例回退是离线检查用途。客户迁移workflow使用`CUSTOMER_CONFIG_JSON`生成显式ARM参数，不使用这些回退，也不默默读取个人域名配置。
 
-运行时秘密由客户Key Vault承载：已有Master Key、Salt、数据库连接信息、管理OIDC client secret、会话加密密钥、受限后端Key等通过批准的CSI/Workload Identity接入。不要把它们写入`CUSTOMER_CONFIG_JSON`、ARM非secure参数、workflow inputs或日志。目前workflow不初始化或搬运运行时秘密；若客户另建密钥初始化job，必须用独立环境Secret/Key Vault权限、私网runner和禁止输出的流程，不能把秘密当作资源标签。
+运行时秘密由客户Key Vault承载：已有Master Key、Salt、数据库连接信息、管理OIDC client secret、会话加密密钥、受限后端Key等通过批准的CSI/Workload Identity接入。不要把它们写入`CUSTOMER_CONFIG_JSON`、ARM非secure参数、workflow inputs或日志。新增audit-foundation创建审计CMK及独立身份，但应用运行时秘密接线仍需受控初始化，不自动轮换客户已有加密材料。
 
 ### 2.2 Azure权限与日志
 
 指导和离线预检job没有`id-token: write`。仅What-if job申请OIDC；Azure What-if仍要求目标资源的相应部署权限，不等于Azure Reader即可。由客户平台管理员按官方What-if权限要求授予目标范围的必要权限，涉及RBAC的模块单独审批；不要因为一个权限错误授予订阅Owner。workflow只调用what-if，不代表其Azure身份在RBAC上天然无法部署。
 
-参数/原始What-if/诊断仅写运行器内忽略目录，权限0700/0600，不上传artifact，结束清理。公开日志只显示阶段、配置哈希和变更数量。客户需检查Azure login/action本身日志的组织保密要求；建议私有仓库。详细失败诊断可在私有受控终端按下述相同CLI复现，不启用shell trace或把文件上传公开工单。
+原只读workflow的参数/What-if/诊断不上传artifact。新增部署workflow仅允许客户私有仓库，会保存7天审查计划、无秘密输出和执行记录；runtime保存受控发布摘要/待验收结果，绝不上传数据库dump、kubeconfig、原始stderr和参数。客户需检查Actions日志和artifact访问权限；Secret保护不替代报告/ConfigMap的秘密审查。
 
 ## 3. 证据与批准机制
 
-阶段N的`preflight`/`what-if`必须具备0至N-1每个阶段的通过记录。运行`guide`获得每阶段精确的`checks`名称。记录包含：阶段、environment、配置SHA-256、完整Git SHA、passed状态、全部checks、两名不同审批者object ID、UTC时间、私有HTTPS报告引用及报告SHA-256。
+阶段N的`preflight`/原`what-if`及实际deploy/execute必须具备0至N-1的通过记录；独立config-check和部署plan不要求验收。记录包含阶段、环境、配置哈希、完整Git SHA、全部checks、与governance匹配的审批者、时间和报告引用。用Customer stage acceptance生成pending报告，实测审核后record生成账本，再更新证据Secret，不需要先伪造passed才能开始阶段0。
 
-先运行阶段0预检获取配置哈希。所有记录绑定同一配置和代码版本，最近7天内才有效；代码、订阅、租户、区域、域名、资源或配置变化后，相关Owner必须重新评审并更新记录，不直接改哈希冒充验收。长期迁移期间需要重新确认早期备份/回退仍有效，不必未经判断重复操作生产。
+新记录使用stage-config绑定，只覆盖当前及前序阶段相关配置，后续PLS/审计身份输出补填不使阶段0失效；旧full-config记录仍可使用。相关配置、审批策略或代码改变后需重新审核，不直接改哈希冒充验收。记录仍限最近7天，长期迁移要复核早期备份和回退有效性。新报告哈希是规范JSON哈希，由工具计算。
 
 **这是声明结构门禁，不是自动事实认证**：脚本不会读取/核实报告，不会证明审批者拥有真实权限，也不会写入“已部署”的状态。客户变更系统是证据来源，GitHub Secret发布权限是信任边界；不能由部署执行人自行填写虚假passed记录。配置/证据不是程序可执行代码，shell仅接收固定choices，JSON通过环境变量传入。
 
@@ -67,7 +68,7 @@
 
 **执行**：先`stage=0, mode=guide/preflight, component=none`。在旧环境只读盘点实际版本/digest、模型/路由、预算/Key、SSO、Secret/Salt路径、PVC、流量与网络；敏感导出不入Git。用客户批准的方式做PG逻辑备份并在独立数据库完整恢复，验证表/行数、密文可读性、关键API/WS/Codex基线及RTO。不要只以`pg_restore -l`成功证明恢复完成。
 
-没有专用备份存储时，可选`component=backup, mode=what-if`预览新目标RG的私有存储和初始VNet。模板会创建并管理VNet，不用于导入已有共享VNet；阶段4增加子网后禁止重新套用该bootstrap模板。已有合规备份服务可复用，不强制再建一份。
+没有专用备份存储时，先用infrastructure的bootstrap初始化RG/workspace，再对backup组件plan/deploy，随后在私网runtime执行backup-restore。模板会创建初始VNet，不用于接管已有共享VNet；阶段4后禁止重套backup模板。已有合规备份服务可复用，验收仍需真实恢复。完整按钮选择见[阶段清单](customer-deployment-workflows-zh.md#3-每阶段操作清单)。
 
 **退出证据**：`inventory`、`backup_restore`、`key_salt_recovery`、`protocol_baseline`。保留旧环境，备份失败不进入后续阶段。详见[备份模板说明](../infra/backup-storage/README_ZH.md)。
 

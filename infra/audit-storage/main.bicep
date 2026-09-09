@@ -13,6 +13,8 @@ param cmkKeyName string
 param writerPrincipalId string
 param readerPrincipalId string
 param retentionPrincipalId string
+@description('Optional dedicated recovery identity. Never reuse writer, reader or retention.')
+param recoveryPrincipalId string = ''
 param tags object = {}
 
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-07-01' existing = {
@@ -109,6 +111,7 @@ var rolePolicies = [
   { alias: 'reader', actions: [], dataActions: ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'] }
   { alias: 'retention', actions: [], dataActions: ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read', 'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/delete'] }
   { alias: 'policy-reader', actions: ['Microsoft.Storage/storageAccounts/blobServices/read'], dataActions: [] }
+  { alias: 'recovery', actions: [], dataActions: ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read', 'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write'] }
 ]
 resource roles 'Microsoft.Authorization/roleDefinitions@2022-04-01' = [for role in rolePolicies: if (deployAuditStorage) {
   name: guid(resourceGroup().id, storageAccountName, role.alias)
@@ -123,10 +126,17 @@ resource roles 'Microsoft.Authorization/roleDefinitions@2022-04-01' = [for role 
 var writerGrants = [for index in range(0, 3): { principalId: writerPrincipalId, containerIndex: index, roleIndex: 0 }]
 var readerGrants = [for index in range(0, 2): { principalId: readerPrincipalId, containerIndex: index, roleIndex: 1 }]
 var retentionGrants = [for index in range(0, 3): { principalId: retentionPrincipalId, containerIndex: index, roleIndex: 2 }]
+var recoveryGrants = empty(recoveryPrincipalId) ? [] : [
+  { principalId: recoveryPrincipalId, containerIndex: 0, roleIndex: 4 }
+  { principalId: recoveryPrincipalId, containerIndex: 1, roleIndex: 4 }
+  { principalId: recoveryPrincipalId, containerIndex: 2, roleIndex: 1 }
+  { principalId: recoveryPrincipalId, containerIndex: 3, roleIndex: 0 }
+]
 var grants = concat(
   writerGrants,
   readerGrants,
   retentionGrants,
+  recoveryGrants,
   [
     { principalId: readerPrincipalId, containerIndex: 3, roleIndex: 0 }
     { principalId: retentionPrincipalId, containerIndex: 3, roleIndex: 0 }

@@ -3,6 +3,13 @@ import { createParser } from 'eventsource-parser';
 
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export const objectName = (tenantId, id) => `${tenantId}/${id}.json`;
+export const requestObjectName = (tenantId, id) => `${tenantId}/${id}.request.json`;
+
+export function auditIndex(record) {
+  const { id, traceId, tenantId, subject, teamId, model, createdAt, expiresAt, outcome, complete, truncated, redactionCount } = record;
+  return { id, traceId, tenantId, subject, teamId, model, createdAt, expiresAt, outcome, complete, truncated,
+    status: record.responseInfo.status ?? 0, contentHash: digest(JSON.stringify(record)), redactionCount };
+}
 
 export function redactSecrets(value) {
   let count = 0;
@@ -41,6 +48,10 @@ export class AuditWriter {
     const name = objectName(context.tenantId, context.id);
     try {
       await this.store.put('pending', name, context);
+      const request = redactSecrets({ originalRequest: original, forwardedRequest: forwarded });
+      await this.store.put('content', requestObjectName(context.tenantId, context.id), {
+        schemaVersion: 1, ...context, recordType: 'request', content: request.value, redactionCount: request.count,
+      });
     } catch {
       this.active -= 1;
       this.failedAt = this.clock();
@@ -98,9 +109,8 @@ export class AuditWriter {
               redactionCount: redacted.count, fidelity: redacted.count ? 'credential-redacted' : 'captured-content',
               content: redacted.value,
             };
-            const encoded = JSON.stringify(record);
             await this.store.put('content', name, record);
-            await this.store.put('index', name, { ...context, outcome, complete, truncated, status: responseInfo.status ?? 0, contentHash: digest(encoded), redactionCount: redacted.count });
+            await this.store.put('index', name, auditIndex(record));
             this.signal({ event: complete ? 'l3_committed' : 'l3_partial', traceId: context.traceId, id: context.id });
             return true;
           } catch {

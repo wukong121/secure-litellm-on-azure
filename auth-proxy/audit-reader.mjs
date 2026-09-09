@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Denied } from './policy.mjs';
-import { digest, objectName } from './audit-capture.mjs';
+import { digest, objectName, requestObjectName } from './audit-capture.mjs';
+import { journalPrefix } from './audit-journal.mjs';
 
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
@@ -77,12 +78,30 @@ export async function maintainAudit(store, { clock = () => Date.now(), holds = [
   for (const name of listed.names) {
     const record = await store.get('pending', name);
     if (!record) continue;
+    if (!uuid.test(record.tenantId) || !uuid.test(record.id) || name !== objectName(record.tenantId, record.id)) throw new Error('Invalid audit retention scope');
     const index = await store.get('index', name);
     if (!index && clock() - Date.parse(record.createdAt) > 15 * 60000) gaps += 1;
     if (!(Date.parse(record.expiresAt) <= clock())) continue;
     if (holds.some(hold => hold.tenantId === record.tenantId && hold.id === record.id && Date.parse(hold.until) > clock())) { held += 1; continue; }
     await store.put('access', objectName(record.tenantId, randomUUID()), { action: 'retention_delete', outcome: 'attempt', recordId: record.id, time: new Date(clock()).toISOString() });
     await store.remove('content', name);
+    await store.remove('content', requestObjectName(record.tenantId, record.id));
+    if (record.deliveryMode === 'persist-before-forward') {
+      const prefix = journalPrefix(record.tenantId, record.id);
+      let journalCursor;
+      const seen = new Set();
+      for (let page = 0; page < 20; page += 1) {
+        const journal = await store.list('content', prefix, 100, journalCursor);
+        for (const entry of journal.names) {
+          if (!entry.startsWith(prefix) || !/^(?:[0-9]{6}|header|end)\.json$/.test(entry.slice(prefix.length))) throw new Error('Unexpected journal object during retention');
+          await store.remove('content', entry);
+        }
+        if (!journal.truncated) break;
+        if (!journal.nextCursor || seen.has(journal.nextCursor) || page === 19) throw new Error('Journal retention exceeded bounded scan');
+        seen.add(journal.nextCursor);
+        journalCursor = journal.nextCursor;
+      }
+    }
     await store.remove('index', name);
     await store.remove('pending', name);
     await store.put('access', objectName(record.tenantId, randomUUID()), { action: 'retention_delete', outcome: 'completed', recordId: record.id, time: new Date(clock()).toISOString() });

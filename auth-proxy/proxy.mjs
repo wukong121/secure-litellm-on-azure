@@ -1,11 +1,13 @@
 import { createServer } from 'node:http';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { createProxyMiddleware } from 'http-proxy-middleware';
+import { pipeline } from 'node:stream';
 import * as oidc from 'openid-client';
 import { authorizeRoute, bindingFor, cleanHeaders, Denied, sanitizeBody, subjectTag } from './policy.mjs';
 import { readCookie, sessionCookie } from './auth.mjs';
 import { auditPage, auditStyle, auditClient } from './audit-page.mjs';
 import { enforceFrontDoor, validateFrontDoorId } from './edge-policy.mjs';
+import { deliverAuditedResponse } from './audit-delivery.mjs';
 
 const sessionName = '__Host-llm-admin';
 const transactionName = '__Host-llm-login';
@@ -35,8 +37,10 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
   validateFrontDoorId(plane, frontDoorId);
   const proxy = createProxyMiddleware({
     target, changeOrigin: true, xfwd: false, ws: false, proxyTimeout: 570000,
+    selfHandleResponse: l3?.durable === true,
     on: {
-      proxyReq(upstream, request) {
+      proxyReq(upstream, request, response) {
+        if (l3?.durable) response.once('close', () => { if (!response.writableFinished) upstream.destroy(); });
         if (request.forwardBody) {
           upstream.setHeader('content-length', request.forwardBody.length);
           upstream.write(request.forwardBody);
@@ -46,6 +50,16 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
         delete upstream.headers['set-cookie'];
         delete upstream.headers.location;
         upstream.headers['cache-control'] = 'no-store';
+        if (l3?.durable === true) {
+          if (request.l3?.durable) {
+            request.auditDeliveryStarted = true;
+            void deliverAuditedResponse(upstream, response, request.l3);
+          } else {
+            response.writeHead(upstream.statusCode, upstream.headers);
+            pipeline(upstream, response, () => {});
+          }
+          return;
+        }
         if (request.l3) {
           const contentType = upstream.headers['content-type'] ?? '';
           const format = upstream.headers['content-encoding'] && upstream.headers['content-encoding'] !== 'identity' ? 'unsupported' : contentType.includes('text/event-stream') ? 'sse' : contentType.includes('application/json') ? 'json' : 'unsupported';
@@ -81,7 +95,7 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
     };
     const deadline = setTimeout(() => response.destroy(), 570000);
     response.on('close', () => clearTimeout(deadline));
-    response.on('close', () => request.l3?.finish('client_disconnect'));
+    response.on('close', () => { if (!request.auditDeliveryStarted) request.l3?.finish('client_disconnect'); });
     response.on('finish', () => logCompletion('completed'));
     response.on('close', () => logCompletion('disconnected'));
     response.setHeader('x-request-id', requestId);

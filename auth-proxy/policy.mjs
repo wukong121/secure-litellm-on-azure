@@ -36,6 +36,12 @@ export function validateConfig(config) {
     const identity = `${binding.plane}:${binding.oid}`;
     if (!uuid.test(binding.oid) || identities.has(identity)) throw new Error('Invalid/duplicate binding');
     identities.add(identity);
+    if (binding.principalType !== undefined &&
+      (!['User', 'ServicePrincipal'].includes(binding.principalType) ||
+       (binding.plane === 'admin' && binding.principalType !== 'User'))) throw new Error('Invalid principal type');
+    if (binding.clientIds !== undefined &&
+      (binding.plane !== 'api' || binding.principalType !== 'User' || !Array.isArray(binding.clientIds) ||
+       !binding.clientIds.length || !binding.clientIds.every(value => config.apiClientIds.includes(value)))) throw new Error('Invalid delegated client scope');
     if (binding.role === 'audit_reader') {
       if (binding.plane !== 'admin' || binding.keyFile || binding.models?.length) throw new Error('Audit readers cannot carry LiteLLM backend privileges');
       continue;
@@ -63,6 +69,9 @@ export function bindingFor(config, plane, claims) {
     if (claims.ver !== '2.0' || !config.apiClientIds.includes(claims.azp)) throw new Denied();
     const delegated = typeof claims.scp === 'string' && claims.scp.split(' ').includes('llm.invoke');
     const application = claims.idtyp === 'app' && Array.isArray(claims.roles) && claims.roles.includes('Llm.Invoke');
+    if (binding.principalType === 'User' && (!delegated || claims.idtyp === 'app')) throw new Denied();
+    if (binding.principalType === 'ServicePrincipal' && !application) throw new Denied();
+    if (binding.clientIds && !binding.clientIds.includes(claims.azp)) throw new Denied();
     if (!delegated && !application) throw new Denied();
   } else if (!Array.isArray(claims.roles) || !claims.roles.includes(binding.role)) {
     throw new Denied();

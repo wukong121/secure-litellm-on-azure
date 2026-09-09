@@ -27,13 +27,65 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install configuration parser
-        run: python -m pip install PyYAML==6.0.3
+        run: python -m pip install PyYAML==6.0.3 cryptography==50.0.1 service-identity==24.2.0 'psycopg[binary]==3.2.10' azure-identity==1.25.1 azure-keyvault-secrets==4.10.0
       - name: Test customer migration gates
         run: |
           mkdir -p temp
           python -m unittest tests.test_customer_migration tests.test_public_config
+          python -m unittest tests.test_migration_deploy tests.test_migration_evidence tests.test_migration_runtime tests.test_migration_workflows
+          python -m unittest tests.test_greenfield_runtime
+          python -m unittest -b tests.test_delivery_paths tests.test_install_workflows tests.test_installation_readiness tests.test_runner_lifecycle tests.test_dns_runtime tests.test_gateway_checks
+          python -m unittest tests.test_private_ingress tests.test_private_ingress_runtime
+          python -m unittest tests.test_database_roles
+          python -m unittest tests.test_azure_postgresql
+          python -m unittest tests.test_azure_application tests.test_schema_migration tests.test_schema_runtime
+          python -m unittest tests.test_runtime_secrets tests.test_backend_access
+          python -m unittest tests.test_backend_manifest
+          python -m unittest tests.test_proxy_config tests.test_entra_apps tests.test_admin_credentials
+          python -m unittest tests.test_entra_access
+          python -m unittest tests.test_entra_revoke tests.test_audit_governance tests.test_workflow_artifacts
+          python -m unittest tests.test_admin_credential_lifecycle
+          python -m unittest tests.test_proxy_credentials tests.test_proxy_credentials_runtime tests.test_proxy_manifest
           python -m scripts.validate_public_config
           python -m scripts.customer_migration --stage 0 --environment test --mode guide
+
+  private-runtime-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install PyYAML==6.0.3 cryptography==50.0.1 service-identity==24.2.0 'psycopg[binary]==3.2.10'
+      - name: Verify isolated gateway TLS and PostgreSQL permissions
+        env:
+          RUN_PRIVATE_INGRESS_CONTAINER_TESTS: '1'
+          RUN_DATABASE_ROLES_CONTAINER_TESTS: '1'
+        run: |
+          mkdir -p temp
+          python -m unittest -b tests.test_private_ingress_container tests.test_database_roles_container
+      - name: Verify API certificate protocol models without contacting a CA
+        run: |
+          python -m pip install acme==5.8.0 dnspython==2.8.0 josepy==2.2.0
+          python -m unittest -b tests.test_certificate_runtime
+      - name: Verify Azure credentials against locked LiteLLM Prisma
+        run: >-
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,size=128m
+          --env PYTHONDONTWRITEBYTECODE=1 --env LITELLM_LOCAL_MODEL_COST_MAP=True
+          --env RUN_AZURE_PRISMA_CONTRACT_TESTS=1
+          --mount "type=bind,src=$PWD,dst=/workspace,readonly" --workdir /workspace
+          --entrypoint /app/.venv/bin/python
+          docker.litellm.ai/berriai/litellm@sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4
+          -m unittest -b tests.test_azure_postgresql tests.test_azure_postgresql_prisma
+      - name: Verify real schema migration and Azure application lifecycle
+        env:
+          RUN_AZURE_SCHEMA_CONTAINER_TESTS: '1'
+        run: python -m unittest -b tests.test_azure_schema_container
+      - name: Build reviewed Azure application image
+        run: docker build --network none -f LiteLLM/runtime/Dockerfile -t litellm-azure-runtime:ci .
 
   oss-callbacks:
     runs-on: ubuntu-24.04
@@ -122,6 +174,11 @@ jobs:
         env:
           PYTHON_BIN: python
         run: bash scripts/validate-stage8.sh
+
+      - name: Validate immutable collector configuration without network
+        env:
+          RUN_COLLECTOR_CONTAINER_TESTS: '1'
+        run: python -m unittest -b tests.test_observability
 
       - name: Validate Stage 9 assets
         env:

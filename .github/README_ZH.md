@@ -1,10 +1,18 @@
 # GitHub Actions与客户迁移门禁
 
-客户从[分阶段迁移指南](../docs/customer-migration-guide-zh.md)开始。配置源为各Environment的`CUSTOMER_CONFIG_JSON` Variable和`MIGRATION_EVIDENCE_JSON` Secret；不在源码内填写邮箱、域名、订阅或凭据。
+客户从[部署与验收工作流指南](../docs/customer-deployment-workflows-zh.md)开始。配置源为各Environment的`CUSTOMER_CONFIG_JSON`（Secret推荐，兼容Variable）和`MIGRATION_EVIDENCE_JSON` Secret；不在源码内填写真实客户信息或凭据。
+
+## 实际执行与验收入口
+
+- `customer-deploy.yml`：私有仓库、默认分支、受保护Environment；bootstrap初始化RG/日志库，各阶段plan/deploy，绑定审批计划哈希。阶段9release另需发布报告。
+- `customer-runtime.yml`：专属Linux私网runner、独立runtime OIDC身份；阶段0备份/隔离恢复、阶段1探针与监控、阶段4命名空间与监控、阶段5目标空库恢复、阶段6~8成品清单发布。
+- `customer-acceptance.yml`：生成pending报告或从真实审核结果生成证据账本；支持显式单人模式，不会自动伪造passed，不申请管理Secret的PAT。
+
+新入口只在客户私有仓库保存7天审查计划/部署输出/验收元数据artifact，绝不保存dump、kubeconfig、原始stderr或参数。现有运行时集成缺口仍需完成，部署成功不等于可以生产切流。
 
 ## `customer-migration.yml`
 
-选择dev/test/prod、阶段0至9、guide/preflight/what-if以及组件。指导和预检无Azure写入；What-if job使用精确Environment OIDC。前序阶段需配置/代码版本绑定、近期双人批准的验收记录。实际部署、数据库迁移、DNS切换和退役由客户受控变更流程执行，workflow不会自动执行这些操作。
+选择dev/test/prod、阶段0至9、guide/config-check/preflight/what-if以及组件。config-check允许无前序证据检查后续配置；preflight/what-if保持前序门禁。实际部署入口独立，不修改此workflow的只读行为。
 
 原始配置/计划不作为artifact上传。详细变量、Secret、权限、每阶段准备和回退见迁移指南。应用Secret继续由客户Key Vault/CSI提供，不放入JSON非秘密参数。
 
@@ -39,7 +47,7 @@ CI不登录Azure，不部署资源。
 7. 上传30天SBOM证据；
 8. 不直接部署Kubernetes，overlay变更必须走Pull Request。
 
-首次使用前必须验证目标ACR网络路径、GitHub-hosted runner访问策略、OIDC角色最小权限和Cosign签名验证策略。如果ACR只允许Private Endpoint，应改用受控self-hosted runner，不得长期开放生产ACR公网。
+该入口现在使用MIGRATION_PRIVATE_RUNNER_LABELS指定的私网runner，仅私有仓库默认分支允许运行，并核对目标ACR与客户配置一致。首次使用前验证私网路径、Docker、OIDC最小权限和Cosign签名验证策略，不得开放生产ACR公网。
 
 ## Action版本治理
 

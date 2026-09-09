@@ -30,7 +30,7 @@ PLS_ID = re.compile(r"^/subscriptions/[a-fA-F0-9-]{36}/resourceGroups/[A-Za-z0-9
 UUID = re.compile(r"^[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$")
 
 
-def validate_release(config: dict, now: datetime | None = None) -> None:
+def validate_release(config: dict, now: datetime | None = None, required_approvers: int = 2, eligible_approvers=None) -> None:
     now = now or datetime.now(timezone.utc)
     phase = config.get("phase")
     if phase not in {"prepare", "canary", "production"}:
@@ -53,8 +53,10 @@ def validate_release(config: dict, now: datetime | None = None) -> None:
     if not config.get("changeTicket") or "REPLACE" in config["changeTicket"]:
         raise ValueError("Approved change ticket required")
     owners = config.get("approvedBy", [])
-    if len(owners) < 2 or len(set(owners)) != len(owners) or any(not UUID.fullmatch(owner) for owner in owners):
-        raise ValueError("Two distinct approval owners are required")
+    if len(owners) < required_approvers or len(set(owners)) != len(owners) or any(not UUID.fullmatch(owner) for owner in owners):
+        raise ValueError("Distinct approval owners matching the release policy are required")
+    if eligible_approvers and not {owner.lower() for owner in owners}.issubset({str(owner).lower() for owner in eligible_approvers}):
+        raise ValueError("Release contains an ineligible approver")
     required = {"prepare": PREPARE_CHECKS, "canary": CANARY_CHECKS, "production": PRODUCTION_CHECKS}[phase]
     for name in sorted(required):
         evidence = config.get("checks", {}).get(name, {})

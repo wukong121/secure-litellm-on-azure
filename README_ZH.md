@@ -4,9 +4,9 @@
 
 面向客户交付的 Azure 上 [LiteLLM](https://github.com/BerriAI/litellm) 网关部署与迁移项目。方案将 Azure 基础设施即代码、Kubernetes 部署组件、客户自有 Microsoft Entra 认证、审计治理与分阶段交付流程整合在同一仓库。
 
-适用于客户的平台、安全和运维团队，重点支持从已有 LiteLLM 网关迁移到新的安全增强环境。模型路由可以在已授权的多个 Azure OpenAI 资源之间分配负载，但仍受各资源配额约束，不绕过 Azure 服务限额。
+面向客户运维，交付目标同时覆盖已有 LiteLLM 网关的分阶段增强迁移和空白环境的从零部署。客户提供必要身份、资源ID、域名及决策，部署和验证应通过workflow完成，不要求客户自行编写应用清单或测试代码。模型路由仍受已授权Azure OpenAI资源的配额约束，不绕过服务限额。
 
-> **交付状态**：已提供阶段指导、配置预检、只读 Azure 预览及离线测试；生产集成和客户验收尚未全部完成。这不是一键原地升级工具，未完成项仍是上线阻断条件。
+> **交付状态**：已提供迁移/新建模式、阶段指导、配置预检、实际基础设施部署和受限私网运行入口；应用自动生成、运行集成和全自动客户验收尚未全部完成。这不是一键原地升级工具，未完成项仍是上线阻断条件。
 
 ## 目标架构
 
@@ -36,13 +36,13 @@ API客户端 -> llm-api.<客户域名> -> Front Door / WAF -> 私有API入口
 
 ## 客户从这里开始
 
-1. 阅读[客户迁移指南](docs/customer-migration-guide-zh.md)，确认前置准备、责任人、阶段操作、验收证据和回退方案。
+1. 阅读[客户部署与验收指南](docs/customer-deployment-workflows-zh.md)，选择已有网关迁移或从零部署；迁移细节另见[客户迁移指南](docs/customer-migration-guide-zh.md)。
 2. 在客户仓库创建受保护的GitHub Environments：`dev`、`test`、`prod`，并建立Environment范围的Azure OIDC身份。
-3. 按[客户配置模板](config/customer.example.json)填写`CUSTOMER_CONFIG_JSON` Environment variable，配置`AZURE_CLIENT_ID`、`AZURE_TENANT_ID`、`AZURE_SUBSCRIPTION_ID`；阶段证据放入`MIGRATION_EVIDENCE_JSON` Environment secret。
+3. 使用[迁移配置模板](config/customer.example.json)或[新建配置模板](config/customer.greenfield.example.json)填写`CUSTOMER_CONFIG_JSON` Environment secret；新建使用`deploymentMode=greenfield`，不填写`legacy`。按部署指南配置部署/运行OIDC身份；阶段证据初始为`[]`。
 4. 打开 **Customer staged migration** workflow，先选择阶段`0`、模式`guide`、组件`none`，再逐步执行`preflight`和获准的`what-if`。
-5. 在旧网关旁建设并验证新环境。实际部署、数据库迁移、切流和退役分别经过客户审批。
+5. 迁移在旧网关旁建设隔离新环境；新建Stage0使用`bootstrap → network`，跳过不适用的Stage1。两条路径的实际部署和发布分别经过客户审批，不以基础设施部署成功代替应用验收。
 
-workflow不会自动部署资源、修改DNS或删除旧环境。Master Key、Salt、数据库凭据、OIDC秘密应保存在客户Key Vault，不写入仓库或非秘密配置JSON。API/admin域名由客户自己的`baseDomain`生成。
+原迁移检查workflow不部署资源；实际执行使用新增的[客户部署与验收工作流](docs/customer-deployment-workflows-zh.md)，提供基础设施plan/deploy、私网备份/恢复和应用发布、单人或双人验收。DNS和旧环境退役不自动执行，运行时集成阻断项仍需完成。Master Key、Salt、数据库凭据和OIDC秘密保存在客户Key Vault，不写入配置JSON。
 
 ## 迁移阶段
 

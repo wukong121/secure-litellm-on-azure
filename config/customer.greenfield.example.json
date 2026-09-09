@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "deploymentMode": "greenfield",
+  "environment": "test",
+  "azure": {"tenantId": "REPLACE_TENANT_ID", "subscriptionId": "REPLACE_SUBSCRIPTION_ID"},
+  "location": "REPLACE_AZURE_REGION",
+  "baseDomain": "example.com",
+  "ownerEmail": "owner@example.com",
+  "target": {"resourceGroup": "REPLACE_NEW_RESOURCE_GROUP"},
+  "parameters": {
+    "bootstrap": {"workspaceMode": "create", "logRetentionDays": 30},
+    "network": {
+      "virtualNetworkName": "REPLACE_TARGET_VNET",
+      "virtualNetworkAddressPrefix": "10.30.0.0/16",
+      "privateEndpointSubnetName": "snet-private-endpoints",
+      "privateEndpointSubnetPrefix": "10.30.8.0/24"
+    },
+    "platform": {
+      "containerRegistryName": "REPLACE_GLOBALLY_UNIQUE_ACR_NAME",
+      "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
+      "stage4Network": {
+        "virtualNetworkName": "REPLACE_TARGET_VNET",
+        "privateEndpointSubnetName": "snet-private-endpoints",
+        "firewallSubnetPrefix": "10.30.0.0/26",
+        "systemSubnetName": "snet-aks-system",
+        "systemSubnetPrefix": "10.30.1.0/24",
+        "userSubnetName": "snet-aks-user",
+        "userSubnetPrefix": "10.30.2.0/23",
+        "ingressSubnetName": "snet-private-ingress",
+        "ingressSubnetPrefix": "10.30.4.0/24",
+        "podCidr": "10.244.0.0/16",
+        "serviceCidr": "10.31.0.0/16",
+        "dnsServiceIp": "10.31.0.10"
+      },
+      "stage4Aks": {
+        "name": "REPLACE_NEW_PRIVATE_AKS_NAME",
+        "nodeResourceGroupName": "REPLACE_NEW_NODE_RESOURCE_GROUP",
+        "dnsPrefix": "REPLACE_NEW_AKS_DNS_PREFIX",
+        "kubernetesVersion": "REPLACE_SUPPORTED_K8S_VERSION",
+        "systemNodeVmSize": "REPLACE_SUPPORTED_VM_SKU",
+        "systemNodeCount": 2,
+        "userNodeVmSize": "REPLACE_SUPPORTED_VM_SKU",
+        "userNodeCount": 2
+      },
+      "stage5Data": {
+        "postgresqlDatabaseName": "litellm",
+        "postgresqlSkuName": "REPLACE_SUPPORTED_PG_SKU",
+        "postgresqlHighAvailabilityMode": "Disabled",
+        "postgresqlEntraAdministratorObjectId": "REPLACE_PG_ADMIN_GROUP_OBJECT_ID",
+        "postgresqlEntraAdministratorPrincipalName": "REPLACE_PG_ADMIN_GROUP_NAME",
+        "postgresqlEntraAdministratorPrincipalType": "Group",
+        "redisSkuName": "Balanced_B0"
+      },
+      "createStage5KeyVaultPrivateDnsZone": true,
+      "createStage5PostgresqlPrivateDnsZone": true,
+      "createStage5ManagedRedisPrivateDnsZone": true,
+      "azureOpenAIConnections": []
+    },
+    "audit": {
+      "virtualNetworkName": "REPLACE_TARGET_VNET",
+      "privateEndpointSubnetName": "snet-private-endpoints",
+      "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
+      "cmkVaultName": "REPLACE_AUDIT_CMK_VAULT",
+      "cmkKeyName": "REPLACE_CMK_KEY_NAME",
+      "writerPrincipalId": "auto",
+      "readerPrincipalId": "auto",
+      "retentionPrincipalId": "auto"
+    },
+    "origin": {
+      "virtualNetworkName": "REPLACE_TARGET_VNET",
+      "ingressSubnetName": "snet-private-ingress",
+      "apiLoadBalancer": {"resourceGroupName": "auto", "name": "auto", "frontendName": "auto"}
+    },
+    "edge": {
+      "privateOrigin": {"privateLinkServiceId": "auto", "privateLinkLocation": "REPLACE_AZURE_REGION"},
+      "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
+      "rateLimitPerMinute": 600
+    }
+  }
+}
