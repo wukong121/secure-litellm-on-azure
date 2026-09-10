@@ -13,7 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 from LiteLLM.runtime.application import create_application
 from LiteLLM.runtime.azure_postgresql import AzureDatabaseTokens
 from tests.test_azure_postgresql import TEMPLATE
-from scripts.proxy_credentials import binding_contract, key_payload, user_payload, validate_key, validate_user
+from scripts.proxy_credentials import binding_contract, credential_bindings, key_payload, user_payload, validate_key, validate_user
 from tests.test_proxy_config import proxy_customer
 
 
@@ -44,7 +44,7 @@ async def probe(config):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://isolated.invalid", headers={"Authorization": "Bearer synthetic-application-master-key"}) as http:
             config_fixture = proxy_customer()
             config_fixture["proxy"]["bindings"].append({"oid": "99999999-9999-4999-8999-999999999999", "plane": "admin", "role": "proxy_admin", "models": ["coding"]})
-            for binding in config_fixture["proxy"]["bindings"]:
+            for binding in credential_bindings(config_fixture):
                 contract = binding_contract(config_fixture, binding)
                 value = "sk-" + hashlib.sha256(contract["userId"].encode()).hexdigest()
                 response = await http.post("/user/new", json=user_payload(contract))

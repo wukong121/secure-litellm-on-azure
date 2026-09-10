@@ -13,7 +13,7 @@ import { MemoryAuditStore } from './audit-fixture.mjs';
 const tenant = '11111111-1111-4111-8111-111111111111';
 const subject = '22222222-2222-4222-8222-222222222222';
 const client = '33333333-3333-4333-8333-333333333333';
-const config = { tenantId: tenant, apiHost: 'llm-api.synthetic.invalid', apiClientIds: [client], bindings: [{ oid: subject, plane: 'api', role: 'internal_user', models: ['model'], keyFile: 'synthetic', audit: { capture: true, teamId: 'team' } }] };
+const config = { tenantId: tenant, apiHost: 'llm-api.synthetic.invalid', apiClientIds: [client], bindings: [{ oid: subject, plane: 'api', role: 'internal_user', principalType: 'User', audit: { capture: true, teamId: 'team' } }] };
 
 async function serve(context, server) {
   server.listen(0, '127.0.0.1');
@@ -23,7 +23,7 @@ async function serve(context, server) {
 }
 
 function request(port, onResponse) {
-  const request = httpRequest({ hostname: '127.0.0.1', port, method: 'POST', path: '/v1/responses', headers: { host: config.apiHost, authorization: 'Bearer synthetic', 'content-type': 'application/json' } }, onResponse);
+  const request = httpRequest({ hostname: '127.0.0.1', port, method: 'POST', path: '/v1/responses', headers: { host: config.apiHost, authorization: 'Bearer synthetic', 'x-litellm-api-key': 'synthetic-client-key', 'content-type': 'application/json' } }, onResponse);
   request.end(JSON.stringify({ model: 'model', input: 'synthetic', stream: true }));
   return request;
 }

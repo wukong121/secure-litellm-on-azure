@@ -105,6 +105,8 @@ def check_application(documents, stage, config):
         require(not re.search(forbidden, serialized, re.I), "Manifest contains placeholders, credential literals or legacy database references")
         if kind == "Service":
             require(document.get("spec", {}).get("type", "ClusterIP") == "ClusterIP" and not document["spec"].get("externalIPs"), "Application Services must remain private ClusterIP")
+        if kind == "SecretProviderClass":
+            require(metadata["name"] != "llm-api-auth", "API admission no longer uses an internal credential provider")
         if kind == "Ingress":
             require(stage >= 7, "Stage 6 cannot publish an ingress")
             spec = document["spec"]
@@ -124,6 +126,8 @@ def check_application(documents, stage, config):
         require(pod.get("automountServiceAccountToken") is False, "Disable automatic Kubernetes API credentials")
         require(pod.get("securityContext", {}).get("runAsNonRoot") is True, "Non-root pod security is required")
         require(not any("hostPath" in volume for volume in pod.get("volumes", [])), "hostPath is forbidden")
+        if kind == "Deployment" and metadata["name"] == "llm-api-proxy":
+            require(not any("csi" in volume or "secret" in volume for volume in pod.get("volumes", [])), "API admission must not mount internal credentials")
         for container in pod.get("containers", []) + pod.get("initContainers", []):
             require(re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", container.get("image", "")) is not None, "All images must be digest pinned")
             security = container.get("securityContext", {})

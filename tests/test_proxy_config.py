@@ -12,7 +12,7 @@ from tests.test_backend_manifest import backend_customer
 def proxy_customer():
     config = backend_customer()
     config["proxy"] = {"apiClientIds": ["66666666-6666-4666-8666-666666666666"], "bindings": [
-        {"oid": "77777777-7777-4777-8777-777777777777", "plane": "api", "role": "internal_user", "models": ["coding"], "auditTeamId": "coding-team"},
+        {"oid": "77777777-7777-4777-8777-777777777777", "plane": "api", "role": "internal_user", "auditTeamId": "coding-team"},
         {"oid": "88888888-8888-4888-8888-888888888888", "plane": "admin", "role": "proxy_admin_viewer", "models": ["coding"]},
     ]}
     return config
@@ -41,7 +41,9 @@ class ProxyConfigurationTests(unittest.TestCase):
         result = subprocess.run(["node", "--input-type=module", "-e", "import {validateConfig} from './auth-proxy/policy.mjs'; let input=''; for await (const chunk of process.stdin) input+=chunk; validateConfig(JSON.parse(input));"], input=json.dumps(policy), text=True, capture_output=True, cwd=ROOT)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(policy["apiAudience"], APPS["api"]["appId"])
-        self.assertNotEqual(policy["bindings"][0]["keyFile"], policy["bindings"][1]["keyFile"])
+        self.assertNotIn("keyFile", policy["bindings"][0])
+        self.assertNotIn("models", policy["bindings"][0])
+        self.assertIn("keyFile", policy["bindings"][1])
         self.assertEqual(policy["bindings"][0]["audit"]["teamId"], "coding-team")
         documents = entra_documents(config, APPS["api"]["appId"])
         self.assertEqual(documents["admin"]["web"]["redirectUris"], ["https://llm-admin.customer.invalid/auth/callback"])

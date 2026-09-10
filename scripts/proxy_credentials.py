@@ -1,4 +1,4 @@
-"""Provision one recoverable LiteLLM credential for each approved proxy subject."""
+"""Provision recoverable LiteLLM credentials only for backend administrators."""
 
 import hashlib
 import hmac
@@ -9,7 +9,7 @@ from scripts.proxy_config import credential_name, object_id, proxy_settings
 
 
 def binding_contract(config, binding):
-    require(binding["role"] != "audit_reader", "Audit-only users cannot receive a backend key")
+    require(binding["plane"] == "admin" and binding["role"] in {"proxy_admin", "proxy_admin_viewer"}, "Only backend administrators receive managed proxy credentials")
     name = credential_name(config["azure"]["tenantId"], binding)
     contract = {"tenantId": object_id(config["azure"]["tenantId"]), "oid": object_id(binding["oid"]), "plane": binding["plane"], "role": binding["role"], "models": sorted(binding["models"])}
     return {**contract, "secretName": name, "userId": "llmgw-" + binding["plane"] + "-" + name[4:], "bindingSha256": fingerprint(contract)}
@@ -20,7 +20,8 @@ def user_payload(contract):
 
 
 def key_payload(contract, value):
-    routes = ["/chat/completions", "/v1/chat/completions", "/responses", "/v1/responses", "/embeddings", "/v1/embeddings"] if contract["plane"] == "api" else ["/model/info", "/team/info", "/key/info"]
+    require(contract["plane"] == "admin", "API vkeys are managed directly in LiteLLM")
+    routes = ["/model/info", "/team/info", "/key/info"]
     if contract["role"] == "proxy_admin":
         routes.extend(["/key/block", "/key/unblock"])
     return {"key": value, "key_alias": contract["secretName"], "user_id": contract["userId"], "models": contract["models"], "metadata": {"llmgw_binding": contract["bindingSha256"]}, "key_type": "default", "allowed_routes": routes, "auto_rotate": False}
@@ -89,4 +90,4 @@ def provision_binding(config, binding, vault, backend):
 
 
 def credential_bindings(config):
-    return [item for item in proxy_settings(config)["bindings"] if item["role"] != "audit_reader" and not item.get("disabled", False)]
+    return [item for item in proxy_settings(config)["bindings"] if item["plane"] == "admin" and item["role"] != "audit_reader" and not item.get("disabled", False)]

@@ -1,4 +1,4 @@
-"""Initialize per-subject backend credentials over an approved private AKS tunnel."""
+"""Initialize admin backend credentials over an approved private AKS tunnel."""
 
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
@@ -139,7 +139,7 @@ def initialize_proxy_credentials(config, operation, revision, directory, approve
     try:
         with ExitStack() as stack:
             vaults = {}
-            for plane in ("api", "admin"):
+            for plane in ("admin",):
                 name = foundation[plane]["vault"]["name"]
                 vault = azure.scoped(["keyvault", "show", "--resource-group", group, "--name", name, "--query", "{id:id,uri:properties.vaultUri,public:properties.publicNetworkAccess,rbac:properties.enableRbacAuthorization,purge:properties.enablePurgeProtection}"])
                 require(vault["id"].lower() == (group_id(config) + "/providers/Microsoft.KeyVault/vaults/" + name).lower() and vault["id"].lower() == foundation[plane]["vault"]["id"].lower() and vault["uri"].rstrip("/").lower() == f"https://{name}.vault.azure.net".lower(), "Proxy Vault is outside the target scope")

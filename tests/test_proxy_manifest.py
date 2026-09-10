@@ -9,7 +9,7 @@ import yaml
 
 from scripts.admin_credentials import OIDC_SECRET, SESSION_SECRET
 from scripts.migration_deploy import group_id
-from scripts.proxy_credentials import binding_contract
+from scripts.proxy_credentials import binding_contract, credential_bindings
 from scripts.proxy_manifest import prepare_proxy_documents, render_proxy_documents
 from scripts.backend_manifest import render_backend_manifest
 from scripts.migration_runtime import check_application, publish
@@ -65,7 +65,7 @@ class ProxyManifestTests(unittest.TestCase):
         applications = {plane: {"id": value["appId"], **value} for plane, value in APPS.items()}
         admin = {"application": applications["admin"], "vaultId": foundation["admin"]["vault"]["id"], "secrets": {name: secret("admin", name) for name in (OIDC_SECRET, SESSION_SECRET)}}
         credentials = {"bindings": []}
-        for binding in config["proxy"]["bindings"]:
+        for binding in credential_bindings(config):
             contract = binding_contract(config, binding)
             credentials["bindings"].append({"contract": contract, "secret": {**secret(binding["plane"], contract["secretName"]), "state": "ready"}, "userExists": True, "keyExists": True})
         documents = render_proxy_documents(config, foundation, applications, admin, credentials)
@@ -87,6 +87,11 @@ class ProxyManifestTests(unittest.TestCase):
         backend_documents = render_backend_manifest(config, backend, backend_versions, "synthetic.postgres.database.azure.com", "10.30.8.0/24")
         combined = backend_documents + documents
         check_application(combined, 7, config)
+        invalid_mount = copy.deepcopy(combined)
+        invalid_api = next(item for item in invalid_mount if item["kind"] == "Deployment" and item["metadata"]["name"] == "llm-api-proxy")
+        invalid_api["spec"]["template"]["spec"]["volumes"].append({"name": "old-key", "secret": {"secretName": "old-key"}})
+        with self.assertRaisesRegex(ValueError, "must not mount internal credentials"):
+            check_application(invalid_mount, 7, config)
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch.dict("os.environ", {}, clear=True), patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl"]), patch("scripts.backend_manifest.prepare_backend_documents", return_value=backend_documents), patch("scripts.proxy_manifest.prepare_proxy_documents", return_value=documents) as generated, patch("scripts.migration_runtime.run_command", side_effect=lambda arguments, path, label: "{}" if label == "server-dry-run" else "") as command:
             path = Path(directory)
             publish(config, 7, "application", "plan", "a" * 40, path, "")
@@ -123,14 +128,15 @@ class ProxyManifestTests(unittest.TestCase):
         self.assertNotIn("secretObjects", json.dumps(documents))
         self.assertNotIn("Ingress", [item["kind"] for item in documents])
         providers = [item for item in documents if item["kind"] == "SecretProviderClass"]
-        api_objects = providers[0]["spec"]["parameters"]["objects"]
-        self.assertNotIn("oidc-client-secret", api_objects)
-        self.assertNotIn("session-key", api_objects)
+        self.assertEqual([item["metadata"]["name"] for item in providers], ["llm-admin-auth"])
+        api_pod = before_pods["llm-api-proxy"]["spec"]
+        self.assertNotIn("csi", json.dumps(api_pod))
+        self.assertNotIn("/mnt/auth-secrets", json.dumps(api_pod))
         for provider in providers:
             for entry in yaml.safe_load(provider["spec"]["parameters"]["objects"])["array"]:
                 self.assertEqual(yaml.safe_load(entry)["objectVersion"], "a" * 32)
         invalid = copy.deepcopy(credentials)
-        invalid["bindings"][0]["secret"]["id"] = secret("admin", invalid["bindings"][0]["contract"]["secretName"])["id"]
+        invalid["bindings"][0]["secret"]["id"] = secret("api", invalid["bindings"][0]["contract"]["secretName"])["id"]
         with self.assertRaisesRegex(ValueError, "crosses its approved plane"):
             render_proxy_documents(config, foundation, applications, admin, invalid)
         expired = copy.deepcopy(admin)

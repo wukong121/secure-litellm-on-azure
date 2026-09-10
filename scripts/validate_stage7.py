@@ -51,10 +51,15 @@ def validate(path: Path) -> None:
         assert container["env"] == [{"name": "PROXY_PLANE", "value": plane}]
         assert all(probe in container for probe in ("startupProbe", "readinessProbe", "livenessProbe"))
         assert by_kind["PodDisruptionBudget"][name]["spec"]["minAvailable"] == 1
-        provider = by_kind["SecretProviderClass"][f"llm-{plane}-auth"]["spec"]
-        assert "secretObjects" not in provider
-        assert provider["parameters"]["clientID"] == f"REPLACE_{plane.upper()}_PROXY_CLIENT_ID"
-        assert provider["parameters"]["keyvaultName"] == f"REPLACE_{plane.upper()}_AUTH_VAULT_NAME"
+        if plane == "api":
+            assert "llm-api-auth" not in by_kind["SecretProviderClass"]
+            assert not any("csi" in volume or "secret" in volume for volume in pod.get("volumes", []))
+            assert not any(item["mountPath"] == "/mnt/auth-secrets" for item in container.get("volumeMounts", []))
+        else:
+            provider = by_kind["SecretProviderClass"][f"llm-{plane}-auth"]["spec"]
+            assert "secretObjects" not in provider
+            assert provider["parameters"]["clientID"] == f"REPLACE_{plane.upper()}_PROXY_CLIENT_ID"
+            assert provider["parameters"]["keyvaultName"] == f"REPLACE_{plane.upper()}_AUTH_VAULT_NAME"
         ingress_policy = policies[f"llm-{plane}-proxy-ingress"]["spec"]
         assert ingress_policy["podSelector"]["matchLabels"]["plane"] == plane
         assert ingress_policy["ingress"][0]["from"] == [{

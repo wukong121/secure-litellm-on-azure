@@ -18,7 +18,7 @@ const store = new MemoryAuditStore();
 const writer = new AuditWriter(store, { clock: () => timestamp });
 const approval = { id: randomUUID(), actorOid: auditorId, tenantId, teamIds: ['synthetic-team'], ticketId: 'SYNTHETIC-DEMO', reason: 'Synthetic demonstration only', approvedBy: [randomUUID(), randomUUID()], validFrom: new Date(timestamp - 60000).toISOString(), validUntil: new Date(timestamp + 3600000).toISOString(), from: new Date(timestamp - 60000).toISOString(), to: new Date(timestamp + 60000).toISOString() };
 const config = { tenantId, apiHost: 'llm-api.demo.invalid', adminHost: 'llm-admin.demo.invalid', apiClientIds: [clientId], bindings: [
-  { oid: callerId, plane: 'api', role: 'internal_user', models: ['synthetic-model'], keyFile: 'synthetic-key', audit: { capture: true, teamId: 'synthetic-team' } },
+  { oid: callerId, plane: 'api', role: 'internal_user', principalType: 'User', audit: { capture: true, teamId: 'synthetic-team' } },
   { oid: auditorId, plane: 'admin', role: 'audit_reader', models: [] },
 ] };
 const sessions = createSessions(randomBytes(32), config.adminHost);
@@ -53,7 +53,7 @@ try {
   const adminPort = await listen(createGateway({ ...common, plane: 'admin', sessions, auditReader: new AuditReader(store, () => [approval]) }));
   const cookie = await sessions.seal({ tid: tenantId, oid: auditorId, roles: ['audit_reader'], csrf: 'synthetic-csrf' }, 'session', Math.floor(timestamp / 1000) + 300);
   const adminHeaders = { cookie: `__Host-llm-admin=${cookie}`, origin: `https://${config.adminHost}`, 'x-csrf-token': 'synthetic-csrf' };
-  const inference = await call(apiPort, config.apiHost, '/v1/responses', { model: 'synthetic-model', input: 'Synthetic source context for the L3 audit feature.' }, { authorization: 'Bearer synthetic' });
+  const inference = await call(apiPort, config.apiHost, '/v1/responses', { model: 'synthetic-model', input: 'Synthetic source context for the L3 audit feature.' }, { authorization: 'Bearer synthetic', 'x-litellm-api-key': 'synthetic-client-key' });
   assert.equal(inference.status, 200);
   await writer.drain();
   const search = await call(adminPort, config.adminHost, '/audit/search', { approvalId: approval.id }, adminHeaders);

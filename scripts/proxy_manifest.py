@@ -42,6 +42,8 @@ def render_proxy_documents(config, foundation, applications, admin_credentials, 
         vault = foundation[plane]["vault"]
         require(foundation[plane]["identity"].get("serviceAccountName") == f"llm-{plane}-proxy" and foundation[plane]["identity"].get("kubernetesNamespace") == "litellm", "Proxy Workload Identity federation does not match its service account")
         require(vault["id"].lower() == (group_id(config) + "/providers/Microsoft.KeyVault/vaults/" + vault["name"]).lower(), "Proxy Vault is outside the target resource group")
+        if not mapping:
+            continue
         objects = []
         for name, secret in mapping.items():
             require(re.fullmatch(r"[0-9a-f]{32}", secret["version"]) is not None and secret["id"].lower() == f"https://{vault['name']}.vault.azure.net/secrets/{name}/{secret['version']}".lower(), "Proxy CSI secret reference crosses its approved plane or lacks a version")

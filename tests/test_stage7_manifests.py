@@ -51,7 +51,14 @@ class Stage7ManifestTests(unittest.TestCase):
 
     def test_proxy_secret_sync_is_rejected(self):
         documents = copy.deepcopy(self.documents)
-        provider = next(item for item in documents if item["kind"] == "SecretProviderClass" and item["metadata"]["name"] == "llm-api-auth")
+        provider = next(item for item in documents if item["kind"] == "SecretProviderClass" and item["metadata"]["name"] == "llm-admin-auth")
         provider["spec"]["secretObjects"] = []
+        with self.assertRaises(AssertionError):
+            self.check_documents(documents)
+
+    def test_api_internal_credential_mount_is_rejected(self):
+        documents = copy.deepcopy(self.documents)
+        api = next(item for item in documents if item["kind"] == "Deployment" and item["metadata"]["name"] == "llm-api-proxy")
+        api["spec"]["template"]["spec"]["volumes"].append({"name": "legacy-key", "secret": {"secretName": "legacy-key"}})
         with self.assertRaises(AssertionError):
             self.check_documents(documents)

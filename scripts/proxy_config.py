@@ -1,4 +1,4 @@
-"""Render proxy trust and per-subject credential contracts from customer decisions."""
+"""Render API admission and separate admin credential contracts."""
 
 import hashlib
 import json
@@ -43,8 +43,11 @@ def proxy_settings(config):
             require(identity[0] == "admin" and not binding.get("models") and "auditTeamId" not in binding, "Audit readers must not carry backend model privileges")
             continue
         require(binding.get("role") in {"internal_user", "proxy_admin_viewer", "proxy_admin"} and (identity[0] == "api") == (binding["role"] == "internal_user"), "Proxy role does not match its plane")
-        models = binding.get("models")
-        require(isinstance(models, list) and models and all(isinstance(model, str) for model in models) and len(set(models)) == len(models) and set(models).issubset(model_groups), "Binding models must explicitly reference approved model groups")
+        if identity[0] == "api":
+            require("models" not in binding, "Remove API binding models: model permissions are managed by LiteLLM for the client vkey")
+        else:
+            models = binding.get("models")
+            require(isinstance(models, list) and models and all(isinstance(model, str) for model in models) and len(set(models)) == len(models) and set(models).issubset(model_groups), "Binding models must explicitly reference approved model groups")
         if "auditTeamId" in binding:
             require(identity[0] == "api" and isinstance(binding["auditTeamId"], str) and re.fullmatch(r"[A-Za-z0-9-]{1,128}", binding["auditTeamId"]) is not None, "Invalid trusted audit team mapping")
     require(any(item["plane"] == "api" for item in bindings), "At least one explicit API binding is required; all may be disabled for emergency isolation")
@@ -68,7 +71,7 @@ def proxy_policy(config, applications):
         binding = {"oid": object_id(item["oid"]), "plane": item["plane"], "role": item["role"], "disabled": item.get("disabled", False), "principalType": item.get("principalType", "User")}
         if "clientIds" in item:
             binding["clientIds"] = [object_id(value) for value in item["clientIds"]]
-        if item["role"] != "audit_reader":
+        if item["plane"] == "admin" and item["role"] != "audit_reader":
             binding.update(models=list(item["models"]), keyFile=credential_name(config["azure"]["tenantId"], item))
         if "auditTeamId" in item:
             binding["audit"] = {"capture": True, "teamId": item["auditTeamId"]}

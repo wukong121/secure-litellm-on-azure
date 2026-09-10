@@ -12,6 +12,7 @@ on:
         required: true
         options: ['0', '1', '4', '5', '6', '7', '8', '9']
       action:
+        description: Runtime action; proxy-credentials initializes admin backend keys only, never client API vkeys
         type: choice
         required: true
         options: [backup-restore, legacy-hardening, cluster-bootstrap, private-ingress, certificate-renew, monitoring-onboard, database-roles, backend-secrets, restore-target, schema-migrate, entra-apps, entra-access, entra-revoke, admin-credentials, admin-credentials-rotate, admin-credentials-recover, admin-credentials-session-rotate, admin-credentials-retire-expired, proxy-credentials, application, audit-pause, audit-recover, audit-resume, dns-publish, dns-rollback]

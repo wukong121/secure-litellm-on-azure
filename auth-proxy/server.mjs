@@ -30,7 +30,7 @@ async function main() {
     ...services,
     plane, getConfig, verifyToken: createTokenVerifier(config), sessions, oidcConfig,
     frontDoorId: process.env.FRONT_DOOR_ID,
-    keyFor: binding => readSecret(binding.keyFile),
+    keyFor: plane === 'admin' ? binding => readSecret(binding.keyFile) : undefined,
     target: 'http://litellm.litellm.svc.cluster.local:4000',
   });
   server.listen(8080, '0.0.0.0');

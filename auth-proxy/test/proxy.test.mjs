@@ -16,7 +16,7 @@ const tenantId = '11111111-1111-1111-1111-111111111111';
 const oid = '22222222-2222-2222-2222-222222222222';
 const clientId = '33333333-3333-3333-3333-333333333333';
 const config = { tenantId, apiHost: 'llm-api.test.invalid', adminHost: 'llm-admin.test.invalid', apiAudience: 'api-test', apiClientIds: [clientId], bindings: [
-  { plane: 'api', oid, role: 'internal_user', models: ['model-a'], keyFile: 'api-key' },
+  { plane: 'api', oid, role: 'internal_user', principalType: 'User' },
   { plane: 'admin', oid, role: 'proxy_admin', models: ['model-a'], keyFile: 'admin-key' },
 ] };
 const { privateKey, publicKey } = await generateKeyPair('RS256');
@@ -35,7 +35,7 @@ async function listen(server, context) {
 function call(port, { path = '/v1/responses', method = 'POST', host = config.apiHost, headers = {}, body = { model: 'model-a', input: 'synthetic' } } = {}) {
   return new Promise((resolve, reject) => {
     const encoded = body === undefined ? undefined : JSON.stringify(body);
-    const request = httpRequest({ host: '127.0.0.1', port, path, method, headers: { host, authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(encoded ? { 'content-length': Buffer.byteLength(encoded) } : {}), ...headers } }, response => {
+    const request = httpRequest({ host: '127.0.0.1', port, path, method, headers: { host, authorization: `Bearer ${token}`, 'x-litellm-api-key': 'synthetic-client-key', 'content-type': 'application/json', ...(encoded ? { 'content-length': Buffer.byteLength(encoded) } : {}), ...headers } }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
       response.on('end', () => resolve({ code: response.statusCode, headers: response.headers, text: Buffer.concat(chunks).toString() }));
@@ -45,7 +45,7 @@ function call(port, { path = '/v1/responses', method = 'POST', host = config.api
   });
 }
 
-test('real HTTP proxy forwards one internal key and trusted user, with no untrusted identity headers', { timeout: 5000 }, async context => {
+test('real HTTP proxy forwards the client key and trusted actor, with no untrusted identity headers', { timeout: 5000 }, async context => {
   let received;
   const upstream = createServer(async (request, response) => {
     const chunks = [];
@@ -61,9 +61,9 @@ test('real HTTP proxy forwards one internal key and trusted user, with no untrus
   context.after(() => provider.shutdown());
   const proxy = createGateway({ plane: 'api', getConfig: () => config, verifyToken, keyFor: binding => `synthetic-${binding.keyFile}`, target: `http://127.0.0.1:${upstreamPort}`, audit: entry => events.push(entry), telemetry: provider.getTracer('synthetic-test') });
   const port = await listen(proxy, context);
-  const result = await call(port, { headers: { 'x-team-id': 'forged', 'x-litellm-api-key': 'forged', cookie: 'forged', traceparent: 'forged' }, body: { model: 'model-a', input: 'synthetic', user: 'forged' } });
+  const result = await call(port, { headers: { 'x-team-id': 'forged', cookie: 'forged', traceparent: 'forged' }, body: { model: 'model-a', input: 'synthetic', user: 'forged' } });
   assert.equal(result.code, 200);
-  assert.equal(received.headers.authorization, 'Bearer synthetic-api-key');
+  assert.equal(received.headers.authorization, 'Bearer synthetic-client-key');
   assert.equal(received.headers.cookie, undefined);
   assert.equal(received.headers['x-team-id'], undefined);
   assert.equal(received.headers['x-litellm-api-key'], undefined);
@@ -79,7 +79,8 @@ test('real HTTP proxy forwards one internal key and trusted user, with no untrus
   assert.equal(result.headers['set-cookie'], undefined);
   assert.equal(result.headers.location, undefined);
   assert.ok(!JSON.stringify(events).includes(token));
-  for (const update of [{ host: config.adminHost }, { path: '/key/generate' }, { body: { model: 'other' } }, { body: { model: 'model-a', previous_response_id: 'someone-elses-response' } }, { headers: { authorization: 'Bearer bad' } }]) assert.ok((await call(port, update)).code >= 400);
+  assert.equal((await call(port, { body: { model: 'other' } })).code, 200);
+  for (const update of [{ host: config.adminHost }, { path: '/key/generate' }, { body: { model: 'model-a', previous_response_id: 'someone-elses-response' } }, { headers: { authorization: 'Bearer bad' } }]) assert.ok((await call(port, update)).code >= 400);
 });
 
 test('SSE first event reaches client before upstream finishes', { timeout: 5000 }, async context => {
@@ -93,7 +94,7 @@ test('SSE first event reaches client before upstream finishes', { timeout: 5000 
   const upstreamPort = await listen(upstream, context);
   const port = await listen(createGateway({ plane: 'api', getConfig: () => config, verifyToken, keyFor: () => 'synthetic-key', target: `http://127.0.0.1:${upstreamPort}`, audit: () => {} }), context);
   await new Promise((resolve, reject) => {
-    const request = httpRequest({ hostname: '127.0.0.1', port, path: '/v1/responses', method: 'POST', headers: { host: config.apiHost, authorization: `Bearer ${token}`, 'content-type': 'application/json' } }, response => {
+    const request = httpRequest({ hostname: '127.0.0.1', port, path: '/v1/responses', method: 'POST', headers: { host: config.apiHost, authorization: `Bearer ${token}`, 'x-litellm-api-key': 'synthetic-client-key', 'content-type': 'application/json' } }, response => {
       response.once('data', chunk => { assert.match(chunk.toString(), /data: first/); finish(); });
       response.on('end', resolve);
     });
@@ -132,8 +133,8 @@ test('admin OIDC login uses PKCE and state; session and CSRF protect writes', { 
 test('WebSocket upgrades, broken identity dependencies and missing keys fail closed', { timeout: 5000 }, async context => {
   let broken = false;
   const port = await listen(createGateway({ plane: 'api', getConfig: () => { if (broken) throw new Error('sensitive dependency error'); return config; }, verifyToken, keyFor: () => { throw new Error('sensitive key error'); }, target: 'http://127.0.0.1:1', audit: () => {} }), context);
-  const missingKey = await call(port);
-  assert.equal(missingKey.code, 503);
+  const missingKey = await call(port, { headers: { 'x-litellm-api-key': '' } });
+  assert.equal(missingKey.code, 401);
   assert.ok(!missingKey.text.includes('sensitive'));
   broken = true;
   assert.equal((await call(port)).code, 503);

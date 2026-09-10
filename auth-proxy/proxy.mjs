@@ -1,9 +1,9 @@
 import { createServer } from 'node:http';
-import { randomUUID, randomBytes } from 'node:crypto';
+import { createHash, randomUUID, randomBytes } from 'node:crypto';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { pipeline } from 'node:stream';
 import * as oidc from 'openid-client';
-import { authorizeRoute, bindingFor, cleanHeaders, Denied, sanitizeBody, subjectTag } from './policy.mjs';
+import { apiCredentials, authorizeRoute, bindingFor, cleanHeaders, Denied, sanitizeBody, subjectTag } from './policy.mjs';
 import { readCookie, sessionCookie } from './auth.mjs';
 import { auditPage, auditStyle, auditClient } from './audit-page.mjs';
 import { enforceFrontDoor, validateFrontDoorId } from './edge-policy.mjs';
@@ -85,11 +85,12 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
     const traceparent = `00-${traceId}-${span?.spanContext().spanId ?? randomBytes(8).toString('hex')}-01`;
     const started = performance.now();
     let subject;
+    let keyFingerprint;
     let logged = false;
     const logCompletion = outcome => {
       if (logged) return;
       logged = true;
-      audit({ requestId, traceId, plane, subject, status: response.statusCode, outcome, durationMs: Math.round(performance.now() - started) });
+      audit({ requestId, traceId, plane, subject, keyFingerprint, status: response.statusCode, outcome, durationMs: Math.round(performance.now() - started) });
       span?.setAttributes({ 'gateway.plane': plane, 'gateway.request_id': requestId, 'gateway.outcome': outcome, 'http.response.status_code': response.statusCode });
       span?.end();
     };
@@ -108,10 +109,11 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
       enforceFrontDoor(request, frontDoorId);
       if ((request.url?.length ?? 0) > 8192) throw new Denied(414);
       let claims;
+      let clientKey;
       if (plane === 'api') {
-        const bearer = /^Bearer ([A-Za-z0-9_.-]+)$/.exec(request.headers.authorization ?? '');
-        if (!bearer) throw new Denied(401);
-        claims = await verifyToken(bearer[1]);
+        const credentials = apiCredentials(request);
+        claims = await verifyToken(credentials.token);
+        clientKey = credentials.key;
       } else {
         if (request.headers.authorization) throw new Denied(401);
         const origin = `https://${config.adminHost}`;
@@ -149,6 +151,7 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
       }
       const binding = bindingFor(config, plane, claims);
       subject = subjectTag(config.tenantId, claims.oid);
+      if (plane === 'api') keyFingerprint = createHash('sha256').update(clientKey).digest('hex');
       if (plane === 'admin' && request.method === 'GET' && ['/audit', '/audit/style.css', '/audit/client.js'].includes(request.url)) {
         if (!auditReader || binding.role !== 'audit_reader') throw new Denied();
         const asset = request.url === '/audit' ? ['text/html', auditPage] : request.url.endsWith('.css') ? ['text/css', auditStyle] : ['text/javascript', auditClient];
@@ -180,7 +183,7 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
         request.forwardBody = Buffer.from(JSON.stringify(body));
         forwardedBody = body;
       }
-      const key = await keyFor(binding);
+      const key = plane === 'api' ? clientKey : await keyFor(binding);
       if (!key || /[\r\n\s]/.test(key)) throw new Error('Missing backend credential');
       request.headers = cleanHeaders(request.headers, key);
       request.headers.traceparent = traceparent;

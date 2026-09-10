@@ -48,7 +48,7 @@ class CredentialFixture:
 class ProxyCredentialTests(unittest.TestCase):
     def test_pending_secret_recovers_unknown_create_result_without_duplicate_keys(self):
         config = proxy_customer()
-        binding = config["proxy"]["bindings"][0]
+        binding = config["proxy"]["bindings"][1]
         store = CredentialFixture()
         _contract, secret, summary = inspect_binding(config, binding, store, store)
         self.assertIsNone(secret)
@@ -70,18 +70,17 @@ class ProxyCredentialTests(unittest.TestCase):
     def test_key_scopes_follow_plane_and_admin_role(self):
         config = proxy_customer()
         api, admin = config["proxy"]["bindings"]
-        api_request = key_payload(binding_contract(config, api), "synthetic")
+        with self.assertRaisesRegex(ValueError, "Only backend administrators"):
+            binding_contract(config, api)
         admin_request = key_payload(binding_contract(config, admin), "synthetic")
-        self.assertEqual(api_request["key_type"], "default")
-        self.assertNotIn("/key/block", api_request["allowed_routes"])
         self.assertEqual(admin_request["key_type"], "default")
         self.assertNotIn("/key/block", admin_request["allowed_routes"])
         config["proxy"]["bindings"].append({"oid": "99999999-9999-4999-8999-999999999999", "plane": "admin", "role": "audit_reader"})
-        self.assertEqual(len(credential_bindings(config)), 2)
+        self.assertEqual(credential_bindings(config), [admin])
 
     def test_existing_role_or_key_permissions_cannot_be_overwritten(self):
         config = proxy_customer()
-        binding = config["proxy"]["bindings"][0]
+        binding = config["proxy"]["bindings"][1]
         store = CredentialFixture()
         provision_binding(config, binding, store, store)
         next(iter(store.users.values()))["user_role"] = "proxy_admin"

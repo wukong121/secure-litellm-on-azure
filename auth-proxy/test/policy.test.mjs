@@ -5,7 +5,7 @@ import { authorizeRoute, bindingFor, cleanHeaders, sanitizeBody, validateConfig 
 const tenant = '11111111-1111-1111-1111-111111111111';
 const oid = '22222222-2222-2222-2222-222222222222';
 const client = '33333333-3333-3333-3333-333333333333';
-const binding = { oid, plane: 'api', role: 'internal_user', keyFile: 'user-key', models: ['approved-model'] };
+const binding = { oid, plane: 'api', role: 'internal_user', principalType: 'User' };
 const config = { tenantId: tenant, adminClientId: client, apiHost: 'llm-api.test.invalid', adminHost: 'llm-admin.test.invalid', apiAudience: 'api-audience', apiClientIds: [client], bindings: [binding] };
 const claims = { tid: tenant, oid, ver: '2.0', azp: client, scp: 'llm.invoke' };
 
@@ -19,14 +19,14 @@ test('strict host pairing and explicit non-wildcard mappings', () => {
 
 test('API identity requires tenant, object, client and delegated scope or application role', () => {
   assert.equal(bindingFor(config, 'api', claims), binding);
-  assert.equal(bindingFor(config, 'api', { ...claims, scp: undefined, idtyp: 'app', roles: ['Llm.Invoke'] }), binding);
+  assert.throws(() => bindingFor(config, 'api', { ...claims, scp: undefined, idtyp: 'app', roles: ['Llm.Invoke'] }));
   for (const update of [{ tid: 'other' }, { oid: 'unknown' }, { azp: 'unknown' }, { scp: 'other' }, { scp: undefined, roles: ['Llm.Invoke'] }, { ver: '1.0' }]) assert.throws(() => bindingFor(config, 'api', { ...claims, ...update }));
   assert.throws(() => bindingFor({ ...config, bindings: [{ ...binding, disabled: true }] }, 'api', claims));
 });
 
 test('admin requires a separate binding and matching role; viewer cannot write', () => {
   assert.throws(() => bindingFor(config, 'admin', claims));
-  const admin = { ...binding, plane: 'admin', role: 'proxy_admin_viewer' };
+  const admin = { ...binding, plane: 'admin', role: 'proxy_admin_viewer', keyFile: 'admin-key', models: ['approved-model'] };
   const adminConfig = { ...config, bindings: [admin] };
   assert.throws(() => bindingFor(adminConfig, 'admin', claims));
   assert.equal(bindingFor(adminConfig, 'admin', { ...claims, roles: ['proxy_admin_viewer'] }), admin);
@@ -54,10 +54,11 @@ test('allowlisted methods and paths reject management and normalization bypasses
   assert.throws(() => authorizeRoute('api', 'GET', '/v1/responses', binding));
 });
 
-test('body cannot override credentials, upstream, identity, or unapproved model/tools', () => {
+test('model authorization belongs to LiteLLM while credentials, identity and upstream overrides remain denied', () => {
   const body = { model: 'approved-model', input: 'test', user: 'forged' };
   assert.equal(sanitizeBody(body, binding, 'trusted-subject').user, 'trusted-subject');
-  for (const update of [{ api_key: 'bad' }, { api_base: 'https://other.invalid' }, { extra_headers: {} }, { metadata: {} }, { model: 'other' }, { tools: [{ type: 'mcp' }] }, { input: [{ type: 'item_reference', id: 'other-object' }] }, { input: [{ encrypted_content: 'other-state' }] }, { input: [{ file_id: 'other-file' }] }, { store: true }]) assert.throws(() => sanitizeBody({ ...body, ...update }, binding, 'trusted-subject'));
+  assert.equal(sanitizeBody({ ...body, model: 'other' }, binding, 'trusted-subject').model, 'other');
+  for (const update of [{ api_key: 'bad' }, { api_base: 'https://other.invalid' }, { extra_headers: {} }, { metadata: {} }, { model: '' }, { model: null }, { tools: [{ type: 'mcp' }] }, { input: [{ type: 'item_reference', id: 'other-object' }] }, { input: [{ encrypted_content: 'other-state' }] }, { input: [{ file_id: 'other-file' }] }, { store: true }]) assert.throws(() => sanitizeBody({ ...body, ...update }, binding, 'trusted-subject'));
 });
 
 test('forward only safe headers and a per-identity internal credential', () => {

@@ -29,7 +29,7 @@ class ProxyCredentialRuntimeTests(unittest.TestCase):
     def test_controller_requires_plan_and_never_publishes_key_values(self):
         config = proxy_customer()
         store = CredentialFixture()
-        vaults = {"api": store, "admin": store}
+        vaults = {"admin": store}
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory:
             path = Path(directory)
             plan = binding_plan(config, "plan", "a" * 40, path, "", vaults, store)
@@ -38,7 +38,8 @@ class ProxyCredentialRuntimeTests(unittest.TestCase):
                 binding_plan(config, "execute", "a" * 40, path, "f" * 64, vaults, store)
             result = binding_plan(config, "execute", "a" * 40, path, plan["planSha256"], vaults, store)
             self.assertTrue(result["initialized"])
-            self.assertEqual(len(store.keys), 2)
+            self.assertEqual(len(store.keys), 1)
+            self.assertEqual([item["contract"]["plane"] for item in result["bindings"]], ["admin"])
             for value in store.values.values():
                 self.assertNotIn(value.value, json.dumps(result))
                 self.assertNotIn(value.value, (path / "runtime-review.json").read_text())

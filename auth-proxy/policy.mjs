@@ -42,6 +42,12 @@ export function validateConfig(config) {
     if (binding.clientIds !== undefined &&
       (binding.plane !== 'api' || binding.principalType !== 'User' || !Array.isArray(binding.clientIds) ||
        !binding.clientIds.length || !binding.clientIds.every(value => config.apiClientIds.includes(value)))) throw new Error('Invalid delegated client scope');
+    if (binding.plane === 'api') {
+      if (binding.role !== 'internal_user' || !['User', 'ServicePrincipal'].includes(binding.principalType)) throw new Error('Explicit API admission principal required');
+      if ('keyFile' in binding || 'models' in binding) throw new Error('API credentials and model permissions belong to LiteLLM');
+      if (binding.audit?.capture && !/^[a-zA-Z0-9-]{1,128}$/.test(binding.audit.teamId ?? '')) throw new Error('Audited identity requires a trusted team mapping');
+      continue;
+    }
     if (binding.role === 'audit_reader') {
       if (binding.plane !== 'admin' || binding.keyFile || binding.models?.length) throw new Error('Audit readers cannot carry LiteLLM backend privileges');
       continue;
@@ -99,7 +105,7 @@ export function authorizeRoute(plane, method, rawUrl, binding) {
 
 export function sanitizeBody(body, binding, subject) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !fields.has(key))) throw new Denied(400);
-  if (!binding.models.includes(body.model)) throw new Denied();
+  if (typeof body.model !== 'string' || !body.model.trim() || body.model.length > 256) throw new Denied(400);
   const pending = [body];
   while (pending.length) {
     const value = pending.pop();
@@ -117,4 +123,15 @@ export function cleanHeaders(headers, key) {
   const result = Object.fromEntries(Object.entries(headers).filter(([name]) => allowed.has(name.toLowerCase())));
   result.authorization = `Bearer ${key}`;
   return result;
+}
+
+export function apiCredentials(request) {
+  for (const name of ['authorization', 'x-litellm-api-key']) {
+    const count = request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === name).length;
+    if (count !== 1) throw new Denied(401);
+  }
+  const bearer = /^Bearer ([A-Za-z0-9_.-]+)$/.exec(request.headers.authorization ?? '');
+  const key = request.headers['x-litellm-api-key'];
+  if (!bearer || typeof key !== 'string' || !/^[A-Za-z0-9_-]{1,1024}$/.test(key)) throw new Denied(401);
+  return { token: bearer[1], key };
 }
