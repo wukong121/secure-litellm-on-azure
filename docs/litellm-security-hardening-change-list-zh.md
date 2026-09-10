@@ -589,10 +589,12 @@ general_settings:
 
 **目标**：可观测、可审计，同时不把日志变成新的敏感数据池。
 
+2026-09-10：基础版采用原生Spend Logs正文留痕，不把自建L3当作默认实现；正文获批后只进入私有PG，运维日志仅元数据。现有默认false和阶段门禁仍待适配，详见[部署指南](customer-deployment-workflows-zh.md)。
+
 **改造项**：
 
 - 定义 L1 元数据、L2 脱敏摘要、L3 原文三级日志；
-- 默认只启用 L1，`store_prompts_in_spend_logs=false`；
+- 未批准采集前默认仅元数据，`store_prompts_in_spend_logs=false`；基础版获批后通过待适配的发布流程启用原生正文，同时落实读取者、PG清理/容量和备份策略；
 - Authorization、Cookie、Token、Virtual Key、连接串和 Secret 永不记录；
 - 使用统一 Call/Trace ID 贯穿 WAF、ingress、LiteLLM、Guardrail、模型和数据库；
 - LiteLLM 接入 OpenTelemetry；
@@ -697,7 +699,7 @@ general_settings:
 
 **目标**：在合法、透明、最小化和可追责的前提下，审计经过 LiteLLM 网关的员工与 Agent 模型交互，用于安全调查、数据泄漏检测、合规审计和 Agent 风险治理，而不是默认用于个人绩效评价。
 
-> 2026-09-07需求确认：L3原文审计是客户近期重点功能，提升为阶段8首期必需交付。交付须包含采集、独立私有原文存储、元数据索引、`llm-admin`独立审计权限下的检索/查看、访问留痕、留存删除与故障完整性测试，不仅是文档或预留开关。先以合成数据实现和验收；生产默认关闭及治理批准要求不阻止功能开发，也不因客户提出需求就自动开启生产全文采集。具体首期范围见[实施路线图12.3节](litellm-security-hardening-implementation-roadmap-zh.md#123-l2l3-上下文审计)。
+> 2026-09-10范围更新，替代2026-09-07默认L3要求：第一阶段采用原生Spend Logs，完成批准范围、受控查询、PG容量/清理/备份与故障验收；自建独立存储、原文双审批/保全和可靠交付作为可选增强。现有代码默认和阶段门禁尚待适配，本条不启用正文。分支范围见[实施路线图12.3节](litellm-security-hardening-implementation-roadmap-zh.md#123-l2l3-上下文审计)。
 
 **可审计范围**：
 
@@ -722,7 +724,7 @@ general_settings:
 - 由客户 Legal、HR、Security、Privacy、Data Governance 和 Employee Relations 书面批准目的、范围、访问者、留存期和员工告知方式；
 - 明确允许的使用目的和禁止用途，默认禁止以全文内容自动生成个人绩效排名或纪律结论；
 - 按国家/地区、员工类型、数据分类和业务场景评估劳动法、隐私法、跨境和工会要求；
-- 建立查询审批、双人复核、调查工单、Legal Hold、数据主体请求和误用问责流程；
+- 基础版明确读取授权、调查工单及误用问责，核验原生查询权限；双人逐次审批、Legal Hold等有明确要求时选择能满足要求的增强方案，不能假定原生开关自带；
 - 未完成治理批准前，仅保留 L1 安全元数据，不启用 L3 全文审计。
 
 **身份与归因改造**：
@@ -738,9 +740,9 @@ general_settings:
 
 - L1 元数据继续进入 Spend Logs/Log Analytics，用于全量统计和检索；
 - L2 保存分类、风险标签、哈希、摘要和脱敏片段；
-- L3 才保存 Prompt、Response、tool call/result 等原文，必须按批准范围选择性开启；
-- 不建议将 L3 长期保存在 PostgreSQL；避免因原文体积再次造成 PG 满盘和认证中断；
-- 优先使用受控异步管线，例如 LiteLLM callback -> Event Hubs/受控接收服务 -> PII/Secret 扫描与脱敏 -> ADLS Gen2/Blob；
+- 基础版用原生Spend Logs保存获批Prompt/Response及实际记录中的工具内容；覆盖、截断和多模态字段须实测，不承诺完整文件/会话归档；
+- 基础版正文在私有PG，须评估与Key/预算控制数据共库的负载、在线保留、清理与备份，不再要求正文一律放独立存储；
+- 仅增强方案评估受控异步管线，例如LiteLLM callback -> 受控接收服务 -> 经验证的脱敏 -> 独立Blob；后续独立存储/索引要求只适用于该分支；
 - 如果采用 LiteLLM Azure Storage、Generic Logger 或其他 callback，必须先核验版本、许可证、Responses/WebSocket 覆盖和失败行为；
 - L3 存储使用 Private Endpoint、CMK、独立容器、不可公开访问、最小 RBAC、PIM 和访问日志；
 - 按用户、应用、Team、Agent、Call ID、session 和时间建立可控索引，不在普通日志平台复制全文；
@@ -749,7 +751,7 @@ general_settings:
 
 **LiteLLM 配置改造**：
 
-- 当前安全默认保持 `store_prompts_in_spend_logs=false`；只有批准的短期试点才可启用，并必须同步缩短 retention、扩容和监控 PG；
+- 当前安全默认保持`store_prompts_in_spend_logs=false`；基础版通过待适配的受控发布在获批试点启用，验收后再按批准范围放行；留存、是否扩容及监控由实测决定，不直接套用旧容量；
 - 若客户要求强制审计，设置 `global_disable_no_log_param: true`，防止调用方使用 `no-log` 跳过日志；
 - 拒绝或清除未经授权的 `x-litellm-disable-callbacks`、`LiteLLM-Disable-Message-Redaction`、`log_raw_request` 等客户端日志控制参数；
 - 生产日志禁止包含 Authorization、Cookie、Token、完整 Virtual Key、数据库连接串和 Secret；
@@ -894,7 +896,7 @@ general_settings:
 | D16 | LiteLLM目标版本和产品边界 | 固定精确OSS版本与digest，不采购或依赖LiteLLM Enterprise能力 |
 | D17 | 上下文审计用于哪些目的和人群 | 仅安全、合规、数据保护和 Agent 风险治理；禁止默认用于绩效排名 |
 | D18 | 审计哪些内容和协议 | 明确 messages、Responses items、tool call/result、文件及 WebSocket覆盖范围 |
-| D19 | L3 原文保存位置和期限 | 独立加密存储、默认关闭、最短必要留存，不长期写 PG |
+| D19 | 正文保存位置和期限 | 基础版原生Spend Logs进入私有PG，批准在线/备份留存；增强L3才采用独立存储/保全，原生启用门禁待适配 |
 | D20 | 谁能查看、搜索和导出原文 | 独立角色、PIM、工单、双人审批和全量访问审计 |
 | D21 | 是否强制审计并禁止 `no-log` | 受监管范围内强制，其他场景按数据分类；先验证反绕过 |
 | D22 | 员工告知、Legal Hold 和数据主体流程 | Legal、HR、Privacy 和 Data Governance批准 |

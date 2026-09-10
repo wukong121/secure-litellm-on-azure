@@ -4,11 +4,13 @@
 
 ## 目录边界
 
+第一阶段审计方向已改为原生Spend Logs（2026-09-10），获批正文进入私有PostgreSQL。独立audit-foundation/audit-storage/audit-detection按增强需求选用，不是基础版固定BOM；现有模板、配置和阶段门禁并未因文档而改变，原生模式发布与查询仍待适配。既有Blob/HSM Key及保全数据不能自动删除。详见[部署指南](../docs/customer-deployment-workflows-zh.md)及[成本口径](../docs/litellm-bom-cost-comparison-zh.md)。
+
 - `modules/`：可复用Azure资源模块；
 - `environments/`：`dev/test/prod`环境入口与参数；
 - [backup-storage](backup-storage/README_ZH.md)：阶段0可选的私有备份存储及初始专用VNet；禁止接管共享VNet或在阶段4后重放bootstrap模板；
 - [monitoring](monitoring/README_ZH.md)：阶段1旧网关最小告警，需匹配客户实际日志与命名；
-- [audit-storage](audit-storage/main.bicep)：阶段8独立CMK私有审计存储及分离权限；
+- [audit-storage](audit-storage/main.bicep)：可选增强L3的独立CMK私有审计存储及分离权限，不用于原生Spend Logs正文；
 - [audit-detection](audit-detection/main.bicep)：默认禁用的检测规则及响应契约，非已运行的自动响应；
 - [edge](edge/README_ZH.md)及[edge-origin](edge-origin/main.bicep)：阶段9 Front Door/WAF和API专用Private Link Service。
 

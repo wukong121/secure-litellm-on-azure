@@ -8,11 +8,13 @@
 
 Front Door/PLS模板位于`infra/edge`和`infra/edge-origin`；默认关闭且不创建DNS。此组件不会安装controller、创建内部LB或解禁阶段7关闭协议。发布/回退和未完成Gate见[阶段9记录](../docs/litellm-stage9-edge-cutover-preparation-2026-09-07.md)。
 
-## Stage 8审计组件
+## Stage 8原生留痕与可选增强组件
+
+2026-09-10第一阶段已选择原生Spend Logs，将获批正文留在私有PostgreSQL；自建L3与collector不作为保存Prompt的必备组件。当前Base正文仍关闭，发布生成器、查询入口、静态门禁和Stage8/9证据尚待适配，不要直接改为true或跳过阶段。基础版目标与阻断见[部署指南](../docs/customer-deployment-workflows-zh.md)。
 
 `components/stage8-audit`与`validation/stage8`包含L3/OTLP/输入Content Safety配置、审批/保全只读挂载、暂停的独立清理CronJob、Collector和网络策略。所有功能默认关闭，未加入环境overlay。执行`make validate-stage8`回归；域名生成可用`scripts/render_stage7_domain.py --stage 8`。
 
-先通过`infra/audit-storage`建设独立私有CMK存储并验证各身份权限，再通过批准配置开启采集及清理。`/audit`是独立审计角色查看页，不是原有Admin UI解禁。配置/接口/首期限制见[阶段8记录](../docs/litellm-stage8-l3-audit-observability-2026-09-07.md)。
+只有选择增强L3时，才先通过`infra/audit-storage`建设独立私有CMK存储并验证各身份权限，再通过批准配置开启采集及清理。`/audit`读取独立Blob，不是原生Spend Logs查询或Admin UI解禁。配置/接口/增强限制见[阶段8历史记录](../docs/litellm-stage8-l3-audit-observability-2026-09-07.md)。
 
 本目录是应用交付骨架，不会自动部署到当前集群。
 
@@ -29,7 +31,7 @@ Base清单包含：
 - startup/readiness/liveness probes；
 - requests/limits；
 - PDB和topology spread；
-- Spend Logs保留7天且Prompt/Response正文关闭；
+- 当前Spend Logs配置保留7天且Prompt/Response正文关闭；基础版获批启用与保留策略的生成/门禁适配尚未完成，7天不是替客户确定的永久期限；
 - Secret逐项引用，不使用`envFrom`。
 
 ## 环境覆盖
@@ -112,7 +114,7 @@ ServiceAccount Client ID保持占位符，必须由受保护的Bicep部署输出
 
 ## Stage 7双子域与认证代理
 
-`components/stage7-identity`与`validation/stage7`保留`llm-api.example.com`、`llm-admin.example.com`通用模板。客户workflow从`CUSTOMER_CONFIG_JSON`的`baseDomain`生成域名；本地单独预览可运行`./.venv/bin/python scripts/render_stage7_domain.py --base-domain <客户域名>`。生成内容只写忽略的`temp/`，同步代理Host、Ingress/TLS与OIDC回调，不部署资源，身份和镜像等占位符仍需补齐。两个入口对应独立Deployment、ServiceAccount、CSI挂载和NetworkPolicy，后端只允许代理访问，不再允许ingress直达。
+`components/stage7-identity`与`validation/stage7`保留`llm-api.example.com`、`llm-admin.example.com`通用模板。客户workflow从`CUSTOMER_CONFIG_JSON`的`baseDomain`生成域名；本地单独预览可运行`./.venv/bin/python scripts/render_stage7_domain.py --base-domain <客户域名>`。生成内容只写忽略的`temp/`，同步代理Host、Ingress/TLS与OIDC回调，不部署资源，身份和镜像等占位符仍需补齐。两个入口对应独立Deployment、ServiceAccount和NetworkPolicy；仅管理代理挂载内部凭据CSI，API采用企业Token与客户端vkey双凭据，不再挂载内部Key。后端只允许代理访问，不再允许ingress直达；模型与预算由LiteLLM统一管理。
 
 源码和配置契约见`auth-proxy/README_ZH.md`；Node 24，首次执行`npm ci --prefix auth-proxy --ignore-scripts`，再运行`make validate-stage7`。尚未加入任何环境overlay。
 

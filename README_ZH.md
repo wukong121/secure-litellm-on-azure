@@ -10,6 +10,8 @@
 
 ## 目标架构
 
+**第一阶段审计决策（2026-09-10）**：采用原生 Spend Logs 将获批的Prompt/Response保存在私有PostgreSQL。自建L3采集、正文Blob/HSM及恢复治理服务是可选增强项，不再作为所有客户的首发前提。当前配置仍关闭正文，发布、受控查询和阶段证据门禁尚待适配；详见[基础版方案](docs/litellm-content-audit-phase1-customer-brief-zh.md)及[部署指南](docs/customer-deployment-workflows-zh.md)，不得通过跳过现有门禁启用。
+
 ```text
 API客户端 -> llm-api.<客户域名> -> Front Door / WAF -> 私有API入口
                                                      -> Entra API认证代理
@@ -20,7 +22,8 @@ API客户端 -> llm-api.<客户域名> -> Front Door / WAF -> 私有API入口
                                       Azure OpenAI / Foundry
 
 配套服务：Key Vault、PostgreSQL Flexible Server、Managed Redis、
-私有ACR、Azure Monitor和独立L3审计存储。
+私有ACR和仅接收必要元数据的监控。批准的正文进入PostgreSQL原生Spend Logs；
+独立L3审计存储仅在选择增强方案时部署。
 ```
 
 | 领域 | 设计与实现范围 |
@@ -29,7 +32,7 @@ API客户端 -> llm-api.<客户域名> -> Front Door / WAF -> 私有API入口
 | 身份授权 | Entra认证、API/admin分离、Workload Identity及客户自有授权逻辑 |
 | 数据与秘密 | Key Vault/CSI、托管PostgreSQL和Redis模板、备份与恢复控制 |
 | 运行基线 | 固定镜像digest、非Root/只读容器、高可用及路由组件 |
-| 审计与观测 | Trace关联、L3采集/查询/留存代码、OSS回调、输入Content Safety及检测模板 |
+| 审计与观测 | 第一阶段原生Spend Logs留痕（接线待适配）、元数据监控；L3、Trace及Guardrail组件按需选用 |
 | 客户交付 | Environment配置、OIDC、阶段证据门禁、IaC预览及离线验证 |
 
 以上描述目标能力，不表示全部组件已部署或生产就绪。方案仅使用Azure服务、OSS和客户自有代码，不依赖LiteLLM Enterprise；原APIM部署实现已移除。
@@ -50,7 +53,7 @@ API客户端 -> llm-api.<客户域名> -> Front Door / WAF -> 私有API入口
 | --- | --- |
 | 0-2 | 现状盘点、可恢复备份、旧环境最小加固和架构决策 |
 | 3-5 | 供应链、隔离目标基础设施、私网与数据迁移演练 |
-| 6-8 | HA/路由、Entra与双域名、协议授权、L3审计与观测 |
+| 6-8 | HA/路由、Entra与双域名、协议授权、原生正文留痕与监控；增强审计按需选用 |
 | 9 | 批准试点、切流及验证回退窗口；资源退役另立变更 |
 
 回退条件满足前保留旧数据库、网关、身份和Master/Salt路径。禁止将候选版本直接连接旧生产数据库执行自动schema migration。
@@ -86,7 +89,7 @@ make validate-oss-callbacks
 ## 上线边界与成本
 
 - 新安全入口有明确的路由白名单。旧网关的图像、视频、WebSocket和Codex验证结果，不能替代新授权层的兼容性验收。
-- L3是首发必需能力，但当前RAM缓冲采集仍有崩溃丢失风险；OSS适配器尚未接入受信持久化接收器，回调success不证明流完整或审计可靠交付。
+- 第一阶段采用原生Spend Logs，不再默认要求自建L3。原生模式发布、受控查询、容量/留存和按模式区分的阶段证据仍是上线阻断项，当前L3门禁未被放宽。原生日志不保证零丢失或不可变取证；选择增强L3时另行批准并完成其专项验收。
 - 私有入口/controller、身份/Vault接线、PostgreSQL认证/HA和监控集成等仍需完成与验收。不能将带占位符的validation overlay直接用于生产。
 
 当前边界见[代码收尾台账](docs/litellm-code-completion-backlog-2026-09-07.md)、[安全架构](docs/litellm-azure-security-hardening-zh.md)和[实施路线](docs/litellm-security-hardening-implementation-roadmap-zh.md)。历史阶段记录是参考证据，不是客户验收报告。

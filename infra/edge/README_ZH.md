@@ -32,7 +32,7 @@ kubectl kustomize temp/stage9-domain
 ./.venv/bin/python scripts/preview_stage9.py --resource-group <目标资源组> --config temp/<环境>/release.json
 ```
 
-`release.example.json`是失败关闭的结构样例，不是一份批准书。`phase`支持prepare（创建计划、流量关闭）、canary（批准客户端试点、Detection）、production（Prevention）。开启流量需要实际Front Door ID。此前阶段8OSS采集架构、L3治理/恢复、协议矩阵和数据库恢复报告必须补齐。
+`release.example.json`是失败关闭的结构样例，不是一份批准书。`phase`支持prepare（创建计划、流量关闭）、canary（批准客户端试点、Detection）、production（Prevention）。开启流量需要实际Front Door ID。2026-09-10第一阶段改为原生Spend Logs，需验原生记录/权限/留存/容量及故障；只有选增强方案才需L3治理/恢复。当前发布检查仍使用旧审计字段，须先适配代码及证据，不能跳过或伪造passed。协议矩阵与数据库恢复仍为必验，见[当前部署指南](../../docs/customer-deployment-workflows-zh.md)。
 
 `checks`每项包含`passed=true`、`report`、近7天带时区的`observedAt`；changeTicket及两个不同approvedBy对象ID也必须存在。脚本只校验attestation结构/时效，不访问工单验证签名，不代替GitHub Environment审批、Azure RBAC或人工报告评审。
 

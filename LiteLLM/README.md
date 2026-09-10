@@ -81,6 +81,8 @@ Use `Internal Users`, `Teams`, and `Virtual Keys` to configure individual budget
 
 ## PostgreSQL capacity and spend-log retention
 
+This section describes the legacy script's defaults, not the current phase-one deployment procedure. The 2026-09-10 decision is approved native Spend Logs content retention in private PostgreSQL; publishing, query access and stage gates still need adaptation. Do not rerun the legacy script or enable a flag on production to bypass that work. See the [current deployment guide](../docs/customer-deployment-workflows-zh.md).
+
 New in-cluster PostgreSQL deployments request a 20 GiB PVC and retain detailed Spend Logs for 7 days. Prompt and response body storage is disabled by default. The relevant environment variables are:
 
 - `PG_STORAGE` (default `20Gi`)

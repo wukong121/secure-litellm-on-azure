@@ -41,7 +41,7 @@ python tests/test_all_deployments.py \
 
 不要把Master Key放进命令行，不使用客户真实Prompt，不上传原始响应到公开日志。脚本为旧路由同时发送Bearer和`api-key`头。Chat和图像分别测试OpenAI/Azure风格路径；Sora仅检查模型注册，不证明视频生成功能正常。
 
-新认证代理只允许有限的Entra授权路径。旧网关的Azure风格路径、图像/视频、WebSocket或加密多轮测试结果不能证明新入口兼容，更不能作为绕过策略的理由；真实租户、客户必需Codex协议、私网/身份、数据库迁移、L3可靠恢复和回退须通过对应[阶段门禁](../docs/customer-migration-guide-zh.md)。
+新认证代理只允许有限的Entra授权路径。旧网关的Azure风格路径、图像/视频、WebSocket或加密多轮测试结果不能证明新入口兼容，更不能作为绕过策略的理由。第一阶段已选择原生Spend Logs，须验实际正文/身份与Key关联、查询权限、清理/容量/备份和写入故障；自建L3恢复/治理测试仅适用于可选增强，不能代替原生落库验收。配置和阶段门禁尚待原生模式适配，不得跳过。真实租户、客户必需Codex协议、私网/身份、数据库迁移和回退仍须通过对应[阶段门禁](../docs/customer-migration-guide-zh.md)。
 
 ## Codex 缓存命中与会话亲和测试
 

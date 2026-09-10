@@ -10,6 +10,8 @@ The delivery target covers both staged migration of existing gateways and greenf
 
 ## Target Architecture
 
+**Phase-one audit decision (2026-09-10):** use native Spend Logs for approved prompt/response retention in private PostgreSQL. Custom L3 capture, Blob/HSM and recovery/governance services are optional enhancements, not a universal launch requirement. Native logging remains disabled in the current configuration; publishing, query access and stage evidence gates still need adaptation. See the [phase-one brief](docs/litellm-content-audit-phase1-customer-brief-zh.md) and [deployment guide](docs/customer-deployment-workflows-zh.md). Do not skip existing gates to enable it.
+
 ```text
 API clients -> llm-api.<customer-domain> -> Front Door / WAF -> private API ingress
                                                                -> Entra API proxy
@@ -20,7 +22,8 @@ Administrators -> private llm-admin.<customer-domain> -> Entra admin proxy
                                                       Azure OpenAI / Foundry
 
 Supporting services: Key Vault, PostgreSQL Flexible Server, Managed Redis,
-private ACR, Azure Monitor and independent L3 audit storage.
+private ACR and metadata-only monitoring. Native Spend Logs retain approved
+content in PostgreSQL; independent L3 storage is an optional enhancement.
 ```
 
 | Area | Design and implementation scope |
@@ -29,7 +32,7 @@ private ACR, Azure Monitor and independent L3 audit storage.
 | Identity | Entra authentication, separate API/admin policies, workload identities and customer-owned authorization |
 | Data and secrets | Key Vault/CSI, managed PostgreSQL and Redis templates, backup and restore controls |
 | Runtime | Digest-pinned containers, non-root/read-only baseline, HA and routing components |
-| Audit and observation | Trace correlation, L3 capture/query/retention code, OSS callbacks, input Content Safety and detection templates |
+| Audit and observation | Phase-one native Spend Logs retention (integration pending); metadata monitoring; optional L3, tracing and Guardrail components |
 | Delivery | Customer Environment configuration, OIDC, staged evidence checks, IaC previews and offline validation |
 
 These are target capabilities, not claims that every component is deployed or production-ready. The solution uses Azure services, OSS and customer-owned code; it has no LiteLLM Enterprise dependency. The former APIM implementation has been removed.
@@ -50,7 +53,7 @@ The original migration workflow remains read-only. New [deployment and acceptanc
 | --- | --- |
 | 0-2 | Inventory, recoverable backup, minimum legacy hardening and approved architecture decisions |
 | 3-5 | Supply chain, isolated target infrastructure, private networking and data migration rehearsal |
-| 6-8 | HA/routing, Entra and split domains, protocol authorization, L3 audit and observation |
+| 6-8 | HA/routing, Entra and split domains, protocol authorization, native content retention and monitoring; optional enhanced audit |
 | 9 | Approved pilot, cutover and verified rollback window; retirement is a separate change |
 
 Keep the old database, gateway, identity and Master/Salt path until rollback criteria are met. Do not connect the candidate version to the old production database for an automatic schema migration.
@@ -86,7 +89,7 @@ These checks do not deploy resources or call customer gateways. Dependency insta
 ## Readiness and Cost
 
 - Supported routes in the secure front door are deliberately restricted. Legacy image, video, WebSocket and Codex test results do not establish compatibility with the new authorization layer.
-- L3 is a required release capability, but the current RAM-buffered capture can lose content on a crash. The OSS adapter is not yet wired to a trusted durable receiver; callback success is not proof of stream completeness or audit delivery.
+- Phase one uses native Spend Logs, not mandatory custom L3. Native-mode publishing, controlled query access, retention/capacity checks and mode-aware stage evidence remain release blockers; current L3 gates have not been relaxed. Native logs do not guarantee zero loss or immutable evidence. Enhanced L3 requires separate approval and validation when selected.
 - Private ingress/controller integration, identity/Vault wiring, PostgreSQL authentication/HA and monitoring integration still require work and customer acceptance. Do not apply placeholder validation overlays to production.
 
 Use the [completion backlog](docs/litellm-code-completion-backlog-2026-09-07.md), [architecture](docs/litellm-azure-security-hardening-zh.md) and [implementation roadmap](docs/litellm-security-hardening-implementation-roadmap-zh.md) for the current boundaries. Historical stage records are reference evidence, not customer acceptance reports.

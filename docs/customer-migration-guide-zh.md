@@ -2,6 +2,7 @@
 
 > 适用：客户已有LiteLLM on AKS网关，计划建设隔离的新安全环境并逐步替换。
 > 不适用：直接在旧生产AKS/数据库上执行整套模板，或把参考阶段记录当作客户验收报告。
+> 审计方向更新（2026-09-10）：第一阶段采用原生Spend Logs正文留痕，自建L3按需选用；默认配置仍关闭正文，Stage8发布/证据及查询接线尚待适配。文档更新不代表可跳过现有门禁，见[部署指南状态表](customer-deployment-workflows-zh.md)。
 > 当前交付：阶段指导、配置检查、只读What-if、受批准的ARM实际部署、私网备份/恢复及应用清单发布、验收报告和证据账本生成。完整操作及人工ID清单见[客户部署与验收工作流](customer-deployment-workflows-zh.md)。这些入口不代表所有运行时集成已完成，不是一键生产切流器。
 
 ## 1. 迁移原则与入口
@@ -17,7 +18,7 @@
 | `preflight` | 校验客户配置、订阅/租户、旧新隔离和前序证据；选IaC组件时生成私有参数，阶段7至9选none时生成域名overlay | 不查询Azure真实状态，不补齐身份/Secret/镜像占位符 |
 | `what-if` | 重新执行预检，用OIDC做选定组件的真实Azure What-if，仅输出变更数量 | 不执行部署、数据库迁移、Kubernetes apply、DNS/WAF切流或资源删除 |
 
-原Azure IaC what-if入口已停用直接预览。实际执行使用 **Customer infrastructure deployment** 的plan/deploy、**Customer private runtime operations** 的plan/execute；阶段验收使用 **Customer stage acceptance** 的draft/record。部署和验收分开，入口controller、PG认证、L3可靠交付等[收尾阻断项](litellm-code-completion-backlog-2026-09-07.md)未完成不能切流。不要将“运行了deploy”记录为所有checks均通过。
+原Azure IaC what-if入口已停用直接预览。实际执行使用 **Customer infrastructure deployment** 的plan/deploy、**Customer private runtime operations** 的plan/execute；阶段验收使用 **Customer stage acceptance** 的draft/record。部署和验收分开，身份/协议、PG、原生留痕与受控查询等未通过不能切流；仅选用增强方案时要求L3专项验收。[旧收尾台账](litellm-code-completion-backlog-2026-09-07.md)中的L3默认前提由本次方案决策替代，但代码门禁尚未自动变更。不要将“运行了deploy”记录为所有checks均通过。
 
 ## 2. 客户首次准备
 
@@ -44,7 +45,7 @@
 
 原环境Bicep参数中的`OWNER_EMAIL`、`LOG_ANALYTICS_WORKSPACE_NAME`、`AZURE_LOCATION`只用于独立编译/直接参数文件使用；其示例回退是离线检查用途。客户迁移workflow使用`CUSTOMER_CONFIG_JSON`生成显式ARM参数，不使用这些回退，也不默默读取个人域名配置。
 
-运行时秘密由客户Key Vault承载：已有Master Key、Salt、数据库连接信息、管理OIDC client secret、会话加密密钥、受限后端Key等通过批准的CSI/Workload Identity接入。不要把它们写入`CUSTOMER_CONFIG_JSON`、ARM非secure参数、workflow inputs或日志。新增audit-foundation创建审计CMK及独立身份，但应用运行时秘密接线仍需受控初始化，不自动轮换客户已有加密材料。
+运行时秘密由客户Key Vault承载：已有Master Key、Salt、数据库连接信息、管理OIDC client secret、会话加密密钥、受限管理Key等通过批准的CSI/Workload Identity接入；API客户端自带vkey，不再由代理保存内部Key。不要把它们写入`CUSTOMER_CONFIG_JSON`、ARM非secure参数、workflow inputs或日志。audit-foundation仅为选择增强L3时创建审计CMK及独立身份，不是基础版前置项；不自动轮换或删除客户已有加密材料。
 
 ### 2.2 Azure权限与日志
 
@@ -84,9 +85,9 @@
 
 **客户准备**：网络、安全、身份、数据库、业务、合规和成本Owner。
 
-**执行**：`stage=2, component=none, mode=preflight`。批准目标区域/配额/CIDR与私网、API/admin域名、Entra App Role/CA/MFA责任、PG认证/HA/RTO/RPO、L3采集与故障策略/保留/保全/审批，以及首发Codex协议。排除APIM和LiteLLM Enterprise依赖；免费回调不等于可靠审计已经完成。
+**执行**：`stage=2, component=none, mode=preflight`。批准目标区域/配额/CIDR与私网、API/admin域名、Entra App Role/CA/MFA责任、PG认证/HA/RTO/RPO、原生正文的范围/读取者/留存/备份/故障容忍，以及首发Codex协议。需要保全或独立原文审批时另行选增强L3。排除APIM和LiteLLM Enterprise依赖；打开正文开关不等于审计验收完成。
 
-**退出证据**：`network_capacity`、`identity_owners`、`pg_auth_ha`、`l3_policy`、`protocol_scope`。关键决策未定时停在此阶段，不用参考环境的邮箱、资源名、无HA或West US替客户作决定。
+**当前代码证据字段**：`network_capacity`、`identity_owners`、`pg_auth_ha`、`l3_policy`、`protocol_scope`。其中`l3_policy`与基础版选择的映射需随代码契约适配，不得改名或写入虚假passed绕过校验。关键决策未定时停在此阶段，不用参考环境的邮箱、资源名、无HA或West US替客户作决定。
 
 ### 阶段3：供应链与目标基础
 
@@ -122,19 +123,23 @@
 
 ### 阶段7：Entra和双域名授权
 
-**客户准备**：两套Entra应用/角色、授权客户端、tenant/team/model映射、独立API/admin UAMI/Vault/Key、私网admin DNS、证书和CA/MFA管理员。
+**客户准备**：两套Entra应用/角色、获准企业主体与客户端、客户端vkey及其LiteLLM权限、独立管理凭据、私网admin DNS、证书和CA/MFA管理员。API采用企业Token与vkey双凭据，不维护API模型ACL或内部Key映射，见[认证契约](../auth-proxy/README_ZH.md)。
 
 **执行**：`stage=7, component=none, mode=preflight`生成域名overlay；用客户值补齐策略、身份、CSI和镜像引用，运行`make validate-stage7`及真实租户负向测试。验证跨tenant/用户/model/对象访问拒绝、后端直连拒绝、admin不公开。当前只支持有限管理路由，不是完整LiteLLM原生UI桥接。WS、对象引用、加密多轮、Files/MCP等未完成授权的能力保持关闭。
 
 **退出证据**：`tenant_negative_tests`、`object_ownership`、`admin_private`、`required_protocols`。客户首发协议未覆盖就不能切换现有Codex入口，不得仅因普通Chat通过而放行。
 
-### 阶段8：L3审计与观测
+### 阶段8：原生正文留痕与观测，增强L3可选
 
-**客户准备**：合规批准的采集范围/故障策略、CMK Vault/Key、writer/reader/retention身份、双人审批和保全发布者、访问日志期限、恢复目标及Monitor接入。
+**基础版准备**：批准的采集范围、读取者、在线与备份保留期、PG容量/IO预算、清理/写入告警、实际字段与双凭据归因验收方案；不默认要求独立Blob、HSM、writer/reader/retention/recovery身份及L3双审批。
 
-**执行**：`stage=8, component=audit, mode=what-if`预览独立私有审计账户；`component=none, mode=preflight`生成域名配置。运行`make validate-stage8`及`make validate-oss-callbacks`。必须完成受信接收器、持久化恢复、流完整性、正文脱敏、hold/delete竞态和云端权限验收后才开启强制生产采集。当前RAM链路及未接入部署的OSS适配器不足以满足该门槛；回调success或HTTP200不证明原文完整/可靠交付。
+**基础版目标顺序（待代码接线，非当前可执行按钮清单）**：冻结采集与配置覆盖策略 → 在隔离环境发布原生正文配置并防止双写 → 验证真实请求/异常记录、受控查询、容量与留存 → 检查备份/恢复后的残留与权限 → 批准试点。新建使用新库，迁移在隔离恢复库验证历史正文、保留和访问策略；不得把未经批准的旧正文带入新环境并开放查询。
 
-**退出证据**：`durable_audit_recovery`、`audit_governance`、`telemetry_received`、`guardrail_scope`。L3是首发必需项，不能用“默认关闭”作为通过证据；未完成则停止试点。普通日志、Trace和Spend Logs不得出现原文或凭据。
+**当前阻断**：原生正文默认false且静态门禁要求关闭；Stage8/application仍要求auditRuntime。`durable_audit_recovery`、`audit_governance`、`telemetry_received`、`guardrail_scope`是当前代码的旧证据字段，不是基础版应伪装完成的L3检查。须先实现按模式区分的发布/证据和受控查询，再开放后续发布；不能跳过Stage8。`make validate-stage8`、OSS回调及合成L3测试只证明代码回归，不证明原生正文已落库。
+
+**仅选择增强L3时**：使用audit-foundation/audit部署及专门采集、恢复和治理流程，完成其权限、故障、脱敏和保全验收。已有强审计binding不在本轮删除；原生模式需要显式适配以防止代理因L3未启用拒绝，不能先解除约束后宣称已具备审计。
+
+**正文边界**：批准的正文可存原生Spend Logs；普通运维日志、Trace、artifact不保存正文或凭据。原生日志可能延迟、缺失、截断，不承诺逐帧、返回前持久化、不可变或零丢失。基础版查询权限与PG清理/备份验证不可省略。
 
 ### 阶段9：试点、切流与回退窗口
 
@@ -142,7 +147,7 @@
 
 **执行**：先`stage=9, component=origin, mode=what-if`，再`component=edge`。edge预览会打开资源创建但保持`enableApiTraffic=false`和WAF Detection，不修改DNS。检查LB/子网快照、PLS手动批准、源站证书、FDID补充检查及长流超时。获准后遵循[Stage9发布Runbook](litellm-stage9-edge-cutover-preparation-2026-09-07.md)和release脚本，先限定客户端试点，再单独审批DNS/流量切换与WAF Prevention。
 
-**退出证据**：`enabled_what_if`、`origin_tls_private_link`、`pilot_regression`、`rollback_rehearsal`、`dual_owner_release`。具体切流顺序：冻结模型/Key/预算管理写入，按已演练方式同步新库，验证密文与记录，批准切换客户端/DNS，观测错误率/长流/L3/账务，异常达到客户阈值则恢复旧入口。若新库已产生独有写入，先评估数据/预算一致性，不能只改DNS假定无损回退。不要让旧新schema混写或把真实用户随机分到不一致数据库。
+**退出证据**：`enabled_what_if`、`origin_tls_private_link`、`pilot_regression`、`rollback_rehearsal`、`dual_owner_release`。当前发布还依赖前序旧审计证据，必须先完成基础版门禁适配，不能靠文档批准跳过。具体切流顺序：冻结模型/Key/预算管理写入，按已演练方式同步新库，验证密文与记录，批准切换客户端/DNS，观测错误率/长流/原生正文写入与清理/PG容量/账务；只有选用增强方案才另验L3。异常达到客户阈值则按批准方案回退。若新库已产生独有写入，先评估数据/预算一致性，不能只改DNS假定无损回退。不要让旧新schema混写或把真实用户随机分到不一致数据库。
 
 回退窗口结束后另立退役变更：确认无旧流量/依赖、备份可恢复、成本/Owner/保留要求，逐个删除专属资源；不整组删除共享RG，不自动解除保护锁，不把[历史清理示例](../LiteLLM/RESOURCE_CLEANUP_ZH.md)当作客户所有权清单。
 

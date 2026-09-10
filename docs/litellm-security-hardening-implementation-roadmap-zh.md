@@ -13,7 +13,7 @@
 
 阶段0至9已有阶段性交付，**全部编码、IaC集成和生产验收尚未完成**。阶段9仍为切流准备，不是已切流；模板存在或离线门禁通过不代表云端接线完成。
 
-最新[代码收尾台账](litellm-code-completion-backlog-2026-09-07.md)列出L3可靠交付、Codex协议授权、入口/身份/数据库/监控集成及客户决策的阻断项。固定LiteLLM `1.98.0`的[OSS回调实测](litellm-oss-callback-validation-2026-09-07.md)已通过SDK和13场景Proxy验证；薄适配器未接入部署。后续以OSS回调作为模型侧内容来源，但success回调不能证明流完整，回调异常也不会阻止200响应，必须保留可信入口控制并补全可靠交付层。
+2026-09-10审计范围已调整为原生Spend Logs基础版，自建L3可靠交付仅作为可选增强分支；[原收尾台账](litellm-code-completion-backlog-2026-09-07.md)中的L3默认前提不再普遍适用，其他身份/协议/数据/入口验收不取消。固定LiteLLM `1.98.0`的[OSS回调实测](litellm-oss-callback-validation-2026-09-07.md)保留为增强分支历史证据，不代替原生正文落库测试。基础版尚需生成配置、受控查询、容量/清理/备份和模式化阶段门禁，详见[部署指南](customer-deployment-workflows-zh.md)。
 
 本轮未部署、未改DNS/生产流量、未采集生产原文、未提交Git；不使用LiteLLM Enterprise或APIM。
 
@@ -200,7 +200,7 @@ flowchart LR
 | Guardrail 故障策略 | 按数据分类；高敏请求 fail-closed |
 | RTO/RPO | 由客户业务 Owner 批准 |
 | 迁移方式 | 推荐新集群迁移，不做大规模原地改造 |
-| L3 原文审计 | 默认关闭，独立存储、最短必要留存、独立访问审批 |
+| 内容留痕与增强审计 | 基础版原生Spend Logs经批准后启用，明确PG容量/留存/备份/读取者；独立L3存储与审批按需选择，代码门禁待适配 |
 | LiteLLM 版本 | 固定精确版本与 digest，不使用浮动 `latest` |
 
 ### 6.2 LiteLLM 版本策略
@@ -501,8 +501,8 @@ usage-based-routing-v2 + 模型组 affinity + Redis
 3. 使用受控安全组分配角色；
 4. 管理员启用 MFA、Conditional Access 和 PIM；
 5. 在AKS部署客户自有的独立Entra认证代理，验证issuer、audience、tenant、signature、expiry和roles/scopes；
-6. 认证代理删除客户端提交的身份和内部凭据Header，再注入不可伪造的受信身份上下文；
-7. 建立Entra identity到LiteLLM Team、模型ACL、预算和后端受限Virtual Key的映射；
+6. API同时要求Authorization中的企业Token与X-LiteLLM-API-Key中的客户端vkey；验证准入后移除企业Token，将vkey交给固定LiteLLM后台，剥离其他伪造身份/路由Header；
+7. 2026-09-10采用双凭据方案：不再维护API身份到内部Key/模型ACL的映射，由LiteLLM统一管理Team、用户、vkey、模型权限和预算；实际企业主体与Key指纹分别关联。管理凭据映射不变，迁移和兼容边界见[当前代理说明](../auth-proxy/README_ZH.md)；
 8. 后台 Agent 使用独立应用身份或 Managed Identity；
 9. 禁止多人或多个 Agent 共用不可归因的 Virtual Key；
 10. 数据面使用`llm-api.<客户域>`，管理面使用`llm-admin.<客户域>`，管理域名仅接入私有管理入口；
@@ -533,18 +533,18 @@ usage-based-routing-v2 + 模型组 affinity + Redis
 ## 12. 阶段 8：可观测性、Guardrail、审计与 Sentinel
 
 **关联工作包**：SEC-15、SEC-16、SEC-18、SEC-21  
-**目标**：建立可信元数据和链路追踪，优先交付客户近期要求的L3原文审计闭环，再按风险逐步启用Guardrail和Sentinel联动。
+**目标**：基础版优先交付原生Spend Logs的受控正文留痕及必要监控，再按明确需要选用增强L3、Trace、Guardrail和Sentinel；普通遥测不复制正文。
 
-> 2026-09-07优先级确认：L3原文审计是阶段8核心交付项，必须实现采集、存储、检索、受控原文查看、留存删除和完整性验证，不能仅提供开关、架构或未来计划。生产默认关闭是启用门禁，不是推迟功能开发；先以合成数据完成实现和离线/隔离测试，生产采集须按客户批准的目的、范围和期限启用。本条是实施范围更新，不代表功能已经实现或上线。
+> 2026-09-10替代2026-09-07默认范围：第一阶段采用原生Spend Logs，不要求先完成独立Blob/分片/恢复/双审批平台。不是仅改一个布尔值就上线；原生模式的发布、受控查询、留存/备份/容量/故障验收及与旧阶段门禁解耦仍需代码实现。仅选用增强L3时要求下文的独立存储和治理交付。
 
-实施顺序：最小L1身份与Trace关联 -> L3审计闭环 -> Guardrail分阶段治理 -> Sentinel检测与响应。继续不使用LiteLLM付费能力，不部署、不切流、不提交，除非另行批准。
+实施顺序：可信身份与Key归因/基础监控 -> 原生正文配置与受控查询 -> 容量/清理/备份及故障验收 -> 模式化阶段证据 -> 按需增强L3/Trace/Guardrail/Sentinel。继续不使用LiteLLM付费能力，不因文档决策自动部署或采集正文。
 
 > 2026-09-07实施状态：L3采集/Blob适配器/索引/独立审批查询/原文查看页/留存删除的首期代码及合成HTTP闭环已完成；另提供手动OTLP、输入Content Safety和禁用的Sentinel规则模板。未部署或采集生产原文。持久化队列、完整协议授权、独立PII预览、真实Azure/租户验收、Container Insights/Prometheus接入和响应Playbook仍未完成。详见[阶段8实施记录](litellm-stage8-l3-audit-observability-2026-09-07.md)。
 
 ### 12.1 L1 可观测性优先
 
 1. 使用统一 Call/Trace ID 贯穿 WAF、ingress、LiteLLM、Guardrail、模型和数据库；
-2. LiteLLM 接入 OpenTelemetry；
+2. 按需接入OpenTelemetry，保持正文关闭；collector不是原生Spend Logs的前置条件，现有observability与auditRuntime耦合待解除；
 3. AKS 接入 Container Insights 和 Managed Prometheus；
 4. 收集 Front Door/WAF、Firewall、AKS、Defender、Key Vault、PG、Redis、Entra 和模型诊断日志；
 5. 建立成功率、延迟、TTFT、WebSocket、429、PG/Redis、Guardrail、预算和缓存 Dashboard；
@@ -564,7 +564,11 @@ usage-based-routing-v2 + 模型组 affinity + Redis
 
 ### 12.3 L2/L3 上下文审计
 
-- 公共部署默认只启用L1元数据；L3必须完成代码和测试，通过独立开关按批准范围启用；
+**基础版先行**：原生Spend Logs保存批准正文，明确哪些业务和数据允许采集、有限读取者、在线/备份留存；验证JSON/SSE/失败/长上下文的实际记录、Token/Key归因、no-log绕过、查询越权、写入故障和清理/恢复。基础配置默认false，生产启用前须完成生成器、静态检查和Stage2/8/9证据适配，不以删除L3检查或手填passed替代。原生模式不保证零丢失或案件保全。
+
+**以下仅为可选增强L3分支**，原有采集/恢复/保全代码和历史数据保留，不要求基础版客户执行：
+
+- 公共部署仍默认关闭未经批准的正文；选用增强L3时按批准范围启用，验证不与原生日志重复存储正文；
 - L2 保存分类、风险标签、哈希、摘要和脱敏片段；
 - L3保存Prompt、Response、tool call/result等实际经过网关的原文；首期开发使用合成数据，未授权的生产原文不采集；
 - L3 启用前必须取得 Legal、HR、Security、Privacy、Data Governance 和 Employee Relations 的书面批准；
@@ -575,7 +579,7 @@ usage-based-routing-v2 + 模型组 affinity + Redis
 - 验证 `no-log`、禁用 callback 和禁用脱敏等绕过失败；
 - 审计管线故障必须告警，并能量化缺失事件数量。
 
-**首期必需交付物**：
+**选择增强L3时的交付物**：
 
 1. **采集与关联**：先覆盖当前允许的Chat、Responses HTTP和SSE，记录输入、输出、工具定义/调用/结果及可信tenant、主体、Team、Call/Trace ID。区分客户端提交内容与代理规范化后转发内容；仅记录实际经过网关的数据，不推断隐藏推理或网关外工具执行。
 2. **原文存储与索引**：原文写入独立私有Blob/ADLS，检索索引仅保存必要元数据和对象引用，不把全文复制到Spend Logs、Log Analytics或普通错误日志。使用Workload Identity、加密、独立读写权限及大小/内容类型限制。
@@ -598,6 +602,8 @@ Stage7已关闭的WebSocket、Files/MCP、对象引用和加密多轮上下文�
 6. 删除资源、全量轮换、隔离节点等高影响动作必须人工批准。
 
 ### 12.5 阶段门槛
+
+基础版按原生正文实测、读取者权限、采集与故障策略、PG容量/清理/备份和恢复后留存验收；当前代码的Stage8/9证据仍需适配，不能直接照此填写已通过。下列L3读取/恢复、Guardrail、Trace与Sentinel指标仅在选择相应增强能力时追加，必要基础监控始终保留。原生日志的延迟/截断/缺口应符合批准的边界，不能要求它凭一个开关提供增强L3的完整性承诺。
 
 - Trace ID 可以关联网关、模型、工具和审计事件；
 - L3采集、原文存储、索引检索、独立授权查看、访问留痕和留存删除闭环均有可执行代码及合成数据验收证据；

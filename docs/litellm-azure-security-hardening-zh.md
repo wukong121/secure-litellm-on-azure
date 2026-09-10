@@ -176,15 +176,17 @@ flowchart TB
 用户/应用身份
   -> Entra ID 获取访问令牌
   -> Front Door / Application Gateway 执行边缘防护
-  -> JWT 验证层校验 issuer、audience、signature、expiry、tenant、roles/scopes
-  -> LiteLLM 将 Entra identity 映射到 Team / Virtual Key / model ACL / budget
+  -> 同时提交企业 access token 和 LiteLLM vkey
+  -> JWT 验证层校验 issuer、audience、signature、expiry、tenant、获准主体及调用 roles/scopes
+  -> 验证层移除企业Token，将客户端vkey作为后台Authorization转发
+  -> LiteLLM 按 vkey / 用户 / Team 执行模型权限、预算和用量限制
   -> Guardrail 检查 Prompt Injection、PII、内容安全和数据策略
   -> LiteLLM Pod 使用 Workload Identity 获取 Azure Token
   -> 通过 Private Endpoint 调用指定 Foundry / Azure OpenAI 资源
   -> 全链路写入不含敏感原文的审计元数据
 ```
 
-WAF不能替代身份认证。本方案明确不使用LiteLLM Enterprise原生JWT能力。在ingress后部署客户自有的轻量Entra认证代理，验证JWT后为请求注入不可伪造的用户/Team身份，并删除客户端自行提交的同名身份、内部凭据和路由Header。代理代码、镜像、配置和运维责任归客户所有，不引入LiteLLM付费许可证依赖。
+WAF不能替代身份认证。本方案明确不使用LiteLLM Enterprise原生JWT能力。2026-09-10起在ingress后部署的客户自有Entra认证代理只负责企业准入；API同时要求Authorization中的企业access token与X-LiteLLM-API-Key中的vkey，不允许仅凭Key进入。代理不复制API模型ACL，不映射或保存用户内部Key；实际调用者user归因由已验签的tid/oid生成，不覆盖LiteLLM的Key所有者或Team。客户端伪造的其他身份/路由Header不转发，模型与预算继续由LiteLLM管理。当前不强制企业身份与vkey归属相同，不承诺防止内部借Key或同时泄露两种凭据；网络必须阻止直达后台的旁路。详见[当前认证契约](../auth-proxy/README_ZH.md)。代理代码、镜像、配置和运维责任归客户所有，不引入LiteLLM付费许可证依赖。
 
 ## 6. 风险点与 Azure 产品映射
 
@@ -456,7 +458,15 @@ flowchart LR
 
 ### 7.9 日志、隐私与审计
 
-#### 三层日志模型
+#### 第一阶段：原生Spend Logs正文留痕
+
+2026-09-10方案选择：原生`store_prompts_in_spend_logs`保存获批Prompt/Response，正文进入私有PostgreSQL；自建L3不再是基础版首发必需项。企业Token负责准入，LiteLLM依据客户端vkey执行模型/预算权限；实际调用主体与Key归属分别关联。原生配置/发布门禁、受控查询和留存监控尚待实现，默认仍关闭正文，不能将本段视为已启用。详见[基础版方案](litellm-content-audit-phase1-customer-brief-zh.md)和[部署状态](customer-deployment-workflows-zh.md)。
+
+基础版必须验证采集范围、禁止客户端绕过、读取权限、实际字段、容量/清理、备份残留和恢复后留存，以及数据库故障时的记录缺口和业务影响。原生开关不是DLP，不自动实现逐次原文审批、案件保全、不可变或零丢失；不能将自建管线的脱敏或可靠性假定为原生能力。普通日志/Trace/artifact仅保留必要元数据，正文不重复送入观测平台。
+
+#### 可选增强：三层日志模型
+
+下表是客户选择增强审计后的分层建议，不是第一阶段的必部署组件或固定保留期限。
 
 | 层级 | 默认内容 | 存储建议 | 访问者 | 留存建议 |
 | --- | --- | --- | --- | --- |
@@ -464,15 +474,15 @@ flowchart LR
 | L2 脱敏摘要 | Prompt/Response 分类、哈希、风险标签、脱敏片段 | Log Analytics / ADLS Gen2 | 安全调查员 | 30-90 天 |
 | L3 原文 | 完整 Prompt/Response、工具参数和输出 | 加密 Storage/ADLS，独立容器和 CMK | 经审批的极少数调查员 | 默认关闭；按场景最短留存 |
 
-#### 强制要求
+#### 共同保护要求与增强选项
 
 - Authorization、Cookie、API Key、数据库连接串和 Entra Token 永不写日志；
-- 对用户输入和模型输出执行 PII、Secret 和客户标识脱敏；
+- 明确输入输出允许保存的数据分类；若要求PII/Secret脱敏，应验证其在实际原生日志写入前有效，未满足时限制试点数据或阻断启用，不能靠正文开关声称具备DLP；
 - 使用 `x-litellm-call-id` 或统一 Trace ID 贯穿 Front Door、认证层、LiteLLM、模型端点和数据库；
 - Log Analytics、Storage、Key Vault 和数据库启用 Private Link 与诊断设置；
-- 对 L3 原文启用独立 RBAC、PIM、访问审批、CMK 和 Immutable Blob（如审计要求）；
+- 仅选择增强L3时，对独立正文库配置RBAC、PIM、审批、CMK及按要求采用的Immutable Blob；基础版原生查询按实测权限单独授权，不假定已具备上述全部能力；
 - 日志导出到第三方平台前完成数据出境和供应商风险评估；
-- 日志查询、导出、删除和留存策略变更都进入审计日志。
+- 查询、导出、删除和留存策略变更应可追踪；核对原生UI/API实际能力，缺口如实披露，登录日志不等同于逐记录读取证据。
 
 ### 7.10 软件供应链与 DevSecOps
 

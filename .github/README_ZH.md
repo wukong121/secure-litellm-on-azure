@@ -10,7 +10,11 @@
 
 新入口只在客户私有仓库保存7天审查计划/部署输出/验收元数据artifact，绝不保存dump、kubeconfig、原始stderr或参数。现有运行时集成缺口仍需完成，部署成功不等于可以生产切流。
 
+API认证已采用企业Token与客户端vkey双凭据，模型/预算只由LiteLLM管理。客户API bindings不再填写models，proxy-credentials动作仅初始化管理端Key，application不再发布API内部Key挂载。旧配置/镜像需配套迁移并刷新计划与回执，客户端Token自动续期和真实权限仍需验收；不自动清理旧Key/Vault/RBAC。见[认证契约及迁移步骤](../auth-proxy/README_ZH.md)。
+
 ## `customer-migration.yml`
+
+第一阶段选择原生Spend Logs，不默认执行自建L3的audit-foundation/audit部署及audit治理/恢复workflow。当前Stage8/application、observability配置与阶段证据仍有L3依赖，原生模式尚待代码适配；`guide`或验收草稿中的旧检查不能视为基础版最终要求，也不能手填passed跳过。基础版仍需正文、查询权限、清理/备份、容量和故障验收，见[部署状态表](../docs/customer-deployment-workflows-zh.md)。本轮未修改workflow行为或启用客户正文日志。
 
 选择dev/test/prod、阶段0至9、guide/config-check/preflight/what-if以及组件。config-check允许无前序证据检查后续配置；preflight/what-if保持前序门禁。实际部署入口独立，不修改此workflow的只读行为。
 

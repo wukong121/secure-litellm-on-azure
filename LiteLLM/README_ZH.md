@@ -169,6 +169,8 @@ http://<AKS LoadBalancer IP>:4000/ui
 
 ## PostgreSQL 容量与 Spend Logs
 
+本节是旧网关脚本的默认行为，不是当前基础版启用流程。2026-09-10已选择原生Spend Logs保存获批正文，发布/查询及阶段门禁仍待适配；不能直接重跑旧脚本或改一个布尔值绕过。原文表中的“生产建议关闭”适用于未经批准/未验收的旧默认，不否定新方案经批准后启用；详见[当前部署指南](../docs/customer-deployment-workflows-zh.md)。
+
 启用数据库后，LiteLLM 会保存 Virtual Key、用户、团队、预算、UI 配置以及逐请求 Spend Logs。调用量较大时，`LiteLLM_SpendLogs` 通常是增长最快的表。默认配置保留 7 天明细，并关闭 Prompt/Response 正文存储。
 
 扩容已有集群前应先备份数据库，并确认 StorageClass 支持 `allowVolumeExpansion`。重跑部署脚本前还必须通过安全方式注入客户当前使用的 `LITELLM_MASTER_KEY`、`PG_PASSWORD` 和其他既有环境变量，避免意外轮换 Key 或覆盖数据库连接配置。例如将现有 PVC 扩到 50 GiB：

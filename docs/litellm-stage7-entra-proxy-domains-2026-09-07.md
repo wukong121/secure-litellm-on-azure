@@ -5,6 +5,12 @@
 > 产品边界：仅Microsoft Entra、客户自有代码和OSS依赖，不引入LiteLLM Enterprise或APIM  
 > 运行时验收仍受阶段4/5新环境和客户租户权限阻塞
 
+## 2026-09-10 契约变更
+
+以下第1至各节保留2026-09-07历史设计和验证记录，不作为当前API凭据接入指导。当前API已改为“企业Token + 客户端vkey”：企业Token在Authorization，vkey在X-LiteLLM-API-Key；两者缺一拒绝。代理只做企业准入，不再维护API模型ACL、映射内部Key或挂载API CSI凭据；LiteLLM统一决定模型和预算。管理OIDC/CSRF及管理凭据不变。当前Static Stage7只有管理代理的认证SecretProviderClass，后台自身CSI不在此计数中。
+
+新契约、旧配置迁移与仍未完成的客户端验收见[当前代理说明](../auth-proxy/README_ZH.md)。旧API Vault、Key、角色及CSI对象不因本次发布自动删除或吊销；禁止借历史已通过测试宣称新方案已完成真实Entra/客户端/模型验收。
+
 ## 1. 子域冻结
 
 | 入口 | 用途 | 认证 | 网络 |

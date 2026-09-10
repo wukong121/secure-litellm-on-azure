@@ -2,13 +2,42 @@
 
 本组件属于[安全增强版LiteLLM on Azure](../README_ZH.md)。客户部署入口为[分阶段迁移指南](../docs/customer-migration-guide-zh.md)，从受保护Environment注入配置；不能把本地合成测试通过当作生产身份、协议和审计验收。
 
+## API双凭据契约（2026-09-10）
+
+采用“企业Token + 客户端LiteLLM vkey”。企业准入与模型业务授权分开，不再将API身份映射为代理保存的内部Key，也不再维护API模型ACL。
+
+| 外部请求Header | 用途 | 转发到LiteLLM |
+| --- | --- | --- |
+| `Authorization: Bearer <Entra access token>` | 验证专用于本API的Token、租户、用户/应用、客户端及调用许可 | 不转发企业Token |
+| `X-LiteLLM-API-Key: <LiteLLM virtual key>` | 客户端按项目选择LiteLLM签发的有效vkey | 改写为`Authorization: Bearer <vkey>`，移除原自定义Header |
+
+两种凭据必须同时存在且每种Header恰好出现一次。缺失、重复或格式错误返回401；企业认证/准入不通过不访问后台；后台的Key/模型/预算拒绝结果正常返回。无Key-only、Token-only、共享Master Key或旧内部映射兜底。vkey是原始Key值，不带`Bearer`前缀；新契约接受1至1024个ASCII字母、数字、下划线或连字符，标准LiteLLM vkey使用此格式，既有自定义Key需先核验。生产不得向客户端分发Master Key或管理Key。
+
+`bindings`只控制哪些员工或服务主体能进入API。必须审批具体主体和客户端，不能以邮箱后缀或相同租户等同于在职员工；原`internal_user`标签仅表示API准入，不为该主体创建LiteLLM用户。模型列表、Team、用户、vkey权限和预算由LiteLLM管理。当前**不强制企业身份与vkey所有者一致**，允许获准主体使用其持有的有效Key，因此不保证阻止内部借Key、代转请求或同时泄露两种凭据。
+
+`user`仍重写为`SHA256(tid:oid)`，用于实际调用者归因；不改写LiteLLM的Key所有者、Team或组织。安全事件包含`subject`和`keyFingerprint`（提交vkey的SHA256，仅指纹，不证明Key有效），可结合后台记录核对。指纹和身份映射也需限制访问；它们不加入普通Trace属性，不记录原始Token/vkey。可选L3的`audit.teamId`仍是服务端批准的审计访问范围，不等同于客户端vkey的LiteLLM Team。
+
+客户端应自动获取/续期企业Token，并从受保护的凭据存储读取vkey；不要把二者写入Git、URL、命令行参数或诊断日志。目标客户端必须实测HTTP/SSE、Token过期与重新认证。支持自定义Header不等于已支持自动续期；当前WS仍拒绝，不能宣称完整Codex兼容。只读本地测试不代替实际Entra及LiteLLM权限验收。
+
+### 从内部Key映射迁移
+
+1. 在LiteLLM按原生流程准备用户/Team/vkey及模型、预算限制，客户端使用有效vkey；旧代理Key不会自动改成客户端Key。
+2. 删除客户`proxy.bindings`中API项的`models`；生成后的API策略也不得有`keyFile`。旧字段会使配置校验失败，管理项不变。
+3. 构建并批准新镜像，重新执行Stage7计划及回执流程。`proxy-credentials`仅初始化管理Key；API发布不创建SecretProviderClass，也不挂载`/mnt/auth-secrets`。
+4. 在隔离/维护窗口验证双凭据、后端拒绝与无旁路后切流，不混用新旧认证实例承接生产流量。失败时保持入口受控关闭；回退必须按批准的完整版本/配置执行，不能临时退回仅vkey认证。
+5. 旧API Vault、Secret、后台用户/Key、CSI对象及其RBAC不自动删除或吊销。现有foundation仍保留API Vault/身份资源及权限；确认无其他依赖后另行审批退役与权限回收，不能把“不再挂载”说成“云端权限已撤销”。
+
+管理面OIDC、Cookie、CSRF和管理凭据保持独立，不接受API双凭据替代管理登录。此次只切换API认证，不启用原生正文日志、不关闭已有强审计约束、不开放新协议。
+
 ## 阶段9回源补充检查
 
 Stage9 API Deployment显式注入`FRONT_DOOR_ID`，启动时必须是有效GUID；业务请求的`X-Azure-FDID`须匹配，重复/缺失/错误值拒绝，之后仍执行Entra认证和路由授权。admin代理不允许配置该参数。此前Stage7/8未设置时行为保持不变。内部健康探针仍可用，但Front Door公网路由不包含探针路径。
 
 FDID不是Secret，不能替代PLS连接审批、API-only私有LB和NSG源站防绕过。部署流程必须保留这一环境变量，不能通过删除它绕过检查。详见[阶段9准备记录](../docs/litellm-stage9-edge-cutover-preparation-2026-09-07.md)。
 
-## 阶段8新增能力
+## 阶段8可选增强L3能力
+
+2026-09-10第一阶段选择原生Spend Logs正文留痕，本节自建L3、独立`/audit`查看、审批/保全与恢复仅是增强分支。原生模式尚待生成器、发布/证据门禁和查询接线；当前`auditTeamId`/binding.audit.capture仍代表强制自建L3，不能认为原生开关会自动满足它，也不要直接删除binding来绕过失败关闭。普通日志/Trace/artifact仍不能复制正文；已有L3数据、审批与保留要求不因改方案失效。详见[部署指南](../docs/customer-deployment-workflows-zh.md)。
 
 L3首期实现包括按身份选择采集、私有Blob适配器、有界JSON/SSE响应、元数据索引、独立`audit_reader`审批查看、`/audit`页面和留存/保全清理。默认关闭，不改变阶段7已关闭协议。详见[阶段8实施记录](../docs/litellm-stage8-l3-audit-observability-2026-09-07.md)。
 
@@ -18,7 +47,7 @@ L3首期实现包括按身份选择采集、私有Blob适配器、有界JSON/SSE
 
 未设置`l3.deliveryMode`或设置为`buffered`时，沿用内容暂存内存的模式，写入失败/Pod崩溃可能形成显式缺口。`persist-before-forward`模式仍需显式选择；静态模板默认关闭，配置auditRuntime后的Stage8生成器按客户决策启用。两种模式都不是零丢失保证，原文清除前使用ARM核对版本/软删除，真实Azure存储与身份测试仍未执行。
 
-Stage8生成器保留API/admin的ServiceAccount主Client ID与原CSI凭据挂载，另在各自审计配置中填入独立writer/reader的l3.clientId；SDK显式选择此身份，不借用凭据Vault身份访问Blob。durable模式缺少Client ID或复用主身份会拒绝启动。留存作业使用独立配置与l3-retention身份。已有审批/保全ConfigMap不被应用发布覆盖，首次创建为空，默认无原文查看批准。collector自动接线尚未完成，审计专用发布不能覆盖已有启用的telemetry/guardrail。
+Stage8生成器保留API/admin的ServiceAccount主Client ID与管理端CSI凭据挂载；API双凭据不再挂载内部Key。各自审计配置填入独立writer/reader的l3.clientId，SDK显式选择此身份，不借用凭据Vault身份访问Blob。durable模式缺少Client ID或复用主身份会拒绝启动。留存作业使用独立配置与l3-retention身份。已有审批/保全ConfigMap不被应用发布覆盖，首次创建为空，默认无原文查看批准。collector自动接线尚未完成，审计专用发布不能覆盖已有启用的telemetry/guardrail。
 
 ### 持久化前置交付与恢复核心
 
@@ -62,15 +91,15 @@ docker build -t litellm-entra-auth-proxy:stage7-check auth-proxy
 - `apiAudience`：数据面API的精确access-token audience，与admin OIDC client ID分开；
 - `apiClientIds`：允许调用API的客户端App ID白名单；
 - `adminClientId`：独立管理OIDC应用；
-- `bindings`：默认空，每项有`plane`、`oid`、`role`、`keyFile`、`models`，可设置`disabled=true`立即在配置传播后拒绝该身份。
+- `bindings`：默认空，每项有`plane`、`oid`、`role`；API策略必须有`principalType=User|ServicePrincipal`且不得有`keyFile`、`models`。仅后台管理项保留这两个字段；可设置`disabled=true`在配置传播后拒绝该身份。
 
 API映射role只能为`internal_user`；管理映射只能为`proxy_admin`或`proxy_admin_viewer`。API token同时需要`llm.invoke` delegated scope，或`idtyp=app`与`Llm.Invoke` application role。管理角色从经OIDC验证的ID Token读取并与显式映射相交，不接受客户端Header声明。
 
-`keyFile`只能是CSI挂载目录下的简单文件名，每个身份独立，禁止默认用户、通配模型或共享Key。每个文件保存一个由独立受控流程预先创建的LiteLLM内部凭据；它必须绑定正确的用户/Team、模型权限和预算。代理不创建Key、不使用Master Key兜底，不自动将客户端Team字段映射为授权。
+管理项的`keyFile`只能是CSI挂载目录下的简单文件名，每个管理身份独立，禁止默认用户、通配模型或共享Key。每个文件保存受控流程预先创建的LiteLLM管理凭据。API请求只使用客户端vkey，模型/预算由LiteLLM判定；代理不创建API Key、不使用Master Key兜底，不自动将客户端Team字段映射为授权。
 
-凭据挂载目录为`/mnt/auth-secrets`；API代理只能挂载API凭据。管理代理另需`oidc-client-secret`和`session-key`，后者为32随机字节的base64编码，两个管理副本共享。实际值不得进入Git、环境参数、命令历史或日志。
+管理凭据挂载目录为`/mnt/auth-secrets`；API代理不再挂载此目录。管理代理另需`oidc-client-secret`和`session-key`，后者为32随机字节的base64编码，两个管理副本共享。实际值不得进入Git、环境参数、命令历史或日志。
 
-内部凭据每请求重读，可在CSI轮换传播后生效。OIDC client secret及会话加密key在启动时加载，轮换必须滚动重启；会话key轮换会使旧Cookie失效。身份绑定/禁用每请求重读，ConfigMap必须整目录挂载、不使用subPath；tenant、audience或域名变化会拒绝请求并要求重启。
+管理内部凭据每请求重读，可在CSI轮换传播后生效；API vkey由客户端提供，轮换/吊销由LiteLLM管理并验证其缓存生效。OIDC client secret及会话加密key在启动时加载，轮换必须滚动重启；会话key轮换会使旧Cookie失效。身份绑定/禁用每请求重读，ConfigMap必须整目录挂载、不使用subPath；tenant、audience或域名变化会拒绝请求并要求重启。
 
 `REPLACE_*`、`example.com`会使程序启动失败。模板不可直接应用。`PROXY_PLANE=api|admin`是唯一运行模式选择，后端固定为同namespace的LiteLLM ClusterIP，不接受请求控制的上游地址。
 
@@ -84,7 +113,7 @@ API映射role只能为`internal_user`；管理映射只能为`proxy_admin`或`pr
 
 关闭的路径返回拒绝，不会透明绕过认证。尤其不能把本组件替换到当前Codex/Agent生产入口：现有WebSocket与加密多轮上下文会被拒绝。管理OIDC完成不等于LiteLLM原生UI无感登录完成；后续UI桥接必须验证OSS授权与Cookie边界。
 
-请求JSON上限1MiB，只允许显式字段，禁用上游凭据/URL/metadata/header覆盖。`user`重写为tenant+oid的哈希，仅用于归因，不替代后端授权。默认剥离客户端Cookie、内部Key、身份、路由与转发Header；响应不透传内部Set-Cookie或Location。日志只输出代理request ID、plane、伪名化subject及状态码，不输出Token、body、query、凭据或异常细节。
+请求JSON上限1MiB，只允许显式字段，禁用body中的上游凭据/URL/metadata/header覆盖。`user`重写为tenant+oid的哈希，仅用于归因，不替代后端授权。API vkey仅经专用Header输入，企业Token与其他非允许Header不转发；响应不透传内部Set-Cookie或Location。日志仅输出请求关联、安全元数据及Key指纹，不输出Token、body、query、原始凭据或异常细节。
 
 ## 安全验收
 
