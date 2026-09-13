@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 READMES = (
@@ -28,6 +30,65 @@ READMES = (
 
 
 class ProjectDocumentationTests(unittest.TestCase):
+    def test_runbook_stage_tables_match_workflows_and_controllers(self):
+        from scripts.customer_migration import COMPONENTS
+        from scripts.migration_runtime import validate_action
+        from tests.test_customer_migration import customer_config
+
+        workflows = {}
+        for filename in ("customer-deploy.yml", "customer-runtime.yml"):
+            workflow = yaml.load((ROOT / ".github/workflows" / filename).read_text(), Loader=yaml.BaseLoader)
+            workflows[workflow["name"]] = workflow["on"]["workflow_dispatch"]["inputs"]
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        rows = re.findall(r"^\| (S\d+-\d+) \| (Customer infrastructure deployment|Customer private runtime operations) \| (\d) \| (component|action)=([a-z-]+) \| (plan|deploy|execute) \| ([^|]+) \| ([^|]+) \|$", guide, re.M)
+        self.assertGreaterEqual(len(rows), 50)
+        self.assertEqual({int(row[2]) for row in rows}, {0, 1, 3, 4, 5, 6, 7, 8, 9})
+        self.assertEqual(len({row[0] for row in rows}), len(rows))
+        plans = {}
+        for step, workflow_name, stage, selector, action, operation, approval, confirmation in rows:
+            with self.subTest(step=step):
+                inputs = workflows[workflow_name]
+                self.assertIn(stage, inputs["stage"]["options"])
+                self.assertIn(action, inputs[selector]["options"])
+                self.assertIn(operation, inputs["operation"]["options"])
+                if selector == "component":
+                    self.assertIn(int(stage), {3, 4, 5} if action == "platform" else {COMPONENTS[action][0]})
+                else:
+                    validate_action(customer_config(), int(stage), action)
+                key = (workflow_name, stage, action)
+                if operation == "plan":
+                    self.assertIn("留空", approval)
+                    self.assertEqual(confirmation.strip(), "留空")
+                    self.assertNotEqual(action, "backup-restore")
+                    plans[key] = step
+                else:
+                    self.assertEqual(confirmation.strip(), "test")
+                    if action == "backup-restore":
+                        self.assertEqual(operation, "execute")
+                        self.assertEqual(approval.strip(), "留空")
+                    else:
+                        self.assertIn(plans[key], approval)
+
+    def test_runbook_places_backup_requirements_next_to_execution(self):
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        backup = guide.split("### 阶段0：", 1)[1].split("### 阶段1：", 1)[0]
+        for required in ("POSTGRES_RESTORE_IMAGE", "Environment Variable", "docker pull --platform linux/amd64", ".RepoDigests", "backupAutomationPrincipalId", "Private DNS", "backupBlob", "backupSha256", "只支持execute"):
+            self.assertIn(required, backup)
+        for required in ("Legacy direct hash input; prefer approved_run_id", "Successful matching infrastructure plan run ID", "MIGRATION_RELEASE_JSON", "最终目标选择/接线待补齐", "当前无stop-legacy workflow按钮"):
+            self.assertIn(required, guide)
+        self.assertNotIn("Stage8/application仍要求auditRuntime", guide)
+        self.assertNotIn("本仓库尚未自动编排该controller/LB", guide)
+
+    def test_runbook_covers_configuration_for_all_primary_workflows(self):
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        configuration = guide.split("### 2.1 Variables和Secrets", 1)[1].split("### 2.2", 1)[0]
+        files = ("customer-deploy.yml", "customer-runtime.yml", "customer-migration.yml", "customer-acceptance.yml", "customer-runner-checks.yml", "customer-gateway-checks.yml", "promote-litellm-image.yml")
+        for filename in files:
+            workflow = (ROOT / ".github/workflows" / filename).read_text()
+            for context, name in set(re.findall(r"\b(vars|secrets)\.([A-Z][A-Z0-9_]*)", workflow)):
+                with self.subTest(workflow=filename, context=context, name=name):
+                    self.assertIn("`" + name + "`", configuration)
+
     def test_migration_guide_documents_actual_runner_check_inputs(self):
         guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
         section = guide.split("### 2.1 Variables和Secrets", 1)[1].split("### 2.2", 1)[0]
@@ -37,7 +98,7 @@ class ProjectDocumentationTests(unittest.TestCase):
             for columns in ([cell.strip() for cell in line.strip("|").split("|")],)
         }
         workflow = (ROOT / ".github/workflows/customer-runner-checks.yml").read_text()
-        inputs = set(re.findall(r"\$\{\{\s*(vars|secrets)\.([A-Z_]+)\s*\}\}", workflow))
+        inputs = set(re.findall(r"\$\{\{\s*(vars|secrets)\.([A-Z][A-Z0-9_]*)\s*\}\}", workflow))
         self.assertIn(("vars", "AZURE_RUNTIME_CLIENT_ID"), inputs)
         for context, name in inputs:
             expected = "Environment Secret" if context == "secrets" else "Environment Variable"
