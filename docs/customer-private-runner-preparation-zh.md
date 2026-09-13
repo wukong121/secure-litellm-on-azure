@@ -97,7 +97,7 @@ SSH管理员固定为`runneradmin`，Runner独立使用无sudo权限的`actions-
 
 部署输出提供`resourceGroupName`、`virtualMachineName`、`virtualMachineId`、`networkMode`、`managementVnetId`、`runnerSubnetId`、`outboundPublicIp`、`bastionName`、`privateIpAddress`、`sshCommand`、`bastionSshCommand`、`runnerLabels`、`bootstrapCheck`及`registrationCommand`。
 
-新建Bastion后，在当前已登录Azure CLI的开发机运行输出的`bastionSshCommand`，即可用本机SSH私钥登录；命令默认引用`~/.ssh/id_ed25519`，使用其他公钥时改成匹配的私钥路径。不把私钥传给Bicep或粘贴进GitHub。CLI需安装`bastion`扩展，操作者需拥有VM、NIC和Bastion的读取权限；首次SSH须核对主机指纹，不关闭host key检查。
+新建Bastion后，在当前已登录Azure CLI的开发机运行输出的`bastionSshCommand`，即可用本机SSH私钥登录；命令默认引用`~/.ssh/id_ed25519`，使用其他公钥时改成匹配的私钥路径。不把私钥传给Bicep或粘贴进GitHub。发起连接的电脑需安装Azure CLI的`bastion`和`ssh`两个扩展，操作者需拥有VM、NIC和Bastion的读取权限；首次SSH须核对主机指纹，不关闭host key检查。缺少ssh扩展时在该电脑运行`az extension add --name ssh`，不必重建VM。
 
 已有VPN等路由时可运行`sshCommand`直接访问私网IP，没有该路由则不能直接SSH。需要文件传输时使用[Bastion原生隧道](https://learn.microsoft.com/en-us/azure/bastion/connect-vm-native-client-linux#connect-to-a-vm---tunnel-command)；这与开启公网22不同。进入VM后执行：
 
@@ -349,6 +349,7 @@ runner退役时先确认不再需要执行维护任务，再注销runner、回�
 | 就绪 | 已验证run链接、未创建资源的待验证项、失败及处理结果 |
 
 - [部署与验收workflow指南](customer-deployment-workflows-zh.md)
+- [按步骤执行的客户迁移手册](customer-migration-guide-zh.md)
 - [入口与证书设计](litellm-ingress-tls-certificate-design-zh.md)
 - [GitHub自托管runner要求及网络域名](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
 - [添加自托管runner](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners)
