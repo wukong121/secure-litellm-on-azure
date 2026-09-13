@@ -80,6 +80,18 @@ class MigrationDeploymentTests(unittest.TestCase):
         self.assertEqual(template.parent.name, "bootstrap")
         self.assertEqual(parameters["parameters"]["resourceGroupName"]["value"], "rg-secure")
 
+    def test_plan_accepts_null_what_if_delta_without_changing_reviewed_response(self):
+        changes = [{**self.change, "delta": None}]
+        original = copy.deepcopy(changes)
+        plan = build_plan(self.config, 0, "bootstrap", self.revision, "b" * 64, {}, changes)
+        self.assertEqual(plan["changes"][0]["changedProperties"], [])
+        self.assertEqual(changes, original)
+        changed = copy.deepcopy(changes)
+        changed[0]["after"]["location"] = "eastus"
+        self.assertNotEqual(plan["planSha256"], build_plan(self.config, 0, "bootstrap", self.revision, "b" * 64, {}, changed)["planSha256"])
+        modified = [{**self.change, "changeType": "Modify", "delta": [{"path": "tags.owner", "propertyChangeType": "Create", "after": "synthetic-owner"}]}]
+        self.assertEqual(build_plan(self.config, 0, "bootstrap", self.revision, "b" * 64, {}, modified)["changes"][0]["changedProperties"], ["tags.owner"])
+
     def test_delete_unsupported_and_out_of_scope_are_rejected(self):
         for update in ({"changeType": "Delete"}, {"changeType": "Unsupported"}, {"resourceId": group_id(self.config, True)}):
             with self.subTest(update=update), self.assertRaises(ValueError):
