@@ -1,0 +1,33 @@
+{
+  "read": {
+    "/user/info": ["user_id"],
+    "/v2/user/info": ["user_id"],
+    "/user/available_users": [],
+    "/user/available_roles": [],
+    "/user/list": ["page", "page_size", "user_ids", "user_email", "user_role"],
+    "/key/list": ["page", "size", "user_id", "team_id", "key_alias", "return_full_object", "sort_by", "sort_order", "expand", "include_team_keys", "include_created_by_keys", "substring_matching"],
+    "/team/list": ["user_id", "organization_id"],
+    "/v2/team/list": ["page", "page_size", "user_id", "organization_id"],
+    "/organization/list": [],
+    "/project/list": [],
+    "/tag/list": [],
+    "/models": ["include_model_access_groups", "return_wildcard_routes"],
+    "/model/info": ["model"],
+    "/v2/model/info": ["model", "page", "size"],
+    "/health/services": ["service"],
+    "/health/license": [],
+    "/health/readiness/details": [],
+    "/get/ui_settings": [],
+    "/get/ui_theme_settings": [],
+    "/get/user_banner": [],
+    "/sso/get/ui_settings": []
+  },
+  "lookup": {
+    "/v2/key/info": ["keys"]
+  },
+  "audit": {
+    "/spend/logs/ui": ["api_key", "user_id", "request_id", "session_id", "team_id", "min_spend", "max_spend", "start_date", "end_date", "page", "page_size", "status_filter", "model", "model_id", "model_group", "key_alias", "end_user", "error_code", "error_message", "sort_by", "sort_order"],
+    "/spend/logs/ui/{request_id}": ["start_date", "end_date"],
+    "/spend/logs/session/ui": ["session_id", "page", "page_size"]
+  }
+}

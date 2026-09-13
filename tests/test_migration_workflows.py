@@ -1,24 +1,91 @@
+import json
+import subprocess
+import tempfile
+from pathlib import Path
 import unittest
 import yaml
 
 from scripts.customer_migration import COMPONENTS, ROOT
+from scripts.source_supply_chain import check_source, source_image
 
 
 class MigrationWorkflowTests(unittest.TestCase):
+    def test_manual_confirmation_and_read_only_runner_entrypoints(self):
+        acceptance = yaml.load((ROOT / ".github/workflows/customer-acceptance.yml").read_text(), Loader=yaml.BaseLoader)
+        inputs = acceptance["on"]["workflow_dispatch"]["inputs"]
+        self.assertIn("confirm", inputs["operation"]["options"])
+        self.assertTrue({"reviewed_run_id", "checked_items", "evidence_notes", "confirm_environment"}.issubset(inputs))
+        runner_text = (ROOT / ".github/workflows/customer-runner-checks.yml").read_text()
+        runner = yaml.load(runner_text, Loader=yaml.BaseLoader)
+        self.assertEqual(runner["jobs"]["check"]["runs-on"], "${{ fromJSON(vars.MIGRATION_PRIVATE_RUNNER_LABELS) }}")
+        self.assertIn("vars.AZURE_RUNTIME_CLIENT_ID", runner_text)
+        self.assertNotIn("scripts.migration_runtime --", runner_text)
+        for name in ("customer-deploy.yml", "customer-migration.yml", "customer-acceptance.yml", "customer-runner-checks.yml"):
+            workflow = yaml.load((ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
+            for job in workflow["jobs"].values():
+                for step in job["steps"]:
+                    if "uses" in step:
+                        self.assertRegex(step["uses"], r"@[0-9a-f]{40}$")
+                    command = step.get("run", "")
+                    self.assertNotIn("${{", command)
+                    if "pip install" in command:
+                        self.assertIn("cryptography==50.0.1", command)
+                        self.assertIn("service-identity==24.2.0", command)
+
+    def test_source_check_needs_no_private_runner_or_azure_credentials(self):
+        workflow = yaml.load((ROOT / ".github/workflows/source-image-checks.yml").read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        job = workflow["jobs"]["source"]
+        self.assertEqual(job["runs-on"], "ubuntu-24.04")
+        self.assertNotIn("environment", job)
+        for step in job["steps"]:
+            self.assertNotIn("${{", step.get("run", ""))
+            if "uses" in step:
+                self.assertRegex(step["uses"], r"@[0-9a-f]{40}$")
+                self.assertNotIn("azure/login", step["uses"])
+        self.assertEqual(job["steps"][-1]["if"], "always()")
+
+    def test_source_report_retains_failures_without_certifying_customer_stage(self):
+        for scan_code in (0, 1):
+            commands = []
+            def run(command, **kwargs):
+                commands.append(command)
+                document = {"spdxVersion": "SPDX-2.3", "packages": [{"name": "synthetic"}]} if command[0] == "syft" else {"ArtifactName": source_image(), "Results": [{"Target": "synthetic"}]}
+                return subprocess.CompletedProcess(command, 0 if command[0] == "syft" else scan_code, json.dumps(document), "not-for-artifact")
+            with self.subTest(scan_code=scan_code), tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+                report = check_source(Path(folder), "a" * 40, run)
+                self.assertEqual(report["status"], "passed" if scan_code == 0 else "failed")
+                self.assertFalse(report["stageAccepted"])
+                self.assertEqual([command[0] for command in commands], ["syft", "trivy"])
+                self.assertEqual(len(report["results"]), 2)
+                self.assertNotIn("not-for-artifact", (Path(folder) / "source-summary.json").read_text())
+                self.assertTrue(all("sha256" in item for item in report["results"]))
+
+    def test_missing_source_tool_is_a_failed_check(self):
+        def unavailable(*args, **kwargs):
+            raise FileNotFoundError("private environment details")
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            report = check_source(Path(folder), "a" * 40, unavailable)
+            self.assertEqual(report["status"], "failed")
+            self.assertNotIn("private environment details", json.dumps(report))
+
     def test_workflow_components_match_controller_including_network(self):
         for name, extra in (("customer-deploy.yml", set()), ("customer-migration.yml", {"none"})):
             workflow = yaml.load((ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
             options = workflow["on"]["workflow_dispatch"]["inputs"]["component"]["options"]
             self.assertEqual(set(options), set(COMPONENTS) | extra)
 
-    def test_new_workflows_are_private_protected_and_pinned(self):
+    def test_new_workflows_support_public_forks_with_protected_encrypted_execution(self):
         for name in ("customer-deploy.yml", "customer-runtime.yml", "customer-acceptance.yml"):
             with self.subTest(name=name):
                 content = (ROOT / ".github/workflows" / name).read_text()
                 workflow = yaml.load(content, Loader=yaml.BaseLoader)
                 self.assertEqual(workflow["permissions"], {"contents": "read"})
                 self.assertEqual(workflow["concurrency"]["group"], "customer-change-${{ inputs.environment }}")
-                self.assertIn("github.event.repository.private", content)
+                self.assertIn("GITHUB_REF_PROTECTED", content)
+                self.assertNotIn('[[ "$PRIVATE_REPOSITORY" == true ]]', content)
+                self.assertIn("secrets.WORKFLOW_ARTIFACT_KEY", content)
+                self.assertNotIn("vars.CUSTOMER_CONFIG_JSON", content)
                 for job in workflow["jobs"].values():
                     for step in job["steps"]:
                         if "uses" in step:
@@ -27,10 +94,27 @@ class MigrationWorkflowTests(unittest.TestCase):
                         if "CUSTOMER_CONFIG_JSON" in step.get("env", {}):
                             self.assertEqual(job["environment"], "${{ inputs.environment }}")
                         if "upload-artifact" in step.get("uses", ""):
+                            self.assertTrue(step["with"]["path"].endswith("/sealed-artifact.json"))
                             self.assertNotIn("database.dump", step["with"]["path"])
                             self.assertNotIn("parameters.json", step["with"]["path"])
                             self.assertNotIn("command-", step["with"]["path"])
                 self.assertNotIn("secrets: write", content)
+
+    def test_all_primary_public_fork_jobs_are_manual_protected_and_use_secret_config(self):
+        for name in ("customer-deploy.yml", "customer-runtime.yml", "customer-acceptance.yml", "customer-migration.yml", "customer-runner-checks.yml", "customer-gateway-checks.yml", "promote-litellm-image.yml"):
+            content = (ROOT / ".github/workflows" / name).read_text()
+            workflow = yaml.load(content, Loader=yaml.BaseLoader)
+            with self.subTest(workflow=name):
+                self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
+                self.assertNotIn("PRIVATE_REPOSITORY", content)
+                self.assertIn("GITHUB_REF_PROTECTED", content)
+                self.assertNotIn("vars.CUSTOMER_CONFIG_JSON", content)
+                for job in workflow["jobs"].values():
+                    if "fromJSON" in job.get("runs-on", ""):
+                        self.assertEqual(job["needs"], "authorize")
+                    for step in job["steps"]:
+                        if "upload-artifact" in step.get("uses", ""):
+                            self.assertTrue(step["with"]["path"].endswith("/sealed-artifact.json"))
 
     def test_runtime_requires_private_runner_and_separate_identity(self):
         content = (ROOT / ".github/workflows/customer-runtime.yml").read_text()

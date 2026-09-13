@@ -20,5 +20,8 @@
     "http-proxy-middleware": "4.2.0",
     "jose": "6.2.12",
     "openid-client": "6.8.8"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
   }
 }

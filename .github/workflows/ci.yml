@@ -35,6 +35,7 @@ jobs:
           python -m unittest tests.test_migration_deploy tests.test_migration_evidence tests.test_migration_runtime tests.test_migration_workflows
           python -m unittest tests.test_greenfield_runtime
           python -m unittest -b tests.test_delivery_paths tests.test_install_workflows tests.test_installation_readiness tests.test_runner_lifecycle tests.test_dns_runtime tests.test_gateway_checks
+          python -m unittest -b tests.test_local_rehearsal tests.test_project_docs
           python -m unittest tests.test_private_ingress tests.test_private_ingress_runtime
           python -m unittest tests.test_database_roles
           python -m unittest tests.test_azure_postgresql
@@ -80,9 +81,14 @@ jobs:
           --entrypoint /app/.venv/bin/python
           docker.litellm.ai/berriai/litellm@sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4
           -m unittest -b tests.test_azure_postgresql tests.test_azure_postgresql_prisma
-      - name: Verify real schema migration and Azure application lifecycle
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm ci --prefix auth-proxy --ignore-scripts --no-fund
+      - name: Verify native UI content read on isolated PostgreSQL
         env:
           RUN_AZURE_SCHEMA_CONTAINER_TESTS: '1'
+          RUN_NATIVE_UI_BROWSER_TESTS: '1'
         run: python -m unittest -b tests.test_azure_schema_container
       - name: Build reviewed Azure application image
         run: docker build --network none -f LiteLLM/runtime/Dockerfile -t litellm-azure-runtime:ci .

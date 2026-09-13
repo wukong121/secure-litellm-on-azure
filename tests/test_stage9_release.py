@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from scripts.stage9_release import ROOT, PRODUCTION_CHECKS, generate, validate_origin_snapshot, validate_release, validate_what_if
+from scripts.stage9_release import ROOT, PRODUCTION_CHECKS, generate, release_checks, validate_origin_snapshot, validate_release, validate_what_if
 from scripts.preview_stage9 import preview
 
 
@@ -25,6 +25,28 @@ def evidence_config(phase="canary"):
 
 
 class Stage9ReleaseTests(unittest.TestCase):
+    def test_native_release_requires_real_native_checks_not_l3_placeholders(self):
+        config = evidence_config()
+        config.update(auditMode="native", telemetryEnabled=False)
+        with self.assertRaisesRegex(ValueError, "native_"):
+            validate_release(config)
+        required = release_checks(config)
+        self.assertNotIn("l3_governance_and_recovery", required)
+        self.assertIn("native_audit_access", required)
+        self.assertIn("telemetry_disabled", required)
+        config["checks"] = {name: {"passed": True, "observedAt": datetime.now(timezone.utc).isoformat(), "report": "synthetic://native-contract-only"} for name in required}
+        validate_release(config)
+        for name in ("native_spend_logs", "native_audit_access", "native_retention_recovery"):
+            invalid = copy.deepcopy(config)
+            invalid["checks"][name]["passed"] = False
+            with self.assertRaisesRegex(ValueError, name):
+                validate_release(invalid)
+        with self.assertRaisesRegex(ValueError, "managed customer-runtime"):
+            generate(config, ROOT / "temp")
+        config["telemetryEnabled"] = True
+        with self.assertRaisesRegex(ValueError, "telemetry_alerts"):
+            validate_release(config)
+
     def test_template_cannot_authorize_a_release(self):
         config = json.loads((ROOT / "infra/edge/release.example.json").read_text())
         with self.assertRaises(ValueError):

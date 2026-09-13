@@ -1,14 +1,15 @@
 # GitHub Actions与客户迁移门禁
 
-客户从[部署与验收工作流指南](../docs/customer-deployment-workflows-zh.md)开始。配置源为各Environment的`CUSTOMER_CONFIG_JSON`（Secret推荐，兼容Variable）和`MIGRATION_EVIDENCE_JSON` Secret；不在源码内填写真实客户信息或凭据。
+客户从[部署与验收工作流指南](../docs/customer-deployment-workflows-zh.md)开始。主要迁移入口支持公开fork和私有仓库，只能手动触发受保护默认分支；`CUSTOMER_CONFIG_JSON`及`WORKFLOW_ARTIFACT_KEY`必须配置为Environment Secret。不在源码内填写客户配置或凭据；账本从加密artifact自动读取。
 
 ## 实际执行与验收入口
 
-- `customer-deploy.yml`：私有仓库、默认分支、受保护Environment；bootstrap初始化RG/日志库，各阶段plan/deploy，绑定审批计划哈希。阶段9release另需发布报告。
+- `customer-deploy.yml`：受保护默认分支、Environment；bootstrap初始化RG/日志库，各阶段plan/deploy，绑定计划run ID。阶段9release另需发布报告及托管API edge-bind回执。
 - `customer-runtime.yml`：专属Linux私网runner、独立runtime OIDC身份；阶段0备份/隔离恢复、阶段1探针与监控、阶段4命名空间与监控、阶段5目标空库恢复、阶段6~8成品清单发布。
-- `customer-acceptance.yml`：生成pending报告或从真实审核结果生成证据账本；支持显式单人模式，不会自动伪造passed，不申请管理Secret的PAT。
+- `customer-acceptance.yml`：draft生成pending清单，confirm支持已批准GitHub login的单人逐项人工确认；record保留外部报告兼容。人工结果不冒充自动技术验收。
+- `customer-runner-checks.yml`：在客户runner上实际核对工具、身份范围、新旧集群只读访问，不改变资源。
 
-新入口只在客户私有仓库保存7天审查计划/部署输出/验收元数据artifact，绝不保存dump、kubeconfig、原始stderr或参数。现有运行时集成缺口仍需完成，部署成功不等于可以生产切流。
+主要入口仅上传AES-GCM加密的`sealed-artifact.json`，计划/部署输出/验收数据通常保留7天，原始stdout/stderr和详细Summary不公开；dump、kubeconfig不进入artifact。非秘密workflow输入和运行元数据仍可能公开，不在输入中填写敏感信息。具体本机解密审核方法见指南，部署成功不等于可以生产切流。增强L3治理workflow仍保留独立私有/双审批要求。
 
 API认证已采用企业Token与客户端vkey双凭据，模型/预算只由LiteLLM管理。客户API bindings不再填写models，proxy-credentials动作仅初始化管理端Key，application不再发布API内部Key挂载。旧配置/镜像需配套迁移并刷新计划与回执，客户端Token自动续期和真实权限仍需验收；不自动清理旧Key/Vault/RBAC。见[认证契约及迁移步骤](../auth-proxy/README_ZH.md)。
 
@@ -51,7 +52,7 @@ CI不登录Azure，不部署资源。
 7. 上传30天SBOM证据；
 8. 不直接部署Kubernetes，overlay变更必须走Pull Request。
 
-该入口现在使用MIGRATION_PRIVATE_RUNNER_LABELS指定的私网runner，仅私有仓库默认分支允许运行，并核对目标ACR与客户配置一致。首次使用前验证私网路径、Docker、OIDC最小权限和Cosign签名验证策略，不得开放生产ACR公网。
+该入口使用MIGRATION_PRIVATE_RUNNER_LABELS指定的私网runner，允许公开fork的受保护默认分支手动执行，并核对目标ACR与Secret配置一致。SBOM加密保存，Docker凭据使用作业独立临时目录并清理。首次使用前验证私网路径、Docker、OIDC最小权限和Cosign签名验证策略，不得开放生产ACR公网。镜像引用和Cosign透明度元数据不是秘密，应预期公开。
 
 ## Action版本治理
 

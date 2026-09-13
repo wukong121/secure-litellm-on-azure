@@ -19,6 +19,60 @@ from tests.test_proxy_config import APPS, proxy_customer
 
 
 class ProxyManifestTests(unittest.TestCase):
+    def test_front_door_binding_survives_generated_application_publish(self):
+        from scripts.edge_binding import bind_deployment, preserve_binding
+        identifier = "11111111-1111-4111-8111-111111111111"
+        api = {"kind": "Deployment", "metadata": {"name": "llm-api-proxy"}, "spec": {"template": {"spec": {"containers": [{"name": "auth-proxy", "env": [{"name": "PROXY_PLANE", "value": "api"}]}]}}}}
+        admin = copy.deepcopy(api)
+        admin["metadata"]["name"] = "llm-admin-proxy"
+        live = bind_deployment(api, identifier)
+        result = preserve_binding([api, admin], live)
+        self.assertEqual(result[0], live)
+        self.assertEqual(result[1], admin)
+        self.assertNotIn("FRONT_DOOR_ID", json.dumps(api))
+        with self.assertRaisesRegex(ValueError, "another"):
+            bind_deployment(live, "22222222-2222-4222-8222-222222222222")
+
+    def test_edge_binding_plans_then_applies_only_api_and_saves_receipt(self):
+        from scripts.edge_binding import bind_edge
+        config = proxy_customer()
+        config["proxy"]["image"] = "customerregistry.azurecr.io/auth-proxy@sha256:" + "a" * 64
+        identifier = "11111111-1111-4111-8111-111111111111"
+        profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
+        azure, client = Mock(), Mock()
+        def cloud(arguments):
+            if arguments[:3] == ["deployment", "group", "show"]:
+                return {"state": "Succeeded", "edge": {"provisioned": True, "apiHost": "llm-api." + config["baseDomain"], "routeId": profile + "/afdEndpoints/api/routes/api", "profileId": identifier}}
+            if arguments[0] == "resource":
+                return {"id": profile, "properties": {"frontDoorId": identifier}}
+            return {"properties": {"provisioningState": "Succeeded"}}
+        azure.scoped.side_effect = cloud
+        api = {"metadata": {"name": "llm-api-proxy", "uid": "api-original"}, "spec": {"template": {"spec": {"serviceAccountName": "llm-api-proxy", "containers": [{"name": "auth-proxy", "image": config["proxy"]["image"]}]}}}}
+        admin = copy.deepcopy(api)
+        admin["metadata"]["name"] = "llm-admin-proxy"
+        client.get.side_effect = lambda kind, name: copy.deepcopy(api if name == "llm-api-proxy" else admin)
+        def change(kind, name, operations):
+            self.assertEqual(name, "llm-api-proxy")
+            self.assertEqual(operations[0]["value"], api["metadata"]["uid"])
+            self.assertEqual(operations[1]["value"], api["spec"])
+            api["spec"] = copy.deepcopy(operations[2]["value"])
+        client.patch.side_effect = change
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            directory = Path(folder)
+            plan = bind_edge(config, "plan", "a" * 40, directory, "", azure, client)
+            client.patch.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "not approved"):
+                bind_edge(config, "execute", "a" * 40, directory, "f" * 64, azure, client)
+            result = bind_edge(config, "execute", "a" * 40, directory, plan["planSha256"], azure, client)
+            self.assertTrue(result["applied"])
+            self.assertFalse(result["trafficVerified"])
+            receipt = json.loads((directory / "edge-binding-receipt.json").read_text())["outputs"]["edgeBinding"]["value"]
+            self.assertEqual(receipt["frontDoorId"], identifier)
+            self.assertNotIn("FRONT_DOOR_ID", json.dumps(admin))
+            azure.scoped.side_effect = lambda arguments: {"state": "Succeeded", "edge": {"provisioned": True, "apiHost": "other.invalid"}}
+            with self.assertRaisesRegex(ValueError, "matching"):
+                bind_edge(config, "plan", "a" * 40, directory, "", azure, client)
+
     def test_preparation_requires_access_receipt_for_same_applications(self):
         config = proxy_customer()
         config["privateIngress"] = {}
@@ -103,6 +157,28 @@ class ProxyManifestTests(unittest.TestCase):
             self.assertEqual(len([call for call in command.call_args_list if "rollout" in call.args[0]]), 3)
             with self.assertRaisesRegex(ValueError, "Stage8 remains blocked"):
                 publish(config, 8, "application", "plan", "a" * 40, path, "")
+            from scripts.native_audit import prepare_native_audit
+            native = copy.deepcopy(config)
+            native["contentAudit"] = {"mode": "native", "retentionDays": 7, "contentPolicyAccepted": True}
+            for binding in native["proxy"]["bindings"]:
+                binding.pop("auditTeamId", None)
+            native["proxy"]["bindings"] = [binding for binding in native["proxy"]["bindings"] if binding["role"] != "audit_reader"]
+            native_documents = render_proxy_documents(native, foundation, applications, admin, credentials)
+            with patch("scripts.audit_runtime.AuditCluster.get", return_value=None) as live, patch("scripts.proxy_manifest.prepare_proxy_documents", return_value=native_documents), patch("scripts.audit_manifest.prepare_audit_documents") as enhanced:
+                native_result = prepare_native_audit(native, backend_documents + native_documents, path, Mock(), ["kubectl"])
+                check_application(native_result, 8, native)
+                command.reset_mock()
+                publish(native, 8, "application", "plan", "a" * 40, path, "")
+                digest = json.loads((path / "runtime-summary.json").read_text())["planSha256"]
+                publish(native, 8, "application", "execute", "a" * 40, path, digest)
+                enhanced.assert_not_called()
+                self.assertEqual(len([call for call in command.call_args_list if "rollout" in call.args[0]]), 3)
+                self.assertFalse(any(item["kind"] == "CronJob" for item in native_result))
+                native_settings = yaml.safe_load(next(item for item in native_result if item["kind"] == "ConfigMap" and "config.yaml" in item.get("data", {}))["data"]["config.yaml"])
+                self.assertTrue(native_settings["general_settings"]["store_prompts_in_spend_logs"])
+                live.side_effect = [{"spec": {"template": {"spec": {"volumes": [{"name": "stage8", "configMap": {"name": "existing-l3"}}]}}}}, {"data": {"config.json": json.dumps({"l3": {"enabled": True}})}}]
+                with self.assertRaisesRegex(ValueError, "Existing L3"):
+                    prepare_native_audit(native, backend_documents + native_documents, path, Mock(), ["kubectl"])
             from scripts.audit_manifest import render_audit_documents
             from tests.test_audit_manifest import fixture
             _, _, audit_foundation, storage = fixture()

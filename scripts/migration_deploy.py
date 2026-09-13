@@ -187,6 +187,10 @@ def deploy_component(config, stage, component, revision, operation, previous, di
     if release is not None:
         from scripts.stage9_release import validate_release
         require(stage == 9 and component == "edge", "Release operation only applies to Stage 9 edge")
+        expected_audit = "native" if "contentAudit" in config else "l3"
+        require(release.get("auditMode", "l3") == expected_audit, "Release audit mode differs from customer configuration")
+        if expected_audit == "native":
+            require(release.get("telemetryEnabled") is ("observability" in config), "Release telemetry decision differs from customer configuration")
         mode, eligible = approval_policy(config)
         validate_release(release, required_approvers=1 if mode == "single-operator" else 2, eligible_approvers=eligible)
         require(len(release["approvedBy"]) == (1 if mode == "single-operator" else 2), "Release approval count differs from configured policy")
@@ -197,6 +201,9 @@ def deploy_component(config, stage, component, revision, operation, previous, di
         previous_edge = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 9, "edge"), "--query", "{state:properties.provisioningState,edge:properties.outputs.edge.value}"])
         require(previous_edge.get("state") == "Succeeded", "Provision the disabled edge before releasing traffic")
         require(release.get("frontDoorId") == previous_edge.get("edge", {}).get("profileId"), "Release Front Door identity differs from the provisioned edge")
+        if release["phase"] != "prepare" and "application" in config:
+            from scripts.edge_binding import require_edge_binding
+            require_edge_binding(config, revision, release["frontDoorId"], azure)
         document = json.loads(path.read_text())
         document["parameters"]["enableApiTraffic"] = {"value": release["phase"] != "prepare"}
         document["parameters"]["wafMode"] = {"value": release["wafMode"]}

@@ -33,20 +33,23 @@ concurrency:
 
 jobs:
   prepare:
+    if: github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.ref_protected
     environment: ${{ inputs.environment }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      WORKFLOW_ARTIFACT_KEY: ${{ secrets.WORKFLOW_ARTIFACT_KEY }}
+      GITHUB_REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
     permissions:
       contents: read
       actions: read
     steps:
-      - name: Require private protected default branch for artifact evidence
+      - name: Require manual execution of the protected default branch
         env:
-          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
           CURRENT_REF: ${{ github.ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          [[ "$PRIVATE_REPOSITORY" == true ]]
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF_PROTECTED" == true ]]
           [[ "$CURRENT_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
       - name: Check out reviewed revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -57,10 +60,10 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install configuration parser
-        run: python -m pip install PyYAML==6.0.3
+        run: python -m pip install PyYAML==6.0.3 cryptography==50.0.1 service-identity==24.2.0 'psycopg[binary]==3.2.10' azure-identity==1.25.1 azure-keyvault-secrets==4.10.0
       - name: Show prerequisites or verify customer readiness
         env:
-          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON || vars.CUSTOMER_CONFIG_JSON }}
+          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON }}
           MIGRATION_EVIDENCE_JSON: ${{ secrets.MIGRATION_EVIDENCE_JSON }}
           MIGRATION_AUTO_EVIDENCE: 'true'
           GH_TOKEN: ${{ github.token }}
@@ -71,7 +74,7 @@ jobs:
           MIGRATION_COMPONENT: ${{ inputs.component }}
           CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
         run: >-
-          python -m scripts.customer_migration --stage "$MIGRATION_STAGE"
+          python -m scripts.workflow_security run scripts.customer_migration --stage "$MIGRATION_STAGE"
           --mode "$MIGRATION_MODE" --component "$MIGRATION_COMPONENT"
           --environment "$CUSTOMER_ENVIRONMENT"
       - name: Record non-sensitive next steps
@@ -80,7 +83,7 @@ jobs:
           printf '%s\n' 'Readiness is not deployment approval. No configuration, raw plan, backup or secret is uploaded as an artifact.' >> "$GITHUB_STEP_SUMMARY"
       - name: Remove generated customer files
         if: always()
-        run: rm -rf -- temp/customer-migration
+        run: rm -rf -- temp/customer-migration temp/workflow-private
 
   preview:
     if: inputs.mode == 'what-if'
@@ -88,6 +91,9 @@ jobs:
     environment: ${{ inputs.environment }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      WORKFLOW_ARTIFACT_KEY: ${{ secrets.WORKFLOW_ARTIFACT_KEY }}
+      GITHUB_REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
     permissions:
       contents: read
       id-token: write
@@ -102,7 +108,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install configuration parser
-        run: python -m pip install PyYAML==6.0.3
+        run: python -m pip install PyYAML==6.0.3 cryptography==50.0.1 service-identity==24.2.0 'psycopg[binary]==3.2.10' azure-identity==1.25.1 azure-keyvault-secrets==4.10.0
       - name: Sign in with environment-scoped OIDC
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
@@ -113,7 +119,7 @@ jobs:
         run: az bicep install
       - name: Recheck evidence and preview without deployment
         env:
-          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON || vars.CUSTOMER_CONFIG_JSON }}
+          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON }}
           MIGRATION_EVIDENCE_JSON: ${{ secrets.MIGRATION_EVIDENCE_JSON }}
           MIGRATION_AUTO_EVIDENCE: 'true'
           GH_TOKEN: ${{ github.token }}
@@ -123,9 +129,9 @@ jobs:
           MIGRATION_COMPONENT: ${{ inputs.component }}
           CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
         run: >-
-          python -m scripts.customer_migration --stage "$MIGRATION_STAGE"
+          python -m scripts.workflow_security run scripts.customer_migration --stage "$MIGRATION_STAGE"
           --mode what-if --component "$MIGRATION_COMPONENT"
           --environment "$CUSTOMER_ENVIRONMENT"
       - name: Remove private plan and parameters
         if: always()
-        run: rm -rf -- temp/customer-migration
+        run: rm -rf -- temp/customer-migration temp/workflow-private

@@ -8,6 +8,7 @@ import { readCookie, sessionCookie } from './auth.mjs';
 import { auditPage, auditStyle, auditClient } from './audit-page.mjs';
 import { enforceFrontDoor, validateFrontDoorId } from './edge-policy.mjs';
 import { deliverAuditedResponse } from './audit-delivery.mjs';
+import { authorizeNativeUiRead, nativeUiAsset, nativeUiClaims, nativeUiCookie, nativeUiEnabled, nativeUiKeyLookup, verifyNativeUiRequest } from './native-ui.mjs';
 
 const sessionName = '__Host-llm-admin';
 const transactionName = '__Host-llm-login';
@@ -48,8 +49,15 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
       },
       proxyRes(upstream, request, response) {
         delete upstream.headers['set-cookie'];
-        delete upstream.headers.location;
+        const location = upstream.headers.location;
+        if (request.nativeUiAsset && (location === '/ui/' || /^\/ui\/[A-Za-z0-9_./-]*$/.test(location ?? ''))) upstream.headers.location = location;
+        else delete upstream.headers.location;
         upstream.headers['cache-control'] = 'no-store';
+        if (request.nativeUiAsset) {
+          upstream.headers['content-security-policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+          upstream.headers['referrer-policy'] = 'no-referrer';
+          upstream.headers['x-content-type-options'] = 'nosniff';
+        }
         if (l3?.durable === true) {
           if (request.l3?.durable) {
             request.auditDeliveryStarted = true;
@@ -115,7 +123,7 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
         claims = await verifyToken(credentials.token);
         clientKey = credentials.key;
       } else {
-        if (request.headers.authorization) throw new Denied(401);
+        if (request.headers.authorization && config.nativeUi !== true) throw new Denied(401);
         const origin = `https://${config.adminHost}`;
         if (request.url === '/' && request.method === 'GET') {
           response.writeHead(302, { location: '/auth/login', 'cache-control': 'no-store' });
@@ -140,13 +148,25 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
           claims = tokens.claims();
           const loginBinding = bindingFor(config, 'admin', claims);
           const expiresAt = Math.min(claims.exp, now() + 300);
-          const cookie = await sessions.seal({ tid: claims.tid, oid: claims.oid, roles: claims.roles, csrf: randomBytes(32).toString('hex') }, 'session', expiresAt);
-          response.setHeader('set-cookie', [sessionCookie(sessionName, cookie, expiresAt - now()), sessionCookie(transactionName, '', 0)]);
-          response.writeHead(302, { location: loginBinding.role === 'audit_reader' ? '/audit' : '/auth/session', 'cache-control': 'no-store' });
+          const session = { tid: claims.tid, oid: claims.oid, roles: claims.roles, csrf: randomBytes(32).toString('hex'), exp: expiresAt };
+          const cookie = await sessions.seal(session, 'session', expiresAt);
+          const cookies = [sessionCookie(sessionName, cookie, expiresAt - now()), sessionCookie(transactionName, '', 0)];
+          if (nativeUiEnabled(config, loginBinding)) cookies.push(nativeUiCookie(await sessions.uiToken(nativeUiClaims(loginBinding, session, subjectTag(config.tenantId, claims.oid))), expiresAt - now()));
+          response.setHeader('set-cookie', cookies);
+          response.writeHead(302, { location: nativeUiEnabled(config, loginBinding) ? '/ui/' : loginBinding.role === 'audit_reader' ? '/audit' : '/auth/session', 'cache-control': 'no-store' });
           return response.end();
         }
-        claims = await sessions.open(readCookie(request.headers.cookie, sessionName), 'session');
-        if (!['GET', 'HEAD'].includes(request.method) &&
+        try {
+          claims = await sessions.open(readCookie(request.headers.cookie, sessionName), 'session');
+        } catch (error) {
+          if (config.nativeUi === true && request.method === 'GET' && ['/ui', '/ui/'].includes(request.url)) {
+            response.writeHead(302, { location: '/auth/login', 'cache-control': 'no-store' });
+            return response.end();
+          }
+          throw error;
+        }
+        if (request.headers.authorization) verifyNativeUiRequest(request, claims, origin);
+        else if (!['GET', 'HEAD'].includes(request.method) &&
             (request.headers.origin !== origin || !claims.csrf || request.headers['x-csrf-token'] !== claims.csrf)) throw new Denied();
       }
       const binding = bindingFor(config, plane, claims);
@@ -164,27 +184,35 @@ export function createGateway({ plane, getConfig, verifyToken, keyFor, sessions,
       }
       if (plane === 'admin' && request.url === '/auth/session' && request.method === 'GET') return reply(response, 200, { subject, role: binding.role, csrf: claims.csrf });
       if (plane === 'admin' && request.url === '/auth/logout' && request.method === 'POST') {
-        response.setHeader('set-cookie', sessionCookie(sessionName, '', 0));
+        response.setHeader('set-cookie', [sessionCookie(sessionName, '', 0), 'token=; Path=/; Secure; SameSite=Lax; Max-Age=0']);
         return reply(response, 200, { signedOut: true });
+      }
+      if (plane === 'admin' && nativeUiAsset(request.method, request.url)) {
+        if (!nativeUiEnabled(config, binding)) throw new Denied();
+        request.nativeUiAsset = true;
+        request.headers = Object.fromEntries(Object.entries(request.headers).filter(([name]) => ['accept', 'accept-encoding'].includes(name.toLowerCase())));
+        return await proxy(request, response);
       }
       if (plane === 'admin' && request.method === 'POST' && ['/audit/search', '/audit/view'].includes(request.url)) {
         if (!auditReader) throw new Denied();
         const input = await readBody(request);
         return reply(response, 200, await auditReader.execute(request.url.slice('/audit/'.length), input, claims, binding));
       }
-      authorizeRoute(plane, request.method, request.url, binding);
+      const nativeRead = plane === 'admin' && nativeUiEnabled(config, binding) && authorizeNativeUiRead(request.method, request.url, binding);
+      if (!nativeRead) authorizeRoute(plane, request.method, request.url, binding);
+      const key = plane === 'api' ? clientKey : await keyFor(binding);
+      if (!key || /[\r\n\s]/.test(key)) throw new Error('Missing backend credential');
       let originalBody;
       let forwardedBody;
       if (request.method === 'POST') {
         let body = await readBody(request);
         originalBody = body;
         if (plane === 'api') body = sanitizeBody(body, binding, subject);
+        else if (nativeRead && request.url === '/v2/key/info') body = nativeUiKeyLookup(body, claims, key);
         else if (Object.keys(body).length !== 1 || typeof body.key !== 'string') throw new Denied(400);
         request.forwardBody = Buffer.from(JSON.stringify(body));
         forwardedBody = body;
       }
-      const key = plane === 'api' ? clientKey : await keyFor(binding);
-      if (!key || /[\r\n\s]/.test(key)) throw new Error('Missing backend credential');
       request.headers = cleanHeaders(request.headers, key);
       request.headers.traceparent = traceparent;
       request.headers['x-request-id'] = requestId;

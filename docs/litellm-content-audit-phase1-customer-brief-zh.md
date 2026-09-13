@@ -109,9 +109,9 @@ API采用双凭据：企业Token证明调用者获准进入网关，客户端vke
 | 调用凭据与归属 | `api_key`、`user`、`team_id`、`organization_id`、`end_user` | 凭据、内部用户、团队、组织与终端用户关联；`api_key` 是哈希标识，不是可调用的明文 Key；这些 ID 不自动等于 Entra 用户身份 |
 | 模型与路由 | `model`、`model_id`、`model_group`、`custom_llm_provider`、`api_base` | 模型、内部模型 ID、对外模型组、供应商与端点；可用于排查路由，但不据此假定所有重试都有独立完整记录 |
 | 用量与费用 | `prompt_tokens`、`completion_tokens`、`total_tokens`、`spend` | 输入、输出、合计 Token 与网关计算费用；不是供应商最终账单 |
-| 请求正文 | `messages` | 可用且允许记录时的请求消息；对话可能包含历史消息、代码和工具结果，不只是本轮提问 |
+| 特定调用消息 | `messages` | 固定版本主要为realtime路径填充；普通Chat调用可为空对象，不能只查询这一列判断正文是否存在 |
 | 响应正文 | `response` | 可用且允许记录时的模型响应；Chat Completions、Responses 等接口形状不同，不能统一假定都有 `choices` |
-| 请求补充信息 | `proxy_server_request` | 代理请求信息，可能包含经处理的请求体；也应纳入正文访问、留存和泄露检查范围 |
+| 请求正文 | `proxy_server_request` | 固定版本普通Chat JSON/SSE的经处理请求体保存在此处，可包含messages、工具和历史上下文；纳入正文访问、留存和泄露检查范围 |
 | 状态与缓存 | `status`、`cache_hit`、`cache_key` | 日志状态及缓存关联；`cache_hit` 在该表中是字符串字段，`status` 不是客户端完整接收的证明 |
 | 扩展关联 | `metadata`、`request_tags`、`session_id`、`requester_ip_address` | 扩展元数据、标签、会话及来源地址；可能为空，也可能携带敏感信息，不能因名为 metadata 就当作公开数据 |
 
@@ -130,6 +130,7 @@ API采用双凭据：企业Token证明调用者获准进入网关，客户端vke
     "request_duration_ms": 1000,
     "api_key": "<hashed-key-id>",
     "user": "user-demo-001",
+    "end_user": "<hashed-tenant-and-actor-id>",
     "team_id": "team-demo",
     "model": "model-demo",
     "model_group": "coding",
@@ -139,10 +140,14 @@ API采用双凭据：企业Token证明调用者获准进入网关，客户端vke
     "total_tokens": 160,
     "spend": 0.00024,
     "status": "success",
-    "messages": [
-        { "role": "system", "content": "请用中文简短回答。" },
-        { "role": "user", "content": "解释这段代码：print(1 + 1)" }
-    ],
+    "messages": {},
+    "proxy_server_request": {
+        "model": "coding",
+        "messages": [
+            { "role": "system", "content": "请用中文简短回答。" },
+            { "role": "user", "content": "解释这段代码：print(1 + 1)" }
+        ]
+    },
     "response": {
         "id": "chatcmpl-example-001",
         "object": "chat.completion",
@@ -161,9 +166,9 @@ API采用双凭据：企业Token证明调用者获准进入网关，客户端vke
 }
 ```
 
-向客户讲解时，可先看 `user` / `team_id` 确认LiteLLM中的Key归属，再看 `messages` / `response` 理解内容，最后看时间、Token 和费用。示例中的模型名、身份、Token 和金额均为演示值，不是实际分词结果或模型报价。实际调用者应结合代理的伪名化`subject`、`keyFingerprint`和调用标识核对，不能把Key所有者直接当作实际调用者。代理向请求`user`写入已验证身份的哈希，但其在目标版本Spend Logs字段中的落点和关联效果仍须实测。
+向客户讲解时，可先看 `user` / `team_id` 确认LiteLLM中的Key归属，再看 `proxy_server_request` / `response` 理解普通Chat内容，最后看时间、Token 和费用。示例中的模型名、身份、Token 和金额均为演示值，不是实际分词结果或模型报价。实际调用者应结合代理的伪名化`subject`、`keyFingerprint`和调用标识核对，不能把Key所有者直接当作实际调用者。2026-09-13固定镜像与隔离PostgreSQL的JSON/SSE合成测试确认：代理写入请求`user`的主体哈希落在`end_user`，客户端vkey的哈希落在`api_key`；真实客户身份及其他协议仍须验收。
 
-此处省略 `proxy_server_request`、端点和来源地址等字段，不代表真实记录一定没有这些内容。关闭正文开关、调用失败、消息日志被关闭或发生截断时，正文可能为空、缺失或不完整；**元数据行存在不等于输入输出已经完整保存**。数据库有这些字段，也不等于普通用户或管理员能在现有 UI 中看到它们，查看范围仍按第 6 节验收。
+此处省略端点和来源地址等字段，不代表真实记录一定没有这些内容。关闭正文开关、调用失败、消息日志被关闭或发生截断时，正文可能为空、缺失或不完整；**元数据行存在不等于输入输出已经完整保存**。数据库有这些字段，也不等于普通用户或管理员能在现有 UI 中看到它们，查看范围仍按第 6 节验收。
 
 ### 5.3 不承诺保存后即可看到全部明文
 

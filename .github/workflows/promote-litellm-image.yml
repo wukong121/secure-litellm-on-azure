@@ -46,19 +46,20 @@ jobs:
       contents: read
     runs-on: ubuntu-24.04
     steps:
-      - name: Require a private repository and protected default branch
+      - name: Require manual execution of the protected default branch
         env:
-          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
           CURRENT_REF: ${{ github.ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          [[ "$PRIVATE_REPOSITORY" == true ]] || { echo 'Use a customer-controlled private repository.' >&2; exit 1; }
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF_PROTECTED" == true ]] || exit 1
           [[ "$CURRENT_REF" == "refs/heads/$DEFAULT_BRANCH" ]] || { echo 'Use reviewed code on the protected default branch.' >&2; exit 1; }
   promote:
     needs: authorize
     runs-on: ${{ fromJSON(vars.MIGRATION_PRIVATE_RUNNER_LABELS) }}
     timeout-minutes: 45
     environment: ${{ inputs.environment }}
+    env:
+      WORKFLOW_ARTIFACT_KEY: ${{ secrets.WORKFLOW_ARTIFACT_KEY }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -69,7 +70,7 @@ jobs:
         env:
           SOURCE_IMAGE: ${{ inputs.source_image }}
           ACR_NAME: ${{ inputs.acr_name }}
-          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON || vars.CUSTOMER_CONFIG_JSON }}
+          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON }}
           CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
           BUILD_AZURE_RUNTIME: ${{ inputs.build_azure_runtime }}
           BUILD_AUTH_PROXY: ${{ inputs.build_auth_proxy }}
@@ -80,6 +81,19 @@ jobs:
             exit 1
           }
           python3 -c 'import json,os; config=json.loads(os.environ["CUSTOMER_CONFIG_JSON"]); assert config["environment"] == os.environ["CUSTOMER_ENVIRONMENT"]; assert os.environ["ACR_NAME"] == config["parameters"]["platform"]["containerRegistryName"], "Target ACR differs from approved customer configuration"'
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - run: python -m pip install PyYAML==6.0.3 cryptography==50.0.1
+      - name: Check encrypted evidence and isolate registry credentials
+        run: |
+          python -m scripts.workflow_security check-key
+          umask 077
+          docker_config="$RUNNER_TEMP/llmgw-acr-$GITHUB_RUN_ID"
+          mkdir -p "$docker_config" temp/image-promotion
+          chmod 700 "$docker_config" temp/image-promotion
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
 
       - name: Sign in to Azure with OIDC
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
@@ -150,7 +164,7 @@ jobs:
       - name: Generate SBOM
         env:
           IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
-        run: syft "$IMAGE_REFERENCE" --output spdx-json=litellm-sbom.spdx.json
+        run: syft "$IMAGE_REFERENCE" --output spdx-json=temp/image-promotion/litellm-sbom.spdx.json
 
       - name: Block critical vulnerabilities
         env:
@@ -172,11 +186,17 @@ jobs:
             cosign sign --yes "$IMAGE_REFERENCE"
           fi
 
-      - name: Upload SBOM evidence
+      - name: Encrypt SBOM evidence
+        if: success() || failure()
+        env:
+          ARTIFACT_NAME: litellm-sbom-${{ github.run_id }}
+        run: python -m scripts.workflow_security seal --directory temp/image-promotion --name "$ARTIFACT_NAME" litellm-sbom.spdx.json
+      - name: Upload encrypted SBOM evidence
+        if: success() || failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: litellm-sbom-${{ github.run_id }}
-          path: litellm-sbom.spdx.json
+          path: temp/image-promotion/sealed-artifact.json
           if-no-files-found: error
           retention-days: 30
 
@@ -186,3 +206,6 @@ jobs:
         run: |
           echo "Promoted immutable image: $IMAGE_REFERENCE"
           echo 'Update the target Kustomize overlay by pull request; this workflow does not deploy Kubernetes resources.'
+      - name: Remove temporary registry credentials and plaintext SBOM
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/llmgw-acr-$GITHUB_RUN_ID" temp/image-promotion

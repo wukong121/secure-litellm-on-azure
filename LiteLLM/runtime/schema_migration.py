@@ -19,6 +19,7 @@ from LiteLLM.runtime.azure_postgresql import DatabaseAuthError, database_url_tem
 SCHEMA_PATH = Path("/app/litellm-proxy-extras/litellm_proxy_extras/schema.prisma")
 SCHEMA_SHA256 = "af3ffb1dace4333f67bbd10518eaab013b132ac456328552aa80af556c6a72d0"
 VIEWS_SHA256 = "a68e3ced155fd3613477f274900764f2d05092ac7a612441cfef86119f0a5375"
+SUPPORTED_SOURCE_HISTORIES = {"0a730273fd745521b36008b01816142d92294792667a6a5c046147e0821e0dbb": 141}
 
 
 @contextmanager
@@ -58,8 +59,18 @@ def check_history(assets, history, tables, mode):
             raise DatabaseAuthError("Database migration history differs from the approved image")
         finished.append(item["name"])
     ordered = [item["name"] for item in assets["migrations"]]
+    if mode == "migration":
+        for source_hash, count in SUPPORTED_SOURCE_HISTORIES.items():
+            if len(finished) < count:
+                continue
+            source = [{"name": name, "sha256": expected[name]} for name in finished[:count]]
+            digest = hashlib.sha256(json.dumps(source, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if digest == source_hash:
+                inherited = finished[:count]
+                ordered = inherited + [name for name in ordered if name not in inherited]
+                break
     if finished != ordered[:len(finished)]:
-        raise DatabaseAuthError("Migration history must be an ordered prefix of the approved release")
+        raise DatabaseAuthError("Migration history must be an ordered prefix of the approved release or a verified source upgrade")
     if tables and not finished:
         raise DatabaseAuthError("Existing database has no compatible migration history; automatic baseline is forbidden")
     if mode == "migration" and not tables:

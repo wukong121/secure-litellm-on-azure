@@ -37,6 +37,14 @@ def read_artifact(revision, run_id, workflow, artifact_name, filenames, api=gith
     archive = api(f"repos/{repository}/actions/artifacts/{int(matches[0]['id'])}/zip")
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         require(len(bundle.infolist()) <= 20 and sum(item.file_size for item in bundle.infolist()) <= 4 * 1024 * 1024, "Approved archive exceeded bounds")
+        from scripts.workflow_security import SEALED_FILE, open_values
+        sealed = [entry for entry in bundle.infolist() if entry.filename == SEALED_FILE]
+        if sealed:
+            require(len(sealed) == 1 and len(bundle.infolist()) == 1, "Encrypted artifacts cannot mix plaintext or duplicate files")
+            values = open_values(json.loads(bundle.read(sealed[0])), repository, run_id, artifact_name)
+            require(all(filename in values for filename in filenames), "Encrypted artifact lacks required evidence")
+            return {filename: values[filename] for filename in filenames}
+        require(os.environ.get("GITHUB_REPOSITORY_VISIBILITY") != "public", "Public repository workflows require encrypted artifacts")
         result = {}
         for filename in filenames:
             entries = [entry for entry in bundle.infolist() if entry.filename == filename]

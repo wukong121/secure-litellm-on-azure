@@ -40,9 +40,9 @@ API客户端 -> llm-api.<客户域名> -> Front Door / WAF -> 私有API入口
 ## 客户从这里开始
 
 1. 阅读[客户部署与验收指南](docs/customer-deployment-workflows-zh.md)，选择已有网关迁移或从零部署；迁移细节另见[客户迁移指南](docs/customer-migration-guide-zh.md)。
-2. 在客户仓库创建受保护的GitHub Environments：`dev`、`test`、`prod`，并建立Environment范围的Azure OIDC身份。
-3. 使用[迁移配置模板](config/customer.example.json)或[新建配置模板](config/customer.greenfield.example.json)填写`CUSTOMER_CONFIG_JSON` Environment secret；新建使用`deploymentMode=greenfield`，不填写`legacy`。按部署指南配置部署/运行OIDC身份；阶段证据初始为`[]`。
-4. 打开 **Customer staged migration** workflow，先选择阶段`0`、模式`guide`、组件`none`，再逐步执行`preflight`和获准的`what-if`。
+2. fork本仓库，公开fork也可使用；保护默认分支，创建所选Environment并配置Azure OIDC身份。客户操作仅手动运行，不让外部PR使用私网runner。
+3. 使用[迁移配置模板](config/customer.example.json)或[新建配置模板](config/customer.greenfield.example.json)填写`CUSTOMER_CONFIG_JSON` Environment Secret，并添加用于附件加密的独立`WORKFLOW_ARTIFACT_KEY` Secret；新建不填写`legacy`。按指南配置OIDC及[私网runner](docs/customer-private-runner-preparation-zh.md)，无需自动建机平台。
+4. 先运行 **Customer staged migration**：阶段`0`、模式`config-check`、组件`none`；再运行 **Customer private runner checks**，`check_target=false`。审核解密结果后再操作资源；单人运维使用`draft → confirm`逐项人工确认，不再手写报告JSON。
 5. 迁移在旧网关旁建设隔离新环境；新建Stage0使用`bootstrap → network`，跳过不适用的Stage1。两条路径的实际部署和发布分别经过客户审批，不以基础设施部署成功代替应用验收。
 
 原迁移检查workflow不部署资源；实际执行使用新增的[客户部署与验收工作流](docs/customer-deployment-workflows-zh.md)，提供基础设施plan/deploy、私网备份/恢复和应用发布、单人或双人验收。DNS和旧环境退役不自动执行，运行时集成阻断项仍需完成。Master Key、Salt、数据库凭据和OIDC秘密保存在客户Key Vault，不写入配置JSON。

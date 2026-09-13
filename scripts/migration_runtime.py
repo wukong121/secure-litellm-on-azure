@@ -15,7 +15,7 @@ from uuid import uuid4
 import yaml
 
 from scripts.customer_migration import ROOT, MigrationError, active_stages, configured, deployment_mode, fingerprint, private_write, require, stage_fingerprint, validate_config, validate_evidence
-from scripts.migration_deploy import AzureCommands, deployment_name
+from scripts.migration_deploy import AzureCommands, deployment_name, group_id
 from scripts.migration_evidence import draft_report
 
 
@@ -171,17 +171,25 @@ def publish(config, stage, action, operation, revision, directory, approved):
         manifest = os.environ.get("MIGRATION_MANIFEST_YAML", "")
         if "application" in config:
             require(not manifest, "Managed application generation cannot be mixed with manual manifests")
-            require(stage == 6 or (stage == 7 and "proxy" in config) or (stage == 8 and "proxy" in config and "auditRuntime" in config), "Managed application generation requires proxy settings for Stage7; Stage8 remains blocked without explicit auditRuntime decisions")
+            require(stage == 6 or (stage == 7 and "proxy" in config) or (stage == 8 and "proxy" in config and ("auditRuntime" in config or "contentAudit" in config)), "Managed application generation requires proxy settings for Stage7; Stage8 remains blocked without explicit auditRuntime or contentAudit decisions")
             from scripts.backend_manifest import prepare_backend_documents
             documents = prepare_backend_documents(config, revision, directory, AzureCommands(config, directory))
             if stage >= 7:
                 from scripts.proxy_manifest import prepare_proxy_documents
                 documents = [*documents, *prepare_proxy_documents(config, revision, directory, AzureCommands(config, directory))]
             if stage == 8:
-                from scripts.audit_manifest import prepare_audit_documents
-                documents = prepare_audit_documents(config, revision, directory, AzureCommands(config, directory), documents, kube)
+                if "contentAudit" in config:
+                    from scripts.native_audit import prepare_native_audit
+                    documents = prepare_native_audit(config, documents, directory, AzureCommands(config, directory), kube)
+                else:
+                    from scripts.audit_manifest import prepare_audit_documents
+                    documents = prepare_audit_documents(config, revision, directory, AzureCommands(config, directory), documents, kube)
         else:
             documents = [document for document in yaml.safe_load_all(manifest) if document]
+        if stage >= 7:
+            from scripts.edge_binding import preserve_binding
+            existing_api = json.loads(run_command([*kube, "get", "deployment", "llm-api-proxy", "--ignore-not-found", "-o", "json"], directory, "existing-api-edge-binding") or "null")
+            documents = preserve_binding(documents, existing_api)
         check_application(documents, stage, config)
         path = directory / "workload.yaml"
         private_write(path, yaml.safe_dump_all(documents, sort_keys=False))
@@ -251,7 +259,10 @@ def target_database_restore(config, operation, revision, directory, approved):
     group = config["target"]["resourceGroup"]
     deployed = azure.scoped(["deployment", "group", "show", "--resource-group", group, "--name", deployment_name(config, 5, "platform"), "--query", "{state:properties.provisioningState,platform:properties.outputs.platform.value}"])
     require(deployed.get("state") == "Succeeded" and deployed.get("platform", {}).get("stage5Deployed") is True, "Deploy Stage 5 data infrastructure before restoring")
-    server = azure.scoped(["postgres", "flexible-server", "show", "--resource-group", group, "--name", deployed["platform"]["postgresqlServerName"], "--query", "{id:id,host:fullyQualifiedDomainName}"])
+    server = azure.scoped(["postgres", "flexible-server", "show", "--resource-group", group, "--name", deployed["platform"]["postgresqlServerName"], "--query", "{id:id,host:fullyQualifiedDomainName,auth:authConfig,network:network}"])
+    expected_server = group_id(config) + "/providers/Microsoft.DBforPostgreSQL/flexibleServers/" + deployed["platform"]["postgresqlServerName"]
+    require(server.get("id", "").lower() == expected_server.lower() and re.fullmatch(r"[a-z0-9-]+\.postgres\.database\.azure\.com", server.get("host", "")), "Restore target differs from the approved PostgreSQL server")
+    require(server.get("auth", {}).get("activeDirectoryAuth") == "Enabled" and server.get("auth", {}).get("passwordAuth") == "Disabled" and server.get("network", {}).get("publicNetworkAccess") == "Disabled", "Restore requires private Entra-only PostgreSQL")
     database = config["parameters"]["platform"]["stage5Data"]["postgresqlDatabaseName"]
     require(isinstance(database, str) and re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", database) is not None, "Target database must be a plain PostgreSQL database name, never a connection string")
     blob = os.environ.get("MIGRATION_RESTORE_BLOB", "")
@@ -281,7 +292,8 @@ def target_database_restore(config, operation, revision, directory, approved):
     require(token_result.returncode == 0 and bool(token_result.stdout.strip()), "Unable to acquire PostgreSQL Entra token")
     environment = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
     environment.update(PGHOST=server["host"], PGPORT="5432", PGDATABASE=database, PGUSER=username, PGPASSWORD=token_result.stdout.strip(), PGSSLMODE="verify-full", PGSSLROOTCERT="system")
-    tables = run_command(["psql", "--no-psqlrc", "--no-password", "--set", "ON_ERROR_STOP=1", "-At", "-c", "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema') AND table_type='BASE TABLE';"], directory, "target-empty-check", environment=environment).strip()
+    empty_query = "SELECT (SELECT count(*) FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_namespace.oid = pg_class.relnamespace WHERE nspname = 'public') + (SELECT count(*) FROM pg_catalog.pg_proc JOIN pg_catalog.pg_namespace ON pg_namespace.oid = pg_proc.pronamespace WHERE nspname = 'public') + (SELECT count(*) FROM pg_catalog.pg_type JOIN pg_catalog.pg_namespace ON pg_namespace.oid = pg_type.typnamespace WHERE nspname = 'public') + (SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname NOT IN ('public', 'information_schema') AND nspname NOT LIKE 'pg_%');"
+    tables = run_command(["psql", "--no-psqlrc", "--no-password", "--set", "ON_ERROR_STOP=1", "-At", "-c", empty_query], directory, "target-empty-check", environment=environment).strip()
     require(tables == "0", "Target database is not empty; refusing to overwrite or clean it")
     run_command(["pg_restore", "--exit-on-error", "--single-transaction", "--no-owner", "--no-acl", "--no-password", "--dbname", database, str(backup)], directory, "target-restore", environment=environment)
     summary["restored"] = True
@@ -348,17 +360,19 @@ def validate_action(config, stage, action):
     allowed_stages["entra-revoke"] = {7}
     allowed_stages.update({action: {7} for action in ("admin-credentials-session-rotate", "admin-credentials-retire-expired")})
     allowed_stages["certificate-renew"] = {4}
+    allowed_stages["edge-bind"] = {9}
     allowed_stages.update({action: {9} for action in ("dns-publish", "dns-rollback")})
+    allowed_stages.update({action: {1} for action in ("legacy-access-restrict", "legacy-access-restore")})
     require(stage in active_stages(config), "Stage does not apply to the selected deployment mode")
     require(stage in allowed_stages.get(action, set()), "Action does not belong to the selected stage")
-    require(deployment_mode(config) != "greenfield" or action not in {"backup-restore", "legacy-hardening", "restore-target"}, "Legacy operations do not apply to greenfield")
+    require(deployment_mode(config) != "greenfield" or action not in {"backup-restore", "legacy-hardening", "legacy-access-restrict", "legacy-access-restore", "restore-target"}, "Legacy operations do not apply to greenfield")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", type=int, choices=range(10), required=True)
     parser.add_argument("--environment", choices=("dev", "test", "prod"), required=True)
-    parser.add_argument("--action", choices=("backup-restore", "legacy-hardening", "cluster-bootstrap", "private-ingress", "certificate-renew", "monitoring-onboard", "database-roles", "backend-secrets", "restore-target", "schema-migrate", "entra-apps", "entra-access", "entra-revoke", "admin-credentials", "admin-credentials-rotate", "admin-credentials-recover", "admin-credentials-session-rotate", "admin-credentials-retire-expired", "proxy-credentials", "application", "audit-pause", "audit-recover", "audit-resume", "dns-publish", "dns-rollback"), required=True)
+    parser.add_argument("--action", choices=("backup-restore", "legacy-hardening", "legacy-access-restrict", "legacy-access-restore", "cluster-bootstrap", "private-ingress", "certificate-renew", "monitoring-onboard", "database-roles", "backend-secrets", "restore-target", "schema-migrate", "entra-apps", "entra-access", "entra-revoke", "admin-credentials", "admin-credentials-rotate", "admin-credentials-recover", "admin-credentials-session-rotate", "admin-credentials-retire-expired", "proxy-credentials", "application", "audit-pause", "audit-recover", "audit-resume", "dns-publish", "dns-rollback", "edge-bind"), required=True)
     parser.add_argument("--operation", choices=("plan", "execute"), required=True)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "temp/migration-runtime")
     args = parser.parse_args()
@@ -402,6 +416,9 @@ def main():
         audit_operation(config, args.action, args.operation, revision, directory, approved)
     elif args.action == "monitoring-onboard":
         monitoring_onboard(config, args.stage, args.operation, revision, directory, os.environ.get("MIGRATION_APPROVED_PLAN_SHA256", ""))
+    elif args.action in {"legacy-access-restrict", "legacy-access-restore"}:
+        from scripts.legacy_access import access_operation
+        access_operation(config, args.action, args.operation, revision, directory, os.environ.get("MIGRATION_APPROVED_PLAN_SHA256", ""))
     elif args.action == "restore-target":
         target_database_restore(config, args.operation, revision, directory, os.environ.get("MIGRATION_APPROVED_PLAN_SHA256", ""))
     elif args.action == "private-ingress":
@@ -410,6 +427,9 @@ def main():
     elif args.action == "certificate-renew":
         from scripts.certificate_runtime import certificate_operation
         certificate_operation(config, args.operation, revision, directory, os.environ.get("MIGRATION_APPROVED_PLAN_SHA256", ""))
+    elif args.action == "edge-bind":
+        from scripts.edge_binding import bind_edge
+        bind_edge(config, args.operation, revision, directory, os.environ.get("MIGRATION_APPROVED_PLAN_SHA256", ""))
     elif args.action == "database-roles":
         from scripts.database_roles import provision_database_roles
         provision_database_roles(config, args.operation, revision, directory, os.environ.get("MIGRATION_APPROVED_PLAN_SHA256", ""))

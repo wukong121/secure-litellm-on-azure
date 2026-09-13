@@ -12,12 +12,31 @@ from uuid import uuid4
 import yaml
 
 from scripts.audit_manifest import render_audit_documents
+from scripts.native_audit import render_native_services
 from scripts.customer_migration import validate_config, stage_fingerprint
 from scripts.observability import COLLECTOR_DIGEST, COLLECTOR_SOURCE, collector_config, connection_fields, render_observability
 from tests.test_audit_manifest import fixture
 
 
 class ObservabilityTests(unittest.TestCase):
+    def test_native_telemetry_does_not_require_blob_or_l3_identity(self):
+        config, source, _, _ = fixture()
+        config.pop("auditRuntime")
+        config["contentAudit"] = {"mode": "native", "retentionDays": 7, "contentPolicyAccepted": True}
+        config["proxy"]["bindings"] = [binding for binding in config["proxy"]["bindings"] if binding["role"] != "audit_reader"]
+        for binding in config["proxy"]["bindings"]:
+            binding.pop("auditTeamId", None)
+        config["observability"] = {"collectorImage": "customerregistry.azurecr.io/collector@" + COLLECTOR_DIGEST}
+        validate_config(config, "test")
+        receipt = {"identity": {"clientId": "88888888-8888-4888-8888-888888888888", "serviceAccountName": "otel-collector", "kubernetesNamespace": "litellm"}, "connectionString": "InstrumentationKey=55555555-5555-4555-8555-555555555555;IngestionEndpoint=https://westus-0.in.applicationinsights.azure.com/"}
+        result = render_observability(config, render_native_services(config, source), receipt, "10.30.8.0/24")
+        for item in result:
+            if item["kind"] == "ConfigMap" and item["metadata"]["name"].startswith(("stage8-api-", "stage8-admin-")):
+                settings = json.loads(item["data"]["config.json"])
+                self.assertFalse(settings["l3"]["enabled"])
+                self.assertTrue(settings["telemetry"]["enabled"])
+        self.assertFalse(any(item["kind"] == "CronJob" for item in result))
+
     def test_collector_configuration_and_proxy_identity_separation(self):
         config, source, foundation, storage = fixture()
         config["observability"] = {"collectorImage": config["parameters"]["platform"]["containerRegistryName"] + ".azurecr.io/collector@" + COLLECTOR_DIGEST}

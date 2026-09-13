@@ -22,7 +22,7 @@ AKS_USER = "4abbcc35-e782-43d8-92c5-2d3f1bd2253f"
 
 
 def install_intent(config, repository):
-    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository), "Use an explicit private GitHub repository")
+    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository), "Use an explicit customer GitHub repository")
     suffix = fingerprint({"repository": repository, "group": group_id(config), "environment": config["environment"]})[:12]
     trust = {"issuer": "https://token.actions.githubusercontent.com", "subject": f"repo:{repository}:environment:{config['environment']}", "audiences": ["api://AzureADTokenExchange"]}
     identities = {role: {"name": f"id-llmgw-{role}-{suffix}", "variable": variable, "trust": trust} for role, variable in IDENTITIES.items()}
@@ -43,7 +43,7 @@ def installation(config, repository, operation, directory, approved, azure=None,
     account = azure.run(["account", "show", "--query", "{tenantId:tenantId,id:id}"])
     require(account == {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}, "Administrator Azure login has a different scope")
     repo = gh(["api", "repos/" + repository])
-    require(repo.get("private") is True and repo.get("permissions", {}).get("admin") is True, "Installation requires administrator access to a private repository")
+    require(repo.get("permissions", {}).get("admin") is True, "Installation requires administrator access to the execution repository")
     branch = gh(["api", f"repos/{repository}/branches/{repo['default_branch']}"])
     require(branch.get("protected") is True, "Protect the default branch before installing production workflow identities")
     environments = gh(["api", f"repos/{repository}/environments?per_page=100"])
@@ -103,7 +103,7 @@ def installation(config, repository, operation, directory, approved, azure=None,
     for name, value in variables.items():
         gh(["variable", "set", name, "--repo", repository, "--env", environment, "--body", value])
     observed = {name: {"passed": True, "source": source, "scope": scope} for name, source, scope in (
-        ("private_repository", "GitHub repository private/admin check", repository),
+        ("repository_admin", "GitHub repository administrator check", repository),
         ("protected_default_branch", "GitHub protected branch flag", repo["default_branch"]),
     )}
     summary.update(applied=True, workflowClientIds=variables, pendingAuthorizations=intent["requiresAdditionalApproval"], readiness=installation_readiness(observed))

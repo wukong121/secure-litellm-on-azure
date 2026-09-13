@@ -30,6 +30,26 @@ PLS_ID = re.compile(r"^/subscriptions/[a-fA-F0-9-]{36}/resourceGroups/[A-Za-z0-9
 UUID = re.compile(r"^[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$")
 
 
+def release_checks(config):
+    phase = config.get("phase")
+    if phase not in {"prepare", "canary", "production"}:
+        raise ValueError("phase must be prepare, canary or production")
+    mode = config.get("auditMode", "l3")
+    if mode not in {"l3", "native"}:
+        raise ValueError("Release auditMode must be native or l3")
+    required = set({"prepare": PREPARE_CHECKS, "canary": CANARY_CHECKS, "production": PRODUCTION_CHECKS}[phase])
+    if mode == "native":
+        if type(config.get("telemetryEnabled")) is not bool:
+            raise ValueError("Native release requires an explicit telemetry decision")
+        if phase != "prepare":
+            required.difference_update({"stage8_capture_architecture", "l3_governance_and_recovery"})
+            required.update({"native_spend_logs", "native_audit_access", "native_retention_recovery"})
+            if not config["telemetryEnabled"]:
+                required.remove("telemetry_alerts")
+                required.add("telemetry_disabled")
+    return required
+
+
 def validate_release(config: dict, now: datetime | None = None, required_approvers: int = 2, eligible_approvers=None) -> None:
     now = now or datetime.now(timezone.utc)
     phase = config.get("phase")
@@ -57,7 +77,7 @@ def validate_release(config: dict, now: datetime | None = None, required_approve
         raise ValueError("Distinct approval owners matching the release policy are required")
     if eligible_approvers and not {owner.lower() for owner in owners}.issubset({str(owner).lower() for owner in eligible_approvers}):
         raise ValueError("Release contains an ineligible approver")
-    required = {"prepare": PREPARE_CHECKS, "canary": CANARY_CHECKS, "production": PRODUCTION_CHECKS}[phase]
+    required = release_checks(config)
     for name in sorted(required):
         evidence = config.get("checks", {}).get(name, {})
         if evidence.get("passed") is not True or not evidence.get("report") or "REPLACE" in evidence["report"]:
@@ -94,6 +114,8 @@ def validate_what_if(result: dict) -> dict[str, int]:
 
 def generate(config: dict, output_dir: Path) -> None:
     validate_release(config)
+    if config.get("auditMode", "l3") != "l3":
+        raise ValueError("Native release uses managed customer-runtime manifests, not the legacy Stage9 overlay")
     render(config["baseDomain"], output_dir, stage=9)
     overlay_path = output_dir / "kustomization.yaml"
     overlay = yaml.safe_load(overlay_path.read_text())

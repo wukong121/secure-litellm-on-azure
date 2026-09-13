@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: validate validate-stage4 validate-stage5 validate-stage6 validate-stage7 validate-stage8 validate-stage9 validate-oss-callbacks test bicep kustomize
+.PHONY: validate validate-stage4 validate-stage5 validate-stage6 validate-stage7 validate-stage8 validate-stage9 validate-oss-callbacks test test-local test-local-full bicep kustomize
 
 validate:
 	bash scripts/validate-stage3.sh
@@ -29,6 +29,12 @@ validate-oss-callbacks:
 
 test:
 	./.venv/bin/python -m unittest tests.test_litellm_subscription tests.test_config_templates
+
+test-local:
+	./.venv/bin/python -m scripts.local_rehearsal --profile quick
+
+test-local-full:
+	./.venv/bin/python -m scripts.local_rehearsal --profile full
 
 bicep:
 	LITELLM_ACR_SUFFIX=stage3check bash -c 'set -e; for file in $$(find infra -name "*.bicep" -type f | sort); do az bicep build --file "$$file" --stdout >/dev/null; done; for file in $$(find infra/environments -name "*.bicepparam" -type f | sort); do az bicep build-params --file "$$file" --stdout >/dev/null; done'

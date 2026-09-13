@@ -29,6 +29,21 @@ class FakeAzure:
 
 
 class MigrationDeploymentTests(unittest.TestCase):
+    def test_managed_release_requires_matching_api_edge_binding_receipt(self):
+        from unittest.mock import Mock
+        from scripts.customer_migration import stage_fingerprint
+        from scripts.edge_binding import require_edge_binding
+        config = customer_config()
+        identifier = "11111111-1111-4111-8111-111111111111"
+        receipt = {"revision": "a" * 40, "configSha256": stage_fingerprint(config, 9), "frontDoorId": identifier, "apiHost": "llm-api." + config["baseDomain"], "clusterResourceId": group_id(config) + "/providers/Microsoft.ContainerService/managedClusters/new-aks", "rolloutVerified": True, "deploymentUid": "api-original", "podTemplateSha256": "b" * 64}
+        azure = Mock()
+        azure.scoped.return_value = {"state": "Succeeded", "binding": receipt}
+        require_edge_binding(config, "a" * 40, identifier, azure)
+        for updates in ({"revision": "c" * 40}, {"frontDoorId": "other"}, {"rolloutVerified": False}, {"clusterResourceId": "/other"}, {"podTemplateSha256": ""}):
+            azure.scoped.return_value = {"state": "Succeeded", "binding": {**receipt, **updates}}
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                require_edge_binding(config, "a" * 40, identifier, azure)
+
     def test_recovery_identity_is_explicit_separate_and_automatically_resolved(self):
         from unittest.mock import Mock
         config = customer_config()

@@ -248,6 +248,8 @@ config/migration-evidence.json
 !docs/customer-migration-guide-zh.md
 !docs/customer-deployment-workflows-zh.md
 !docs/litellm-content-audit-phase1-customer-brief-zh.md
+!docs/litellm-ingress-tls-certificate-design-zh.md
+!docs/customer-private-runner-preparation-zh.md
 
 # Temporary local artifacts
 temp/

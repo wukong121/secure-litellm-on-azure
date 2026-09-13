@@ -12,6 +12,7 @@ from scripts.backend_manifest import application_settings, prepare_backend_docum
 from scripts.customer_migration import ROOT, stage_fingerprint, validate_config
 from scripts.migration_deploy import group_id
 from scripts.runtime_secrets import BACKEND_SECRETS
+from scripts.native_audit import native_audit_settings, render_native_audit
 from LiteLLM.runtime.application import application_config
 from scripts.migration_runtime import check_application, publish
 from tests.test_customer_migration import customer_config
@@ -26,6 +27,29 @@ def backend_customer():
 
 
 class BackendManifestTests(unittest.TestCase):
+    def test_native_logging_is_explicit_retained_and_does_not_mutate_stage6(self):
+        config = backend_customer()
+        config["proxy"] = {"bindings": []}
+        config["contentAudit"] = {"mode": "native", "retentionDays": 14, "contentPolicyAccepted": True}
+        source = [
+            {"kind": "ConfigMap", "metadata": {"name": "litellm-config-old"}, "data": {"config.yaml": yaml.safe_dump({"general_settings": {"store_prompts_in_spend_logs": False}})}},
+            {"kind": "Deployment", "metadata": {"name": "litellm"}, "spec": {"template": {"spec": {"volumes": [{"configMap": {"name": "litellm-config-old"}}]}}}},
+        ]
+        result = render_native_audit(config, source)
+        settings = yaml.safe_load(result[0]["data"]["config.yaml"])["general_settings"]
+        self.assertTrue(settings["store_prompts_in_spend_logs"])
+        self.assertFalse(settings["disable_spend_logs"])
+        self.assertEqual(settings["maximum_spend_logs_retention_period"], "14d")
+        self.assertEqual(result[1]["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"], result[0]["metadata"]["name"])
+        self.assertFalse(yaml.safe_load(source[0]["data"]["config.yaml"])["general_settings"]["store_prompts_in_spend_logs"])
+        for updates in ({"contentPolicyAccepted": False}, {"retentionDays": True}, {"retentionDays": 0}, {"mode": "disabled"}):
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                native_audit_settings({**config, "contentAudit": {**config["contentAudit"], **updates}})
+        with self.assertRaisesRegex(ValueError, "L3"):
+            native_audit_settings({**config, "auditRuntime": {}})
+        with self.assertRaisesRegex(ValueError, "L3 bindings"):
+            native_audit_settings({**config, "proxy": {"bindings": [{"auditTeamId": "preserve-existing"}]}})
+
     def test_application_config_only_changes_stage6_fingerprint(self):
         config = backend_customer()
         plain = copy.deepcopy(config)

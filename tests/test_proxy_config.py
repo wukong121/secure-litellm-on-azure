@@ -22,6 +22,27 @@ APPS = {"api": {"appId": "33333333-3333-4333-8333-333333333333"}, "admin": {"app
 
 
 class ProxyConfigurationTests(unittest.TestCase):
+    def test_native_ui_and_content_read_are_explicit_credential_contracts(self):
+        from scripts.proxy_credentials import binding_contract, key_payload
+        config = proxy_customer()
+        admin = config["proxy"]["bindings"][1]
+        old = binding_contract(config, admin)
+        config["proxy"]["nativeUi"] = True
+        proxy_settings(config)
+        limited = binding_contract(config, admin)
+        self.assertNotEqual(old["bindingSha256"], limited["bindingSha256"])
+        self.assertNotIn("/spend/logs/ui", key_payload(limited, "synthetic")["allowed_routes"])
+        admin["nativeAuditRead"] = True
+        policy = proxy_policy(config, APPS)
+        self.assertTrue(policy["nativeUi"])
+        self.assertTrue(policy["bindings"][1]["nativeAuditRead"])
+        contract = binding_contract(config, admin)
+        self.assertIn("/spend/logs/ui/{request_id}", key_payload(contract, "synthetic")["allowed_routes"])
+        self.assertNotIn("/key/generate", key_payload(contract, "synthetic")["allowed_routes"])
+        config["proxy"]["nativeUi"] = False
+        with self.assertRaisesRegex(ValueError, "Native content"):
+            proxy_settings(config)
+
     def test_stage7_decisions_do_not_invalidate_earlier_receipts(self):
         config = proxy_customer()
         plain = copy.deepcopy(config)

@@ -2,9 +2,10 @@
 
 import hashlib
 import hmac
+import json
 import secrets
 
-from scripts.customer_migration import fingerprint, require
+from scripts.customer_migration import ROOT, fingerprint, require
 from scripts.proxy_config import credential_name, object_id, proxy_settings
 
 
@@ -12,6 +13,8 @@ def binding_contract(config, binding):
     require(binding["plane"] == "admin" and binding["role"] in {"proxy_admin", "proxy_admin_viewer"}, "Only backend administrators receive managed proxy credentials")
     name = credential_name(config["azure"]["tenantId"], binding)
     contract = {"tenantId": object_id(config["azure"]["tenantId"]), "oid": object_id(binding["oid"]), "plane": binding["plane"], "role": binding["role"], "models": sorted(binding["models"])}
+    if config["proxy"].get("nativeUi") is True:
+        contract.update(nativeUi=True, nativeAuditRead=binding.get("nativeAuditRead", False))
     return {**contract, "secretName": name, "userId": "llmgw-" + binding["plane"] + "-" + name[4:], "bindingSha256": fingerprint(contract)}
 
 
@@ -24,6 +27,13 @@ def key_payload(contract, value):
     routes = ["/model/info", "/team/info", "/key/info"]
     if contract["role"] == "proxy_admin":
         routes.extend(["/key/block", "/key/unblock"])
+    if contract.get("nativeUi") is True:
+        native = json.loads((ROOT / "auth-proxy/native-ui-routes.json").read_text())
+        routes.extend(native["read"])
+        routes.extend(native["lookup"])
+        if contract.get("nativeAuditRead") is True:
+            routes.extend(native["audit"])
+        routes = sorted(set(routes))
     return {"key": value, "key_alias": contract["secretName"], "user_id": contract["userId"], "models": contract["models"], "metadata": {"llmgw_binding": contract["bindingSha256"]}, "key_type": "default", "allowed_routes": routes, "auto_rotate": False}
 
 

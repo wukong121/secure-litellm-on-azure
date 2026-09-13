@@ -5,6 +5,8 @@ import asyncio
 import os
 import time
 import hashlib
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -17,15 +19,20 @@ from scripts.proxy_credentials import binding_contract, credential_bindings, key
 from tests.test_proxy_config import proxy_customer
 
 
-async def probe(config):
+def probe_application(config, password):
     credential = Mock()
-    credential.get_token.return_value = SimpleNamespace(token="synthetic-application-password", expires_on=int(time.time()) + 3600)
+    credential.get_token.return_value = SimpleNamespace(token=password, expires_on=int(time.time()) + 3600)
     os.environ["LLMGW_BACKEND_SECRETS_DIR"] = str(Path(config).parent / "backend")
     os.environ.pop("LITELLM_MASTER_KEY", None)
     os.environ.pop("LITELLM_SALT_KEY", None)
     os.environ.pop("LLMGW_DATABASE_TOKEN_FILE", None)
     tokens = AzureDatabaseTokens(TEMPLATE, credential)
     app = create_application(config, TEMPLATE, tokens)
+    return app, tokens, credential
+
+
+async def probe(config):
+    app, tokens, credential = probe_application(config, "synthetic-application-password")
     assert os.environ["LITELLM_MASTER_KEY"] == "synthetic-application-master-key"
     assert os.environ["LITELLM_SALT_KEY"] == "synthetic-application-salt-key"
     from litellm.proxy import proxy_server
@@ -59,6 +66,54 @@ async def probe(config):
                 validate_key(contract, info.json()["info"], value)
                 denied = await http.post("/key/generate", json={"models": ["coding"]}, headers={"Authorization": "Bearer " + value})
                 assert denied.status_code in {401, 403}, "Per-subject key unexpectedly granted credential creation"
+            subject = hashlib.sha256(b"synthetic-tenant:synthetic-actor").hexdigest()
+            api_key = "sk-" + hashlib.sha256(b"synthetic-native-audit-key").hexdigest()
+            created = await http.post("/user/new", json={"user_id": "synthetic-native-user", "user_role": "internal_user", "models": ["coding"]})
+            assert created.status_code == 200, "Native probe user creation failed"
+            created = await http.post("/key/generate", json={"user_id": "synthetic-native-user", "models": ["coding"], "key": api_key})
+            assert created.status_code == 200, "Native probe key creation failed"
+            for streaming in (False, True):
+                response = await http.post("/v1/chat/completions", headers={"Authorization": "Bearer " + api_key}, json={"model": "coding", "messages": [{"role": "user", "content": "SYNTHETIC_NATIVE_PROMPT"}], "user": subject, "stream": streaming})
+                assert response.status_code == 200, "Native audit synthetic inference failed: " + response.text
+                if streaming:
+                    assert "[DONE]" in response.text
+                else:
+                    assert response.json()["choices"][0]["message"]["content"] == "SYNTHETIC_NATIVE_RESPONSE"
+            from litellm.proxy.utils import update_spend_logs_job
+
+            deadline = time.monotonic() + 20
+            while True:
+                await update_spend_logs_job(client, None, proxy_server.proxy_logging_obj)
+                logs = await client.db.query_raw('SELECT request_id, api_key, end_user, messages, proxy_server_request, response FROM "LiteLLM_SpendLogs" WHERE end_user = $1', subject)
+                if len(logs) == 2:
+                    break
+                assert time.monotonic() < deadline, "Native JSON/SSE spend logs were not written"
+                await asyncio.sleep(0.2)
+            for log in logs:
+                assert log["api_key"] == hashlib.sha256(api_key.encode()).hexdigest()
+                assert "SYNTHETIC_NATIVE_PROMPT" in json.dumps(log["proxy_server_request"]), "Synthetic stored request: " + repr(log["proxy_server_request"])
+                assert "SYNTHETIC_NATIVE_RESPONSE" in json.dumps(log["response"]), "Synthetic stored response: " + repr(log["response"])
+                assert api_key not in json.dumps(log)
+                assert "synthetic-model-key" not in json.dumps(log)
+            native_config = proxy_customer()
+            native_config["proxy"]["nativeUi"] = True
+            reader = {"oid": "12121212-1212-4212-8212-121212121212", "plane": "admin", "role": "proxy_admin_viewer", "models": ["coding"], "nativeAuditRead": True}
+            native_config["proxy"]["bindings"].append(reader)
+            contract = binding_contract(native_config, reader)
+            reader_key = "sk-" + hashlib.sha256(b"synthetic-native-reader").hexdigest()
+            assert (await http.post("/user/new", json=user_payload(contract))).status_code == 200
+            assert (await http.post("/key/generate", json=key_payload(contract, reader_key))).status_code == 200
+            read_headers = {"Authorization": "Bearer " + reader_key}
+            today = datetime.now(timezone.utc)
+            listing = await http.get("/spend/logs/ui", params={"page": 1, "page_size": 50, "start_date": (today - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"), "end_date": (today + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")}, headers=read_headers)
+            assert listing.status_code == 200, "Native log list failed: " + listing.text
+            for log in logs:
+                detail = await http.get("/spend/logs/ui/" + log["request_id"], headers=read_headers)
+                assert detail.status_code == 200, "Native log detail failed: " + detail.text
+                assert "SYNTHETIC_NATIVE_PROMPT" in detail.text and "SYNTHETIC_NATIVE_RESPONSE" in detail.text
+                assert api_key not in detail.text and reader_key not in detail.text
+            denied = await http.post("/key/generate", json={"models": ["coding"]}, headers=read_headers)
+            assert denied.status_code in {401, 403}, "Native viewer unexpectedly created credentials"
         from prisma import Prisma
 
         parsed = urlsplit(TEMPLATE)
@@ -85,4 +140,11 @@ async def probe(config):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    asyncio.run(probe(parser.parse_args().config))
+    parser.add_argument("--serve", action="store_true")
+    args = parser.parse_args()
+    if args.serve:
+        import uvicorn
+        app, _, _ = probe_application(args.config, "synthetic-rotated-password")
+        uvicorn.run(app, host="0.0.0.0", port=4000, access_log=False)
+    else:
+        asyncio.run(probe(args.config))

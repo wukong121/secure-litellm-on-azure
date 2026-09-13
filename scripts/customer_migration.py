@@ -20,8 +20,8 @@ STAGES = (
     ("Baseline and recoverable backup", ("inventory", "backup_restore", "key_salt_recovery", "protocol_baseline")),
     ("Legacy minimum hardening", ("legacy_health", "alerts_received", "rollback_snapshot")),
     ("Customer architecture decisions", ("network_capacity", "identity_owners", "pg_auth_ha", "l3_policy", "protocol_scope")),
-    ("Supply chain and isolated target", ("oidc_scope", "image_signature_sbom", "target_isolation")),
-    ("Private network and AKS", ("private_dns_egress", "private_runner", "workload_identity", "private_ingress")),
+    ("Source supply chain and isolated target", ("oidc_scope", "source_image_sbom_scan", "target_isolation")),
+    ("Private network and AKS", ("private_dns_egress", "private_runner", "target_image_signature_sbom", "workload_identity", "private_ingress")),
     ("Data platform and restore rehearsal", ("pg_migration_restore", "key_salt_decryption", "redis_entra", "csi_rotation")),
     ("HA and routing", ("replica_failure", "load_affinity", "capacity_limits", "no_legacy_db_writes")),
     ("Entra and split domains", ("tenant_negative_tests", "object_ownership", "admin_private", "required_protocols")),
@@ -64,7 +64,7 @@ def fingerprint(value):
 
 def approval_policy(config):
     policy = config.get("governance", {})
-    require(isinstance(policy, dict) and not set(policy) - {"approvalMode", "approverObjectIds", "singleOperatorRiskAccepted"}, "Invalid governance fields")
+    require(isinstance(policy, dict) and not set(policy) - {"approvalMode", "approverObjectIds", "singleOperatorRiskAccepted", "githubLogin"}, "Invalid governance fields")
     mode = policy.get("approvalMode", "dual")
     require(mode in {"dual", "single-operator"}, "Invalid approvalMode")
     allowed = policy.get("approverObjectIds", [])
@@ -75,6 +75,8 @@ def approval_policy(config):
         require(policy.get("singleOperatorRiskAccepted") is True and len(identities) == 1, "Single-operator mode requires one named operator and explicit risk acceptance")
     elif allowed:
         require(len(identities) >= 2, "Dual approval requires at least two eligible approvers")
+    if "githubLogin" in policy:
+        require(mode == "single-operator" and isinstance(policy["githubLogin"], str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", policy["githubLogin"]), "githubLogin requires an explicitly approved single operator")
     return mode, identities
 
 
@@ -90,6 +92,8 @@ def active_stages(config):
 
 def stage_title(stage, config):
     require(stage in active_stages(config), "Stage does not apply to the selected deployment mode")
+    if stage == 8 and "contentAudit" in config:
+        return "Native Spend Logs and observability"
     if deployment_mode(config) == "greenfield":
         return {0: "New environment prerequisites", 5: "Data platform and database initialization", 9: "Approved pilot and first release"}.get(stage, STAGES[stage][0])
     return STAGES[stage][0]
@@ -98,6 +102,13 @@ def stage_title(stage, config):
 def stage_checks(stage, config):
     require(stage in active_stages(config), "Stage does not apply to the selected deployment mode")
     checks = list(STAGES[stage][1])
+    if stage == 1 and "legacyAccess" in config:
+        checks.append("legacy_source_access")
+    if "contentAudit" in config:
+        if stage == 2:
+            checks[checks.index("l3_policy")] = "content_audit_policy"
+        elif stage == 8:
+            checks = ["native_spend_logs", "native_audit_access", "native_retention_recovery", "telemetry_received" if "observability" in config else "telemetry_disabled", "guardrail_scope"]
     if deployment_mode(config) == "greenfield":
         replacements = {
             0: ("subscription_scope", "deployment_permissions", "private_runner", "domain_ownership"),
@@ -112,6 +123,10 @@ def stage_checks(stage, config):
 
 def stage_fingerprint(config, stage):
     scoped = {key: value for key, value in config.items() if key != "parameters"}
+    if stage < 1:
+        scoped.pop("legacyAccess", None)
+    if stage < 2:
+        scoped.pop("contentAudit", None)
     if stage < 9:
         scoped.pop("dns", None)
     if stage < 8:
@@ -167,7 +182,13 @@ def validate_config(config, environment):
     required_fields = {"schemaVersion", "environment", "azure", "location", "baseDomain", "ownerEmail", "target", "parameters"}
     if mode == "migration":
         required_fields.add("legacy")
-    require(set(config) - {"governance", "deploymentMode", "privateIngress", "databaseAccess", "application", "proxy", "entra", "auditRuntime", "observability", "auditGovernance", "dns", "certificates"} == required_fields, "Unexpected or missing customer configuration fields; greenfield must omit legacy")
+    require(set(config) - {"governance", "deploymentMode", "privateIngress", "databaseAccess", "application", "proxy", "entra", "auditRuntime", "contentAudit", "observability", "auditGovernance", "dns", "certificates", "legacyAccess"} == required_fields, "Unexpected or missing customer configuration fields; greenfield must omit legacy")
+    if "legacyAccess" in config:
+        from scripts.legacy_access import access_settings
+        access_settings(config)
+    if "contentAudit" in config:
+        from scripts.native_audit import native_audit_settings
+        native_audit_settings(config)
     if "certificates" in config:
         from scripts.certificate_runtime import certificate_settings
         certificate_settings(config)
@@ -179,7 +200,7 @@ def validate_config(config, environment):
         governance_settings(config)
     if "observability" in config:
         from scripts.observability import telemetry_settings
-        require("auditRuntime" in config, "Managed observability requires auditRuntime")
+        require("auditRuntime" in config or "contentAudit" in config, "Managed observability requires an explicit audit mode")
         telemetry_settings(config)
     if "auditRuntime" in config:
         from scripts.audit_manifest import audit_settings

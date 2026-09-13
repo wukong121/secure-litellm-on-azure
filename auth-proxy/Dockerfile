@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
 COPY *.mjs ./
+COPY native-ui-routes.json ./
 USER 10001:10001
 EXPOSE 8080
 CMD ["node", "server.mjs"]

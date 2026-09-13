@@ -2,13 +2,59 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 import json
+import copy
+from pathlib import Path
+import tempfile
 
-from scripts.customer_migration import main, stage_fingerprint
-from scripts.migration_evidence import draft_report, record_evidence
+from scripts.customer_migration import ROOT, main, stage_fingerprint
+from scripts.migration_evidence import checklist_summary, confirm_report, draft_report, main as evidence_main, record_evidence
 from tests.test_customer_migration import customer_config
 
 
 class MigrationEvidenceTests(unittest.TestCase):
+    def test_confirm_cli_uses_draft_artifact_without_report_or_approver_secrets(self):
+        self.config["governance"]["githubLogin"] = "migration-operator"
+        draft = draft_report(self.config, 0, self.revision)
+        environment = {"CUSTOMER_CONFIG_JSON": json.dumps(self.config), "GITHUB_SHA": self.revision, "MIGRATION_AUTO_EVIDENCE": "true",
+                       "MIGRATION_CONFIRM_ENVIRONMENT": "test", "MIGRATION_REVIEWED_RUN_ID": "123", "MIGRATION_CHECKED_ITEMS": ",".join(draft["checks"]),
+                       "MIGRATION_EVIDENCE_NOTES": "Synthetic manual acceptance contract, not a real customer result", "GITHUB_ACTOR": "migration-operator", "GITHUB_TRIGGERING_ACTOR": "migration-operator",
+                       "GITHUB_ACTOR_ID": "456", "GITHUB_RUN_ID": "789", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "synthetic/gateway"}
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch.dict("os.environ", environment, clear=True), patch("sys.argv", ["evidence", "--operation", "confirm", "--stage", "0", "--environment", "test", "--output-dir", directory]), patch("scripts.workflow_artifacts.load_evidence", return_value=[]), patch("scripts.workflow_artifacts.read_artifact", return_value={"acceptance-report.json": draft}) as load:
+            evidence_main()
+            load.assert_called_once_with(self.revision, "123", "customer-acceptance.yml", "acceptance-draft-test-0-123", ("acceptance-report.json",))
+            record = json.loads((Path(directory) / "migration-evidence.json").read_text())[0]
+            self.assertEqual(record["reportUrl"], "https://github.com/synthetic/gateway/actions/runs/789")
+            self.assertEqual(record["confirmation"]["reviewedRunId"], "123")
+            self.assertTrue((Path(directory) / "checklist.md").exists())
+        self.assertIn("inventory,backup_restore", checklist_summary(self.config, 0, self.revision))
+
+    def test_manual_confirmation_records_actual_operator_not_automatic_verification(self):
+        self.config["governance"]["githubLogin"] = "migration-operator"
+        draft = draft_report(self.config, 0, self.revision)
+        draft["generatedAt"] = self.now.isoformat()
+        actor = {"login": "migration-operator", "triggeringLogin": "migration-operator", "id": "123", "runId": "456", "runAttempt": "1"}
+        selected = ",".join(draft["checks"])
+        notes = "Synthetic manual confirmation test only; no customer checks executed"
+        report = confirm_report(self.config, 0, self.revision, draft, selected, notes, actor, self.now)
+        ledger = self.record(report)
+        self.assertEqual(ledger[0]["approvedBy"], [self.operator])
+        self.assertEqual(ledger[0]["confirmation"]["method"], "manual-workflow")
+        self.assertFalse(ledger[0]["confirmation"]["independentlyVerified"])
+        self.assertTrue(all(item["status"] == "pending" for item in draft["checks"].values()))
+        for changes in ({"login": "other"}, {"triggeringLogin": "other"}, {"runId": ""}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                confirm_report(self.config, 0, self.revision, draft, selected, notes, {**actor, **changes}, self.now)
+        for selection in ("", selected + ",inventory", "inventory", selected + ",unknown"):
+            with self.subTest(selection=selection), self.assertRaises(ValueError):
+                confirm_report(self.config, 0, self.revision, draft, selection, notes, actor, self.now)
+        for changes in ({"revision": "b" * 40}, {"generatedAt": "2000-01-01T00:00:00Z"}, {"environment": "prod"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                confirm_report(self.config, 0, self.revision, {**draft, **changes}, selected, notes, actor, self.now)
+        invalid = copy.deepcopy(self.config)
+        invalid["governance"].pop("githubLogin")
+        with self.assertRaisesRegex(ValueError, "githubLogin"):
+            confirm_report(invalid, 0, self.revision, draft, selected, notes, actor, self.now)
+
     def setUp(self):
         self.config = customer_config()
         self.operator = "11111111-1111-4111-8111-111111111111"

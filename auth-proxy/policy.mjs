@@ -31,11 +31,13 @@ export function validateConfig(config) {
   if (!config.apiAudience || !config.apiClientIds?.length || !config.apiClientIds.every(value => uuid.test(value))) throw new Error('Missing API audience/client allowlist');
   if (config.apiAudience === config.adminClientId || config.apiAudience === `api://${config.adminClientId}`) throw new Error('API and admin applications must be distinct');
   const identities = new Set();
+  if (config.nativeUi !== undefined && typeof config.nativeUi !== 'boolean') throw new Error('nativeUi must be an explicit boolean');
   const keyFiles = new Set();
   for (const binding of config.bindings) {
     const identity = `${binding.plane}:${binding.oid}`;
     if (!uuid.test(binding.oid) || identities.has(identity)) throw new Error('Invalid/duplicate binding');
     identities.add(identity);
+    if (binding.nativeAuditRead !== undefined && (typeof binding.nativeAuditRead !== 'boolean' || binding.plane !== 'admin' || !['proxy_admin', 'proxy_admin_viewer'].includes(binding.role) || config.nativeUi !== true)) throw new Error('Native content read requires an approved native UI administrator');
     if (binding.principalType !== undefined &&
       (!['User', 'ServicePrincipal'].includes(binding.principalType) ||
        (binding.plane === 'admin' && binding.principalType !== 'User'))) throw new Error('Invalid principal type');

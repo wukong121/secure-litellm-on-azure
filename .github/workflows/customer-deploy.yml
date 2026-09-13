@@ -44,19 +44,21 @@ jobs:
   authorize:
     runs-on: ubuntu-24.04
     steps:
-      - name: Require private customer repository and default branch
+      - name: Require manual execution of the protected default branch
         env:
-          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
           CURRENT_REF: ${{ github.ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          [[ "$PRIVATE_REPOSITORY" == true ]] || { echo 'Use a customer-controlled private repository.' >&2; exit 1; }
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF_PROTECTED" == true ]] || exit 1
           [[ "$CURRENT_REF" == "refs/heads/$DEFAULT_BRANCH" ]] || { echo 'Run reviewed code from the protected default branch.' >&2; exit 1; }
   infrastructure:
     needs: authorize
     environment: ${{ inputs.environment }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    env:
+      WORKFLOW_ARTIFACT_KEY: ${{ secrets.WORKFLOW_ARTIFACT_KEY }}
+      GITHUB_REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
     permissions:
       contents: read
       id-token: write
@@ -68,9 +70,11 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
-      - run: python -m pip install PyYAML==6.0.3
+      - run: python -m pip install PyYAML==6.0.3 cryptography==50.0.1 service-identity==24.2.0 'psycopg[binary]==3.2.10' azure-identity==1.25.1 azure-keyvault-secrets==4.10.0
       - name: Check plan artifact reader
-        run: command -v gh
+        run: |
+          command -v gh
+          python -m scripts.workflow_security check-key
       - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
@@ -80,7 +84,7 @@ jobs:
         run: az bicep install
       - name: Plan or execute the reviewed component
         env:
-          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON || vars.CUSTOMER_CONFIG_JSON }}
+          CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON }}
           MIGRATION_EVIDENCE_JSON: ${{ secrets.MIGRATION_EVIDENCE_JSON }}
           MIGRATION_AUTO_EVIDENCE: 'true'
           MIGRATION_APPROVED_RUN_ID: ${{ inputs.approved_run_id }}
@@ -98,21 +102,22 @@ jobs:
         run: |
           arguments=()
           if [[ "$RELEASE_REQUESTED" == true ]]; then arguments+=(--release); fi
-          python -m scripts.migration_deploy --operation "$MIGRATION_OPERATION" \
+          python -m scripts.workflow_security run scripts.migration_deploy --operation "$MIGRATION_OPERATION" \
             --stage "$MIGRATION_STAGE" --component "$MIGRATION_COMPONENT" \
             --environment "$CUSTOMER_ENVIRONMENT" "${arguments[@]}"
-      - name: Save private reviewed plan and deployment outputs
+      - name: Encrypt reviewed plan and deployment outputs
+        if: success() || failure()
+        env:
+          ARTIFACT_NAME: infrastructure-${{ inputs.environment }}-${{ inputs.stage }}-${{ inputs.component }}-${{ github.run_id }}
+        run: python -m scripts.workflow_security seal --directory temp/migration-deploy --name "$ARTIFACT_NAME" plan-summary.json reviewed-plan.json operation-receipt.json deployment-receipt.json deployment-outputs.json operation-status.json
+      - name: Save encrypted evidence
+        if: success() || failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: infrastructure-${{ inputs.environment }}-${{ inputs.stage }}-${{ inputs.component }}-${{ github.run_id }}
-          path: |
-            temp/migration-deploy/plan-summary.json
-            temp/migration-deploy/reviewed-plan.json
-            temp/migration-deploy/operation-receipt.json
-            temp/migration-deploy/deployment-receipt.json
-            temp/migration-deploy/deployment-outputs.json
+          path: temp/migration-deploy/sealed-artifact.json
           if-no-files-found: error
           retention-days: 7
       - name: Remove private plans and diagnostics
         if: always()
-        run: rm -rf -- temp/migration-deploy
+        run: rm -rf -- temp/migration-deploy temp/workflow-private

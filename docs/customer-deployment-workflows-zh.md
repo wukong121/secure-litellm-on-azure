@@ -1,22 +1,101 @@
 # 客户分阶段部署与验收工作流
 
-本指南适用于客户控制的私有仓库和经批准的旧网关迁移。代码包含实际写入 Azure/Kubernetes 的入口；不要在公共示例仓库执行。运行成功不代表安全增强已完成：协议兼容、身份授权、可靠审计等运行时能力仍必须实测，未完成的项目见收尾台账。
+本指南适用于客户自己的公开fork或私有仓库，以及经批准的旧网关迁移。主要迁移workflow只允许手动运行受保护的默认分支，客户配置从Environment Secret读取，计划和结果加密后上传。代码包含实际写入Azure/Kubernetes的入口；只有配置并授权了本仓库自己的执行环境后才能运行。作业成功不代表迁移验收完成，业务与安全检查仍需实测。
+
+## 先开始演练
+
+1. fork本仓库并启用Actions，保留公开仓库即可；为默认分支设置有效的branch protection/ruleset。工作流检查`GITHUB_REF_PROTECTED=true`，不允许选未保护的分支执行。PR验证作业只使用GitHub托管runner，不指向客户私网runner。
+2. 创建选定的Environment（例如test），部署分支限制到保护分支；按下文配置`CUSTOMER_CONFIG_JSON`及`WORKFLOW_ARTIFACT_KEY`两个Environment Secrets，以及Azure OIDC变量。单人运维在governance中配置本人Entra Object ID和GitHub login。
+3. 按[Runner准备说明](customer-private-runner-preparation-zh.md)人工注册专用执行机，设置Repository变量`MIGRATION_PRIVATE_RUNNER_LABELS`。无需自动建机平台。
+4. 先运行`Customer staged migration`：stage=0、mode=config-check、component=none。再运行`Customer private runner checks`，首次check_target=false，只核对旧集群；它不会部署或修改资源。
+5. 下载上述运行的加密结果并审核。确认身份范围、工具与旧集群读取正常后，按第3节从bootstrap/backup开始；每项变更先plan、审核、execute/deploy，阶段完成后draft/confirm，不填写假通过。
+
+这是一条**开始实际演练的入口**，不是声明客户环境已验收。旧管理面完全隔离、所有常用管理写入、实际Codex所需协议，以及最终停写/同步/切流仍须在相应步骤验证或补齐；遇到不支持的必需项应停止该步骤，不先停旧系统。
+
+### 公开日志与加密附件
+
+新增Environment Secret `WORKFLOW_ARTIFACT_KEY`：每个环境独立生成一个32字节随机值并以base64保存。实施人员可在受控本机用`openssl rand -base64 32`生成，直接录入GitHub Secret及受控密码库，不把值发到聊天、Git或Actions输出。不是Azure密钥，也不放在Variable中。
+
+部署、运行、验收、runner检查、入口检查及镜像晋级只上传名为`sealed-artifact.json`的密文；内容先压缩再用AES-GCM加密，并绑定仓库、run ID及artifact名称，后续workflow自动解密。通常保留7天，晋级SBOM为30天。不要在迁移中更换该Secret，否则旧计划和账本不能解密，需要保留旧密钥在本机审核或重新生成所需证据。
+
+人工审核时，下载artifact并将其中密文文件放在本机忽略目录`temp/`下。在同一受控终端中安全设置`WORKFLOW_ARTIFACT_KEY`环境变量，不把密钥作为命令参数；运行以下命令，将示例值替换成该次运行的真实非秘密信息：
+
+```bash
+.venv/bin/python -m scripts.workflow_security open \
+  --file temp/downloaded/sealed-artifact.json \
+  --repository OWNER/REPOSITORY \
+  --run-id 123456 \
+  --name infrastructure-test-0-bootstrap-123456 \
+  --output-dir temp/reviewed-evidence
+```
+
+解密结果只写入本机权限受限目录，不打印内容。审核后运行execute/deploy时填写对应`approved_run_id`，不需要手算哈希。公开Summary保留通用状态及验收check ID，不发布原始客户配置或资源变更明细。密文最大约3 MiB、解压明文上限32 MiB，异常大小拒绝。
+
+**仍会公开的非秘密信息：** 仓库、分支、作业名、操作者、运行时间、workflow输入，以及作为Variable配置的非秘密ID/镜像引用等；Cosign签名还使用公开透明度服务。`evidence_notes`等输入只写非秘密简短结论和安全引用，不能写Token、客户正文或敏感配置。加密artifact不会隐藏GitHub本身的运行元数据。
+
+客户模块的原始stdout/stderr和详细Summary仅落到runner私有临时目录，结束时清理，不上传。失败摘要不包含完整诊断；必要时在受控runner上排查并重新计划，不能开启公开调试输出来打印所有环境变量。加密防止公开读者看到附件内容，不替代保护分支、Environment权限或runner隔离。
+
+可选增强L3的`Customer audit governance`仍保留原私有仓库和双审批要求，不属于本次基础迁移公开fork路径。不要为了运行它直接删除治理保护。
 
 ## 交付目标与两条路径
 
-### 第一阶段审计选择与实现边界（2026-09-10）
+### 第一阶段审计选择与实现边界（2026-09-10 决策，2026-09-13 更新）
 
 迁移和从零部署都采用**原生 Spend Logs 正文留痕优先**：批准范围内的Prompt/Response进入私有PostgreSQL，自建L3分片、独立Blob/HSM、恢复、双审批和保全只在明确选择增强方案时使用。基础版仍需受控查询、留存/备份、容量、写入故障及双凭据身份归因验收；不等同于取消审计。方案与报价见[基础版说明](litellm-content-audit-phase1-customer-brief-zh.md)及[审计成本口径](litellm-bom-cost-comparison-zh.md#6-员工与-agent-上下文审计成本影响)。
 
 | 项目 | 基础版交付目标 | 当前实现与待改事项 |
 | --- | --- | --- |
-| 原生正文开关 | 获批后启用`store_prompts_in_spend_logs`，控制配置覆盖与采集范围 | 默认仍为false；生成器与静态禁止正文门禁尚待适配，不提供未经实现的新JSON开关 |
-| 原文查看 | 原生UI/API或经过验证的受控查询路径，限定读取者 | 代理仍未开放原生UI/Spend Logs查询；自建`/audit`读的是独立Blob，不是原生查询替代品 |
-| Stage8发布与验收 | 原生留痕、归因、容量/清理、故障和基础监控验收；增强L3按选项验收 | 当前Stage8/application仍要求`auditRuntime`，Stage2/8证据仍含`l3_policy`、`durable_audit_recovery`等旧项；需改代码后再提供可执行基础版流程 |
-| 运维遥测 | 必要监控保留，collector按需，不复制正文 | 当前托管observability仍依赖auditRuntime；去耦合尚待实现，不能为上监控被迫开启L3 |
+| 原生正文开关 | 获批后启用`store_prompts_in_spend_logs`，控制配置覆盖与采集范围 | 默认及Stage6/7仍为false；显式`contentAudit`在托管Stage8生成正文与留存配置，不能使用旧静态overlay冒充原生发布 |
+| 原文查看 | 原生UI/API或经过验证的受控查询路径，限定读取者 | 显式nativeUi/nativeAuditRead已支持原生Logs列表及正文核心读取，固定镜像、真实PG及浏览器验证通过；完整管理UI功能仍待完成 |
+| Stage8发布与验收 | 原生留痕、归因、容量/清理、故障和基础监控验收；增强L3按选项验收 | 托管发布已区分`contentAudit`与`auditRuntime`，Stage2/8/9检查按模式选择；完整UI、留存恢复和真实批准仍待完成 |
+| 运维遥测 | 必要监控保留，collector按需，不复制正文 | 原生模式的observability不再依赖auditRuntime；已有遥测/guardrail/L3不能被原生发布静默关闭 |
 | 旧环境与回退 | 保留旧库、Key/Salt、备份及获批审计数据 | 不自动删除Blob/HSM Key/保全登记；关闭后续正文不删除历史，恢复可能使已清理正文重新出现 |
 
-**本次是文档方案对齐，不是原生模式已上线。** 不跳过Stage8进入Stage9，不将L3未执行项伪造为passed，也不删除已有强制审计binding来绕过失败关闭。下文`audit-foundation`、`audit`、`auditRuntime`、`auditGovernance`及audit-pause/recover/resume的操作说明仅适用于可选增强L3，不是基础版默认执行顺序。基本实现适配应由项目代码与workflow完成，不要求客户手改YAML/SQL或编写检查脚本。
+**配置、发布接线和合成落库测试通过，不是原生模式已上线。** 不跳过Stage8进入Stage9，不将L3未执行项伪造为passed，也不删除已有强制审计binding来绕过失败关闭。下文`audit-foundation`、`audit`、`auditRuntime`、`auditGovernance`及audit-pause/recover/resume的操作说明仅适用于可选增强L3，不是基础版默认执行顺序。实现及检查应由项目代码与workflow完成，不要求客户手改YAML/SQL或编写检查脚本。
+
+#### 原生模式配置与剩余验收
+
+从Stage2开始可在受控客户配置顶层显式加入以下决策，无需提前填写尚未生成的镜像digest或代理身份。实际Stage8发布时必须具备完整的`application`及`proxy`：
+
+```json
+"contentAudit": {
+  "mode": "native",
+  "retentionDays": 7,
+  "contentPolicyAccepted": true
+}
+```
+
+`retentionDays`支持1到30天，表示在线Spend Logs清理策略，不等于备份中的正文保留期限或精确到时删除。不能同时配置`auditRuntime`、`auditGovernance`、L3 `auditTeamId`绑定或`audit_reader`；已有L3需独立批准迁移，不能直接清除绑定绕过保护。普通API请求的`no_log`、消息日志覆盖及自定义callback元数据由既有字段白名单拒绝。
+
+Stage8/application按原有plan、批准、execute流程生成原生配置，不创建L3维护任务。可选`observability`复用独立collector，不需要audit Blob/HSM。原生决策从Stage2开始绑定证据；新增或变更决策需重新核验相关阶段，不自动迁移旧账本。
+
+Stage8要求`native_spend_logs`、`native_audit_access`、`native_retention_recovery`、`guardrail_scope`，以及按遥测选择要求`telemetry_received`或`telemetry_disabled`。Stage9发布声明须含`auditMode: native`及与配置一致的`telemetryEnabled`布尔值，要求对应原生证据。旧`stage9_release render`静态overlay入口不支持原生模式，须使用托管应用发布。
+
+固定镜像的隔离PostgreSQL测试已验证Chat JSON/SSE的请求正文位于`proxy_server_request`、响应位于`response`，`end_user`保存请求主体哈希、`api_key`保存vkey哈希。测试调用了日志队列刷新入口，因此**不证明生产写入时延、进程故障无丢失、所有协议或真实Azure身份**。原生UI/API受控查询核心已实测，但完整管理功能、留存/备份恢复和真实客户验收仍是发布阻断项。
+
+原生查看需显式设置`proxy.nativeUi=true`，并仅对获准管理binding设置`nativeAuditRead=true`。该批准允许对应代理管理员按其后台角色读取全局日志，不是逐Team授权或L3双审批。OIDC仍在代理完成，HttpOnly加密会话保留；UI可读的`token`Cookie只含短期会话校验值与展示信息，不含真实后台Key。UI请求必须经过会话/角色检查，代理再换成挂载的管理Key。
+
+读取白名单由[共享路由契约](../auth-proxy/native-ui-routes.json)同时约束代理与后台Key。列表分页最多100项，正文详情及会话查询另需读取批准；`/v2/key/info`的只读POST只接受有界哈希列表。新决策改变管理凭据合同，已有Key不会静默扩权：现有初始化器会拒绝旧合同，需另行完成批准的凭据迁移，不能删除旧Key/Vault状态后冒充首次安装。
+
+**不是完整原生UI兼容交付**：核心Logs列表/详情通过真实浏览器测试，仍有未开放辅助端点引发的提示；移动端详情布局未验收；Key/User/Team创建和预算修改等管理写入尚未支持。原生`/login`、`/sso`登录和Master Key登录不开放。客户要求完整管理UI时，这些缺口继续阻断迁移，不能擅自改为只读交付。
+
+#### 源镜像与目标ACR检查分阶段
+
+Stage3的`source_image_sbom_scan`由新增`Check public source image` workflow在GitHub托管runner执行，只检查仓库锁定的公共源镜像，不需要Azure登录或目标私网runner。失败也发布`source-image-<run_id>`中的摘要、SBOM和扫描结果，保留7天。当前策略仅阻断可修复CRITICAL，不能描述为零漏洞或已经验证上游发布者签名。
+
+Stage4建立私网连接后，才验收`target_image_signature_sbom`，继续使用既有镜像晋级和实际签名/拉取检查。旧Stage3/4检查集合不直接满足新契约；此拆分不是省略目标签名，也不解决尚未闭环的runner安装与授权。
+
+#### 一键本地验证
+
+在受控Linux开发环境运行`make test-local`或`make test-local-full`。完整模式需要现有Python/Node依赖、Docker、Azure CLI/Bicep、kubectl、Go、OpenSSL、Syft及Trivy；证书测试需要workflow固定的ACME依赖。原生浏览器测试使用锁定的Playwright开发依赖及`/usr/bin/google-chrome`，可用`BROWSER_EXECUTABLE_PATH`指定已批准浏览器。Azure CLI只用于本地模板编译，不登录或部署客户资源。
+
+完整模式执行11个检查组，包括真实PG/schema、JSON/SSE落库、原生UI核心读取、TLS、Prisma、collector、两种应用镜像构建和源镜像扫描。浏览器详细结果及合成截图在忽略目录`temp/native-ui-browser/`，其中`fullManagementAccepted`和`mobileAccepted`保持false。不能把核心读取通过说成所有页面功能已验收。
+
+完整模式同时运行固定LiteLLM 1.95.0到1.98.0的隔离升级：旧镜像digest为`sha256:af806882b7a6ced41658db5b6a7e98ed7b9b51d03b935e0417bf1c8552d688af`，先初始化旧库、写入合成预算及密文、dump/restore到空目标，再执行受控schema升级及应用/浏览器检查。旧版141个迁移在新版151个迁移中并非连续前缀；迁移器仅接受已核对的旧版历史指纹及其后续升级顺序，不改写历史、不自动baseline、不跳过未知迁移。合成记录及旧库历史保持不变，旧版加密值可由新版使用相同签名材料解密。结果在`temp/legacy-upgrade/report.json`。
+
+这验证的是指定镜像生成的小型合成数据库，不是客户实际镜像digest、完整数据或停机时长。必须先盘点实际数据库大小、Spend Logs/WAL增长、旧镜像digest和迁移历史，再测量备份、传输、恢复、升级、核验及入口切换总耗时。开发人员数量不能直接换算数据库容量；最终写入冻结、最终空目标选择、切流后写入对账和数据回退编排仍未完成。
+
+结果保存在忽略目录`temp/local-rehearsal/report.json`和`report.md`，包含Git SHA、工作区内容指纹、每项真实状态和未完成交付项。退出码0表示所选本地检查通过，1表示失败，2表示缺工具或必需测试被跳过；quick不是完整容器演练。本地报告不进入客户验收账本，`readyForCustomerMigration`始终为false。首次运行可能下载公共依赖/镜像及漏洞库；隔离数据库/模型测试不访问客户资源。
 
 目标是客户只提供必要的身份/既有资源ID、域名、模型连接和网络/治理决策，通过workflow完成配置检查、资源部署、应用发布、真实测试、证据保存和经批准的发布/回退。不把编写Bicep、Kubernetes YAML、SQL、协议测试代码或手算证据哈希作为客户职责。初始信任和权限仍需有权管理员批准，自动化不能自行提升权限。
 
@@ -33,26 +112,28 @@
 
 **当前状态不是完整产品交付**：模式路由、基础设施入口、新建网络、独立schema迁移和Azure应用入口已经实现；应用清单自动生成、身份/秘密完整接线及各阶段云端实测尚未全部完成。下文原Stage0/1/5的备份恢复操作仅适用于迁移。`MIGRATION_MANIFEST_YAML`和手工报告是过渡接口，不能作为上述目标完成的依据。
 
-## 1. 四个入口
+## 1. 主要入口
 
 | Actions 名称 | 模式/操作 | 作用 |
 | --- | --- | --- |
 | Customer staged migration | guide / config-check / preflight / what-if | 指引、无前序证据的配置检查、带证据的就绪检查、原有保守预览；不部署 |
 | Customer infrastructure deployment | plan / deploy | 对选定阶段和组件预览，批准后真正执行 ARM 部署 |
 | Customer private runtime operations | plan / execute | 私网 runner 上备份恢复、旧环境探针加固、监控接入、目标库恢复、客户应用清单发布 |
-| Customer stage acceptance | draft / record | 生成 pending 报告骨架，或由已审核的真实报告生成证据账本 |
+| Customer stage acceptance | draft / confirm / record | 生成清单；单人按实际检查人工确认；保留原外部报告兼容入口 |
+| Customer private runner checks | check_target=false/true | 私网runner工具、身份范围和所选AKS只读检查，不创建资源 |
 
 `plan` 不要求前序证据，便于前期评审，但有实际资源依赖的模板必须等依赖就绪；计划成功不是进入该阶段的批准。`deploy` / `execute` 要求前序阶段已验收。阶段0没有前序证据，Secret 初始使用 `[]`。阶段2是决策和验收，没有资源部署。
 
 ### 单人运维
 
-客户确实只有一位运维时，在私有客户配置顶层加入：
+客户确实只有一位运维时，在受控客户配置顶层加入：
 
 ```json
 "governance": {
   "approvalMode": "single-operator",
   "approverObjectIds": ["REPLACE_OPERATOR_USER_OBJECT_ID"],
-  "singleOperatorRiskAccepted": true
+  "singleOperatorRiskAccepted": true,
+  "githubLogin": "REPLACE_GITHUB_LOGIN"
 }
 ```
 
@@ -60,19 +141,33 @@
 
 该开关仅适用于迁移实施/发布审批。选用增强L3时，不改变其原文双审批、反自审批和保全规则；基础版原生查询按已验证的原生权限和客户批准的有限读取者治理，不宣称自动具备L3逐次审批。只有一位IT运维也不意味着所有人都可读正文，业务/合规人员可参与授权决策。
 
+### 不手写JSON的阶段确认
+
+1. 运行`Customer stage acceptance`，选择environment、stage、operation=draft；Summary列出本阶段check ID，下载并在本机解密待检查报告。
+2. 运行对应操作，人工核对真实结果，包括需要实际客户端或外部网络验证的项目。
+3. 全部检查完成后再次运行同一workflow，operation=confirm；`reviewed_run_id`填成功的draft run ID，`checked_items`填写Summary列出的全部ID且不重复，`evidence_notes`填简短非秘密结果，`confirm_environment`再次填写环境名。
+4. 只有配置的GitHub login本人可以确认和重跑；代码/环境/配置必须匹配，草稿须在7天内。workflow自动从已配置的单人策略取得Entra批准人ID，生成加密账本，下一阶段自动读取。
+
+这是**人工确认记录**，`independentlyVerified=false`，不是自动证明技术事实。任何未验证或失败项都不能确认。此模式不需要`MIGRATION_REPORT_JSON`、`MIGRATION_REPORT_URL`和`MIGRATION_APPROVERS_JSON`；原`record`入口继续支持已审核外部报告及双人策略。重新确认一个阶段会使后续旧记录失效。
+
 ## 2. 一次性前置准备
 
-1. 将项目导入客户私有仓库，启用默认分支保护、PR/CI 和 `prod` Environment。新增写入 workflows 只允许私有仓库的默认分支，GitHub Environment 审批是否可用取决于套餐。不要为方便移除仓库/分支检查。
+私网执行机按[客户私网Runner准备说明](customer-private-runner-preparation-zh.md)一次性人工准备即可，无需先完成自动建机、JIT或工具链镜像工厂。该说明列出规格、网络、工具、注册变量和实际就绪检查。
+
+1. 客户fork公开仓库或使用私有副本，启用默认分支保护、PR/CI和所选Environment。主要执行workflow要求手动触发受保护默认分支，GitHub Environment审批按套餐和已批准单人/双人政策配置，不移除分支保护来绕过检查。
 2. 平台管理员创建部署 OIDC 身份及私网运维 OIDC 身份。issuer 为 `https://token.actions.githubusercontent.com`，audience 为 `api://AzureADTokenExchange`，subject 为 `repo:组织/仓库:environment:prod`。仓库改名后同步信任关系。
 3. 初始化目标 RG 需要订阅级创建资源组和嵌套部署的权限；后续基础设施尽量限定目标 RG。旧监控、旧 AKS 操作单独授权旧范围。涉及角色分配需要对应范围的受控 RBAC 管理权限，不能仅靠 Contributor，也不默认授予订阅 Owner。跨订阅模型账号的角色分配分别授权对应账号范围。
-4. 准备专属、短生命周期 Linux x64 私网 self-hosted runner，能访问旧 AKS API、新 Private AKS、备份 Blob PE、PG/Redis/Key Vault PE 和私有 ACR，同时有获准出站。只接收受保护私有仓库作业，不开放生产服务公网。Windows 管理员仍可通过浏览器触发 Actions；本地复现使用受控 Linux/WSL，不能把 chmod 等 Linux 操作当作 Windows 原生支持。
+4. 一次性准备专属 Linux x64 私网 self-hosted runner，可人工安装和注册，在迁移期间复用，不强制短生命周期或自动回收。它应能访问旧 AKS API、新 Private AKS、备份 Blob PE、PG/Redis/Key Vault PE 和私有 ACR，同时有获准出站。只接收受保护私有仓库作业，不开放生产服务公网。Windows 管理员仍可通过浏览器触发 Actions；Linux命令由实施人员在执行机上准备，不作为Windows原生命令使用。
 5. runner 安装 Python 3.13、PyYAML、Azure CLI/Bicep、kubectl、kubelogin、Docker；恢复步骤另需匹配服务器版本的 PostgreSQL 客户端及支持系统 CA 的 libpq。Docker 需要足够磁盘/内存；备份含客户数据，runner 应使用加密磁盘。Docker 权限近似主机管理权限，隔离此 runner。
+
+Runner工程状态补记（2026-09-13）：[注册生命周期模块](../scripts/runner_lifecycle.py)、[ARM适配器](../scripts/runner_arm.py)和[作业编排核心](../scripts/runner_job.py)保留为可选自动化代码，尚未形成自动建机与调度workflow。本次不要求完成这些模块，也不要求客户先提供Gallery工具链镜像；按准备说明从标准Linux VM人工安装工具、注册runner并验证即可。实际runner、网络及权限仍必须就绪，不能以本地接口测试或GitHub列表显示Idle替代真实作业检查。
 
 ### Variables / Secrets
 
 | 名称 | 存放位置 | 内容 |
 | --- | --- | --- |
-| `CUSTOMER_CONFIG_JSON` | Environment Secret 推荐，兼容 Variable | 完整客户 JSON，不是文件路径；Secret 优先。建议改用 Secret 避免 Actions 自动打印 step env |
+| `CUSTOMER_CONFIG_JSON` | Environment Secret，主要迁移入口必需 | 完整客户JSON，不是文件路径；公开fork不读取同名Variable回退 |
+| `WORKFLOW_ARTIFACT_KEY` | Environment Secret，必需 | 独立随机32字节的base64值，用于计划/结果附件加密；保留至相关计划与账本不再需要 |
 | `AZURE_CLIENT_ID` | Environment Variable | 基础设施部署身份的应用/托管身份 Client ID |
 | `AZURE_RUNTIME_CLIENT_ID` | Environment Variable | 私网运行操作身份的 Client ID，不能填个人用户 ID |
 | `AZURE_DATABASE_CLIENT_ID` | Environment Variable | 仅database-roles使用的已授权数据库管理员OIDC Client ID；需为配置的PG管理员服务主体，或获准管理员组成员；不支持模拟个人用户登录 |
@@ -88,9 +183,9 @@
 | `PRIVATE_API_INGRESS_CLASS` / `PRIVATE_ADMIN_INGRESS_CLASS` | Environment Variable | 仅客户自管controller路径使用；本项目private-ingress使用固定文件路由，不创建/监听IngressClass |
 | `POSTGRES_MIGRATION_USER` | Environment Variable | 使用databaseAccess时自动为llmgw_migrator，可省略；旧自管角色路径需提供已授权的Entra角色名 |
 | `MIGRATION_RESTORE_BLOB` / `MIGRATION_BACKUP_SHA256` | Environment Variable | 从阶段0报告取得的 pre-change blob 名和文件哈希 |
-| `MIGRATION_REPORT_JSON` | Environment Secret | 填写完实测结果的验收报告 JSON；四项/本阶段全部真实通过才能 record |
-| `MIGRATION_REPORT_URL` | Environment Secret | 固定的受访问控制 HTTPS 报告引用，无凭据、SAS 或查询串 |
-| `MIGRATION_APPROVERS_JSON` | Environment Secret | 实际批准人的用户 Object ID 数组；数量与 governance 匹配 |
+| `MIGRATION_REPORT_JSON` | 仅record兼容入口的Environment Secret | confirm不需要；外部报告必须包含实际检查结果 |
+| `MIGRATION_REPORT_URL` | 仅record兼容入口的Environment Secret | confirm自动使用其运行URL；旧入口要求安全HTTPS报告引用 |
+| `MIGRATION_APPROVERS_JSON` | 仅record兼容入口的Environment Secret | confirm自动使用已批准的单人策略；旧入口仍需匹配governance |
 | `MIGRATION_RELEASE_JSON` | Environment Secret | 阶段9单独的发布报告，字段参照 stage9_release.py；另含当前 revision 和阶段9 configSha256 |
 
 运行身份需要：AKS Cluster User 获取凭据权限、对应集群中受限 Kubernetes 操作权限；阶段0需要读取旧部署/Pod及 postgres exec，阶段1允许两个旧 Deployment 的受控 patch；新集群允许目标命名空间发布。Blob 操作需要数据平面权限；PG 恢复需要数据库内角色权限。Azure RBAC 不自动授予数据库内权限。首次 OIDC 信任、初始授权、公司 DNS/Entra 审批不由应用 workflow 自行提升权限。
@@ -102,15 +197,15 @@
 | 阶段 | 具体入口与顺序 | 仍需人工准备/验证 |
 | --- | --- | --- |
 | 0 | infrastructure: bootstrap → backup；runtime: backup-restore / execute；acceptance: draft/record | 备份 Owner、runtime 身份 Object ID、私网 runner、旧库版本；业务协议、密文读取、关键行数及角色权限复核 |
-| 1 | infrastructure: legacy-logging（无旧日志库时）→ runtime: monitoring-onboard → infrastructure: monitoring；runtime: legacy-hardening | 沿用真实旧 Workspace，不自动重定向；两个旧工作负载的变更窗口、告警邮件实际收到、回滚快照保管 |
+| 1 | 旧日志/monitoring-onboard/monitoring；legacy-hardening；可选legacy-access-restrict，恢复用legacy-access-restore | 来源限制只覆盖批准入口，必须实测原客户可用和未批准来源拒绝；不自动实现管理面私网隔离 |
 | 2 | acceptance: draft → 客户架构决策；record需匹配已适配的审计证据契约 | 网络、成本、身份Owner、PG认证/HA、协议与原生留痕范围/留存/故障策略；L3增强另行选择，当前l3_policy字段尚待适配 |
 | 3 | infrastructure: platform；既有 Promote LiteLLM image 在网络就绪后执行 | 签名/SBOM/扫描；私有 ACR 拉取需要受控私网执行；不打开 ACR 公网解决问题 |
 | 4 | infrastructure: platform；runtime: cluster-bootstrap、monitoring-onboard、private-ingress | 私网runner/路由、SKU/出站、两份TLS PEM Secret ID、API/admin来源CIDR；入口实际TLS验证自动执行，后端认证另验收 |
 | 5 | infrastructure: platform；runtime: database-roles → backend-secrets → restore-target（仅迁移）→ schema-migrate；均先plan再execute | 迁移身份需读旧litellm-env；后台Vault初始化权限由Stage5按databaseAccess派生；缺少旧Salt或目标密钥不一致时阻断。真实Azure/CSI验收仍需执行 |
 | 6 | Promote LiteLLM image选择build_azure_runtime；runtime: application（plan → execute），配置application后自动生成 | 提供批准的派生镜像digest和模型部署映射；不填整份YAML。schema/密钥回执及签名自动验证，负载/故障/Redis/亲和仍需实测 |
 | 7 | infrastructure: proxy-foundation；runtime: entra-apps → entra-access → admin-credentials → proxy-credentials → application，均先plan再批准执行 | 提供分离的Entra初始化/授权身份、客户端及准入主体；只有管理绑定填写模型权限。API客户端自带vkey，模型/预算在LiteLLM管理；自动建立精确角色分配和单用户同意，真实登录及双凭据续期仍待验收 |
-| 8 | 基础版原生模式发布流程待适配；仅增强L3执行audit-foundation → audit → application | 基础版验证Spend Logs正文/身份关联、读取权限、清理/备份、容量与故障；选择增强后再验L3可靠交付/治理。不能跳过旧门禁或用L3关闭冒充原生留痕通过 |
-| 9 | infrastructure: origin → edge（初始不启流量）；完成发布报告后 edge + release=true（plan → deploy） | PLS连接人工批准、源站证书、FDID/来源限制、限定试点客户端、数据库最终同步；外部DNS变更另行审批执行 |
+| 8 | 基础版contentAudit → application；按需observability；只有增强L3才执行audit-foundation/audit | 原生正文/身份、读取、清理/备份及故障仍须实际验证，不能将增强模式旧检查填假通过 |
+| 9 | infrastructure: origin → edge（不启流量）；runtime: edge-bind；实际验证和发布报告后edge + release=true | edge-bind只绑定API并等待rollout，不启流量；PLS、TLS、请求校验及最终数据同步另验 |
 
 ### 阶段0从零启动
 
@@ -123,6 +218,30 @@
 ### Stage1变更范围
 
 `legacy-hardening` 读取现有 Deployment，仅补缺失的健康探针，并将 postgres 策略设为 Recreate；保留镜像、env、Secret引用、PVC和已有资源限额。逐个工作负载等待 rollout，不做密码轮换、PVC重建或数据库清理。资源Version条件防止覆盖并发变更；失败后保留现场，不自动回滚到未经审查状态。客户应在执行前通过原受控快照流程保管旧清单；Actions 不上传含旧密码的 Deployment 快照。
+
+#### 旧入口来源限制与恢复
+
+在客户配置顶层显式设置`legacyAccess`，在Stage1分别运行`legacy-access-restrict`或`legacy-access-restore`，均先plan、审核密文、再execute并填写计划run ID：
+
+```json
+"legacyAccess": {
+  "mode": "nginx-ingress",
+  "allowedCidrs": ["10.20.0.0/24"],
+  "accessImpactAccepted": true
+}
+```
+
+示例CIDR必须替换为真实批准来源，包括客户端实际出口；不能直接使用示例或`0.0.0.0/0`。NGINX路径限定旧`litellm-ingress`及ClusterIP `litellm-mi-proxy:4000`，只修改whitelist-source-range；直连LoadBalancer模式只改同名Service的loadBalancerSourceRanges，不改变Service类型或端口。发现同命名空间内额外同selector Service、额外指向该Service的Ingress或自定义snippet时停止，要求单独核对。
+
+配置从Stage1开始绑定证据，不使Stage0备份记录失效；Stage1增加`legacy_source_access`实际网络检查项。规则只能收紧已有白名单。旧集群ConfigMap `llmgw-legacy-access`保存本次原值/目标值和对象指纹，失败后重新plan可继续；restore恢复本次来源字段且拒绝其他spec/相关元数据漂移。操作身份需要列出该namespace的Service/Ingress、patch指定入口、创建/读取/patch此检查点的权限，不需要读取证书Secret。
+
+**不等于全面关闭公网或隔离管理面：** 该限制作用于整个旧入口；直连4000仍保留原端口，NGINX实际客户端IP取决于controller/LB配置，其他namespace、共享controller/NodePort/NSG旁路及证书挑战路由另行检查。不能仅凭配置回读确认拒绝效果；外部未批准来源、批准客户端和管理员的实际正反向访问必须通过。选择restore可能重新开放原先允许的来源，须审核后明确执行。
+
+#### Front Door与托管API绑定
+
+先部署Stage9禁用流量的edge，再执行runtime的`edge-bind`（Stage9、plan → execute）。动作核对实际Front Door资源与部署输出，只给`llm-api-proxy`设置`FRONT_DOOR_ID`并等待rollout，不修改admin、不改DNS。回执保存为目标RG的`llmgw-<environment>-s9-edge-bind`部署输出，运行身份需要写这个元数据回执的权限。
+
+托管应用后续Stage7/8发布会保留已有ID，不会静默移除；不同Front Door ID拒绝覆盖。正式启流量前要求同版本/配置的绑定回执，回执不是独立的持续现场证明，仍须确认实际Pod、FDID拒绝、TLS、Private Link审批及业务路径。直接访问私有源站时需按批准测试携带正确FDID；它不是秘密，也不能替代企业Token/vkey或网络隔离。
 
 ### Stage4自动私有入口
 

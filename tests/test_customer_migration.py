@@ -102,6 +102,31 @@ class CustomerMigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_evidence([self.record], 1, self.config, self.revision, self.now)
 
+    def test_supply_chain_gates_separate_source_from_private_target(self):
+        self.assertIn("source_image_sbom_scan", stage_checks(3, self.config))
+        self.assertNotIn("target_image_signature_sbom", stage_checks(3, self.config))
+        self.assertIn("target_image_signature_sbom", stage_checks(4, self.config))
+        old_checks = {
+            3: ["oidc_scope", "image_signature_sbom", "target_isolation"],
+            4: ["private_dns_egress", "private_runner", "workload_identity", "private_ingress"],
+        }
+        for stage, checks in old_checks.items():
+            with self.subTest(stage=stage), self.assertRaisesRegex(ValueError, "incomplete"):
+                validate_evidence([{**self.record, "stage": stage, "checks": checks}], stage, self.config, self.revision, self.now)
+
+    def test_native_stage2_decision_does_not_require_future_images_or_proxy(self):
+        original = copy.deepcopy(self.config)
+        self.config["contentAudit"] = {"mode": "native", "retentionDays": 7, "contentPolicyAccepted": True}
+        validate_config(self.config, "test")
+        self.assertNotIn("application", self.config)
+        self.assertNotIn("proxy", self.config)
+        for stage in (0, 1):
+            self.assertEqual(stage_fingerprint(original, stage), stage_fingerprint(self.config, stage))
+        self.assertNotEqual(stage_fingerprint(original, 2), stage_fingerprint(self.config, 2))
+        self.assertIn("content_audit_policy", stage_checks(2, self.config))
+        self.assertIn("native_audit_access", stage_checks(8, self.config))
+        self.assertNotIn("durable_audit_recovery", stage_checks(8, self.config))
+
     def test_cli_preflight_uses_environment_config_without_cloud_calls(self):
         environment = {"CUSTOMER_CONFIG_JSON": json.dumps(self.config), "MIGRATION_EVIDENCE_JSON": "[]", "MIGRATION_REVISION": self.revision, "AZURE_TENANT_ID": self.config["azure"]["tenantId"], "AZURE_SUBSCRIPTION_ID": self.config["azure"]["subscriptionId"]}
         with patch.dict("os.environ", environment, clear=True), patch("sys.argv", ["migration", "--stage", "0", "--mode", "preflight", "--environment", "test"]), patch("scripts.customer_migration.subprocess.run") as cloud:

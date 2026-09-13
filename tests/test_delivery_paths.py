@@ -13,11 +13,17 @@ from scripts.migration_evidence import draft_report, record_evidence
 from scripts.migration_runtime import validate_action
 from scripts.workflow_artifacts import load_evidence
 from tests.test_customer_migration import customer_config
+from tests.test_proxy_config import proxy_customer
 
 
 class DeliveryPathTests(unittest.TestCase):
-    def configuration(self, mode):
-        config = customer_config()
+    def configuration(self, mode, audit="l3"):
+        config = customer_config() if audit == "l3" else proxy_customer()
+        if audit == "native":
+            config["contentAudit"] = {"mode": "native", "retentionDays": 7, "contentPolicyAccepted": True}
+            config["proxy"]["bindings"] = [binding for binding in config["proxy"]["bindings"] if binding["role"] != "audit_reader"]
+            for binding in config["proxy"]["bindings"]:
+                binding.pop("auditTeamId", None)
         config["deploymentMode"] = mode
         if mode == "greenfield":
             config.pop("legacy")
@@ -29,9 +35,9 @@ class DeliveryPathTests(unittest.TestCase):
     def test_recorded_artifacts_flow_between_every_applicable_stage_without_secret_replacement(self):
         revision = "a" * 40
         now = datetime.now(timezone.utc)
-        for mode in ("migration", "greenfield"):
-            with self.subTest(mode=mode):
-                config = self.configuration(mode)
+        for mode, audit in ((mode, audit) for mode in ("migration", "greenfield") for audit in ("l3", "native")):
+            with self.subTest(mode=mode, audit=audit):
+                config = self.configuration(mode, audit)
                 ledger, artifacts = [], {}
                 def api(route):
                     if "/workflows/" in route:

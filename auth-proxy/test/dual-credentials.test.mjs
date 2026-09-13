@@ -4,7 +4,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import { createGateway } from '../proxy.mjs';
-import { apiCredentials, validateConfig } from '../policy.mjs';
+import { apiCredentials, sanitizeBody, validateConfig } from '../policy.mjs';
 
 const tenant = '11111111-1111-1111-1111-111111111111';
 const subject = '22222222-2222-2222-2222-222222222222';
@@ -38,6 +38,14 @@ test('duplicate, missing and ambiguous credential headers are rejected', () => {
   for (const key of ['', 'first,second', 'Bearer key', 'key\nvalue', 'key'.repeat(400)]) {
     assert.throws(() => apiCredentials({ headers: { ...headers, 'x-litellm-api-key': key }, rawHeaders }));
   }
+});
+
+test('API cannot override native content logging or inject callback metadata', () => {
+  const body = { model: 'coding', messages: [{ role: 'user', content: 'synthetic' }] };
+  for (const override of [{ no_log: true }, { turn_off_message_logging: true }, { metadata: { no_log: true } }, { litellm_params: { no_log: true } }, { success_callback: ['unapproved'] }]) {
+    assert.throws(() => sanitizeBody({ ...body, ...override }, config.bindings[0], subject));
+  }
+  assert.equal(sanitizeBody(body, config.bindings[0], subject).user, subject);
 });
 
 test('both credentials required; LiteLLM alone decides key and model permissions', { timeout: 5000 }, async context => {

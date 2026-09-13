@@ -18,7 +18,8 @@ def object_id(value):
 
 def proxy_settings(config):
     settings = config.get("proxy", {})
-    require(isinstance(settings, dict) and {"apiClientIds", "bindings"}.issubset(settings) and not set(settings) - {"apiClientIds", "bindings", "image"}, "proxy requires apiClientIds and bindings, with an optional approved image")
+    require(isinstance(settings, dict) and {"apiClientIds", "bindings"}.issubset(settings) and not set(settings) - {"apiClientIds", "bindings", "image", "nativeUi"}, "proxy requires apiClientIds and bindings, with optional approved image and nativeUi")
+    require(type(settings.get("nativeUi", False)) is bool, "nativeUi must be an explicit boolean")
     if "image" in settings:
         registry = config["parameters"]["platform"]["containerRegistryName"].lower()
         require(isinstance(settings["image"], str) and re.fullmatch(re.escape(registry) + r"\.azurecr\.io/[a-z0-9][a-z0-9/._-]*@sha256:[0-9a-f]{64}", settings["image"]) is not None, "Proxy image must pin a digest in the approved ACR")
@@ -29,10 +30,12 @@ def proxy_settings(config):
     model_groups = {item["modelGroup"] for item in config.get("application", {}).get("models", [])}
     identities = set()
     for binding in bindings:
-        require(isinstance(binding, dict) and not set(binding) - {"oid", "plane", "role", "models", "disabled", "auditTeamId", "principalType", "clientIds"}, "Unexpected proxy binding fields")
+        require(isinstance(binding, dict) and not set(binding) - {"oid", "plane", "role", "models", "disabled", "auditTeamId", "principalType", "clientIds", "nativeAuditRead"}, "Unexpected proxy binding fields")
         identity = (binding.get("plane"), object_id(binding.get("oid")))
         require(identity[0] in {"api", "admin"} and identity not in identities, "Invalid plane or duplicate identity binding")
         identities.add(identity)
+        if "nativeAuditRead" in binding:
+            require(type(binding["nativeAuditRead"]) is bool and identity[0] == "admin" and binding.get("role") in {"proxy_admin", "proxy_admin_viewer"} and settings.get("nativeUi") is True, "Native content read requires an approved native UI administrator")
         principal_type = binding.get("principalType", "User")
         require(principal_type in {"User", "ServicePrincipal"} and (identity[0] != "admin" or principal_type == "User"), "Admin bindings require users; API bindings require User or ServicePrincipal")
         if "clientIds" in binding:
@@ -71,12 +74,14 @@ def proxy_policy(config, applications):
         binding = {"oid": object_id(item["oid"]), "plane": item["plane"], "role": item["role"], "disabled": item.get("disabled", False), "principalType": item.get("principalType", "User")}
         if "clientIds" in item:
             binding["clientIds"] = [object_id(value) for value in item["clientIds"]]
+        if "nativeAuditRead" in item:
+            binding["nativeAuditRead"] = item["nativeAuditRead"]
         if item["plane"] == "admin" and item["role"] != "audit_reader":
             binding.update(models=list(item["models"]), keyFile=credential_name(config["azure"]["tenantId"], item))
         if "auditTeamId" in item:
             binding["audit"] = {"capture": True, "teamId": item["auditTeamId"]}
         bindings.append(binding)
-    return {"tenantId": object_id(config["azure"]["tenantId"]), "apiHost": hosts["api"], "adminHost": hosts["admin"], "apiAudience": api_client, "apiClientIds": [object_id(value) for value in settings["apiClientIds"]], "adminClientId": admin_client, "bindings": bindings}
+    return {"tenantId": object_id(config["azure"]["tenantId"]), "apiHost": hosts["api"], "adminHost": hosts["admin"], "apiAudience": api_client, "apiClientIds": [object_id(value) for value in settings["apiClientIds"]], "adminClientId": admin_client, "bindings": bindings, "nativeUi": settings.get("nativeUi", False)}
 
 
 def entra_documents(config, api_app_id=None):

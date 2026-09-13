@@ -11,7 +11,9 @@ READMES = (
     "tests/README.md", "tests/README_ZH.md", "infra/README_ZH.md",
     "deploy/README_ZH.md", "auth-proxy/README_ZH.md", ".github/README_ZH.md",
     "docs/customer-deployment-workflows-zh.md",
+    "docs/customer-private-runner-preparation-zh.md",
     "docs/litellm-content-audit-phase1-customer-brief-zh.md",
+    "docs/litellm-ingress-tls-certificate-design-zh.md",
     "docs/litellm-bom-cost-comparison-zh.md",
     "docs/litellm-azure-security-hardening-zh.md",
     "docs/litellm-stage7-entra-proxy-domains-2026-09-07.md",
@@ -26,6 +28,19 @@ READMES = (
 
 
 class ProjectDocumentationTests(unittest.TestCase):
+    def test_public_fork_setup_explains_secret_and_manual_confirmation_contract(self):
+        for name in ("README.md", "README_ZH.md", "docs/customer-deployment-workflows-zh.md", "docs/customer-private-runner-preparation-zh.md"):
+            text = (ROOT / name).read_text()
+            with self.subTest(document=name):
+                self.assertIn("fork", text)
+                self.assertIn("WORKFLOW_ARTIFACT_KEY", text)
+                self.assertIn("Customer private runner checks", text)
+        guide = (ROOT / "docs/customer-deployment-workflows-zh.md").read_text()
+        self.assertIn("scripts.workflow_security open", guide)
+        self.assertIn("independentlyVerified=false", guide)
+        self.assertIn("legacy-access-restore", guide)
+        self.assertIn("edge-bind", guide)
+
     def test_current_guides_select_native_audit_without_claiming_rollout(self):
         for name in ("README.md", "README_ZH.md", "docs/customer-migration-guide-zh.md", "docs/customer-deployment-workflows-zh.md"):
             text = (ROOT / name).read_text()
@@ -37,7 +52,9 @@ class ProjectDocumentationTests(unittest.TestCase):
         guide = (ROOT / "docs/customer-deployment-workflows-zh.md").read_text()
         self.assertIn("不是原生模式已上线", guide)
         self.assertIn("不跳过Stage8进入Stage9", guide)
-        self.assertIn("当前托管observability仍依赖auditRuntime", guide)
+        self.assertIn("原生模式的observability不再依赖auditRuntime", guide)
+        self.assertIn("readyForCustomerMigration", guide)
+        self.assertIn("原生UI/API受控查询", guide)
 
     def test_audit_costs_describe_native_storage_and_optional_enhancement(self):
         text = (ROOT / "docs/litellm-bom-cost-comparison-zh.md").read_text()

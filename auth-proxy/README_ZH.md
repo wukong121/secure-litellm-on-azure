@@ -29,6 +29,16 @@
 
 管理面OIDC、Cookie、CSRF和管理凭据保持独立，不接受API双凭据替代管理登录。此次只切换API认证，不启用原生正文日志、不关闭已有强审计约束、不开放新协议。
 
+## 原生UI与正文读取核心（2026-09-13）
+
+托管客户配置可显式设置`proxy.nativeUi=true`，对获准的`proxy_admin`或`proxy_admin_viewer`管理binding设置`nativeAuditRead=true`。默认关闭，不改变API双凭据。后台原生采集另需`contentAudit`及Stage8发布，参见[当前配置与边界](../docs/customer-deployment-workflows-zh.md)。
+
+登录仍由代理OIDC完成。浏览器保留5分钟的HttpOnly加密会话；为兼容固定LiteLLM UI，另发可读`token`Cookie，里面只有展示身份、角色与随机会话校验值，不含管理Key。它本身不能调用后台或充当管理会话；提交的Authorization校验值须与HttpOnly会话配对，写入仍须同源。静态资源也要求管理会话，后台Set-Cookie不透传。
+
+[共享路由契约](native-ui-routes.json)列出基础读取与正文接口，Python凭据生成和Node代理同时使用。正文批准允许该管理角色读取全局日志，不是Team级隔离；未批准者拒绝访问。创建Key/User/Team、预算修改、配置写入等仍不开放，不能将UI出现按钮当作功能已实现。新增合同不会自动扩展已存在Key权限，需要单独批准的凭据迁移。
+
+固定镜像、真实隔离PG与Playwright已验证原生Logs列表和正文查看、浏览器不持有后台Key、查看者不能创建Key。仍有辅助API被拒导致的提示，移动端详情未通过可用性验收，真实Entra登录未测试，因此这是**核心读取桥接，不是完整原生管理UI交付**。`RUN_AZURE_SCHEMA_CONTAINER_TESTS=1 RUN_NATIVE_UI_BROWSER_TESTS=1 .venv/bin/python -m unittest -b tests.test_azure_schema_container`可复跑，合成截图位于忽略的`temp/native-ui-browser/`。
+
 ## 阶段9回源补充检查
 
 Stage9 API Deployment显式注入`FRONT_DOOR_ID`，启动时必须是有效GUID；业务请求的`X-Azure-FDID`须匹配，重复/缺失/错误值拒绝，之后仍执行Entra认证和路由授权。admin代理不允许配置该参数。此前Stage7/8未设置时行为保持不变。内部健康探针仍可用，但Front Door公网路由不包含探针路径。
@@ -37,7 +47,7 @@ FDID不是Secret，不能替代PLS连接审批、API-only私有LB和NSG源站防
 
 ## 阶段8可选增强L3能力
 
-2026-09-10第一阶段选择原生Spend Logs正文留痕，本节自建L3、独立`/audit`查看、审批/保全与恢复仅是增强分支。原生模式尚待生成器、发布/证据门禁和查询接线；当前`auditTeamId`/binding.audit.capture仍代表强制自建L3，不能认为原生开关会自动满足它，也不要直接删除binding来绕过失败关闭。普通日志/Trace/artifact仍不能复制正文；已有L3数据、审批与保留要求不因改方案失效。详见[部署指南](../docs/customer-deployment-workflows-zh.md)。
+2026-09-10第一阶段选择原生Spend Logs正文留痕，本节自建L3、独立`/audit`查看、审批/保全与恢复仅是增强分支。2026-09-13已接入原生生成器、模式化发布/证据门禁和核心查询；当前`auditTeamId`/binding.audit.capture仍代表强制自建L3，不能认为原生开关会自动满足它，也不要直接删除binding来绕过失败关闭。普通日志/Trace/artifact仍不能复制正文；已有L3数据、审批与保留要求不因改方案失效。详见[部署指南](../docs/customer-deployment-workflows-zh.md)。
 
 L3首期实现包括按身份选择采集、私有Blob适配器、有界JSON/SSE响应、元数据索引、独立`audit_reader`审批查看、`/audit`页面和留存/保全清理。默认关闭，不改变阶段7已关闭协议。详见[阶段8实施记录](../docs/litellm-stage8-l3-audit-observability-2026-09-07.md)。
 
@@ -109,9 +119,10 @@ API映射role只能为`internal_user`；管理映射只能为`proxy_admin`或`pr
 - `llm-admin`：根路径跳转到`GET /auth/login`启动OIDC，回调为`/auth/callback`；`GET /auth/session`返回角色和CSRF值；`POST /auth/logout`结束本地会话。
 - 管理读：`GET /model/info`、`/team/info`、`/key/info`；后端身份仍需相应权限。
 - 管理写：仅`proxy_admin`可POST `/key/block`、`/key/unblock`，必须同源Origin和正确`X-CSRF-Token`；body只接受`key`字段。
-- 关闭：原生`/ui`、`/login`、`/sso`、`/fallback/login`、Key创建、模型写配置、WebSocket、Files、MCP、Responses对象读取/删除、`previous_response_id`、item references、文件引用、加密上下文和`store=true`。
+- 可选原生读取：显式nativeUi开启`/ui`及固定静态资源前缀和读取白名单，nativeAuditRead另控正文查看；默认仍关闭。
+- 关闭：原生`/login`、`/sso`、`/fallback/login`、Key创建、模型写配置、WebSocket、Files、MCP、Responses对象读取/删除、`previous_response_id`、item references、文件引用、加密上下文和`store=true`。
 
-关闭的路径返回拒绝，不会透明绕过认证。尤其不能把本组件替换到当前Codex/Agent生产入口：现有WebSocket与加密多轮上下文会被拒绝。管理OIDC完成不等于LiteLLM原生UI无感登录完成；后续UI桥接必须验证OSS授权与Cookie边界。
+关闭的路径返回拒绝，不会透明绕过认证。尤其不能把本组件替换到当前Codex/Agent生产入口：现有WebSocket与加密多轮上下文会被拒绝。管理OIDC及核心UI读取桥接完成不等于完整原生管理操作通过验收。
 
 请求JSON上限1MiB，只允许显式字段，禁用body中的上游凭据/URL/metadata/header覆盖。`user`重写为tenant+oid的哈希，仅用于归因，不替代后端授权。API vkey仅经专用Header输入，企业Token与其他非允许Header不转发；响应不透传内部Set-Cookie或Location。日志仅输出请求关联、安全元数据及Key指纹，不输出Token、body、query、原始凭据或异常细节。
 

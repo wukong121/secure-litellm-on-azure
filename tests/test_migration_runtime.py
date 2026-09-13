@@ -8,11 +8,123 @@ import unittest
 from unittest.mock import Mock, patch
 
 from scripts.customer_migration import ROOT
+from scripts.migration_deploy import group_id
 from scripts.migration_runtime import backup_restore, check_application, hardened_spec, monitoring_onboard, publish, target_database_restore
 from tests.test_customer_migration import customer_config
+from scripts.legacy_access import access_operation, access_patch, access_settings, access_target, access_view, restricted_value
 
 
 class RuntimeSafetyTests(unittest.TestCase):
+    def legacy_access_fixture(self, ingress=False):
+        service = {"metadata": {"name": "litellm-mi-proxy", "uid": "original", "resourceVersion": "1"}, "spec": {"type": "ClusterIP" if ingress else "LoadBalancer", "selector": {"app": "litellm-mi-proxy"}, "ports": [{"port": 4000, "targetPort": 4000}]}}
+        config = customer_config()
+        config["legacyAccess"] = {"mode": "nginx-ingress" if ingress else "load-balancer", "allowedCidrs": ["10.20.0.0/24"], "accessImpactAccepted": True}
+        routes = [{"metadata": {"name": "litellm-ingress", "uid": "ingress-original", "resourceVersion": "1", "annotations": {"cert-manager.io/cluster-issuer": "existing"}}, "spec": {"ingressClassName": "nginx", "rules": [{"host": "legacy.synthetic.invalid", "http": {"paths": [{"path": "/", "pathType": "Prefix", "backend": {"service": {"name": "litellm-mi-proxy", "port": {"number": 4000}}}}]}}]}}] if ingress else []
+        return config, service, routes
+
+    def test_legacy_access_preserves_route_and_restricts_only_source_policy(self):
+        for ingress in (False, True):
+            config, service, routes = self.legacy_access_fixture(ingress)
+            settings = access_settings(config)
+            kind, resource = access_target(settings, [service], routes)
+            original = copy.deepcopy(resource)
+            view = access_view(resource, kind)
+            patch = access_patch(resource, kind, True, restricted_value(settings, kind, view))
+            self.assertEqual(resource, original)
+            self.assertEqual(patch[0]["path"], "/metadata/uid")
+            self.assertEqual(patch[1]["path"], "/metadata/resourceVersion")
+            self.assertEqual(patch[-1]["op"], "add")
+            self.assertNotIn("/spec/type", json.dumps(patch))
+            with self.assertRaisesRegex(ValueError, "broaden"):
+                restricted_value(settings, kind, {**view, "value": "10.20.0.0/25" if ingress else ["10.20.0.0/25"]})
+            config["legacyAccess"]["allowedCidrs"] = ["0.0.0.0/0"]
+            with self.assertRaises(ValueError):
+                access_settings(config)
+
+    def test_legacy_access_rejects_unknown_routes_and_direct_bypass(self):
+        config, service, routes = self.legacy_access_fixture(True)
+        service["spec"]["type"] = "LoadBalancer"
+        with self.assertRaisesRegex(ValueError, "private backend"):
+            access_target(access_settings(config), [service], routes)
+        config, service, routes = self.legacy_access_fixture()
+        duplicate = copy.deepcopy(service)
+        duplicate["metadata"]["name"] = "alternate"
+        with self.assertRaisesRegex(ValueError, "Additional Services"):
+            access_target(access_settings(config), [service, duplicate], routes)
+
+    def test_legacy_access_plan_execute_resume_and_restore(self):
+        for ingress in (False, True):
+            config, service, routes = self.legacy_access_fixture(ingress)
+            resources = {("service", "litellm-mi-proxy"): service}
+            if routes:
+                resources[("ingress", "litellm-ingress")] = routes[0]
+            client = Mock()
+            client.items.side_effect = lambda kind: copy.deepcopy([service] if kind == "services" else routes)
+            client.get.side_effect = lambda kind, name, optional=False: copy.deepcopy(resources.get((kind, name)))
+            def create(resource):
+                key = ("configmap", resource["metadata"]["name"])
+                self.assertNotIn(key, resources)
+                resources[key] = copy.deepcopy(resource)
+                resources[key]["metadata"].update(uid="checkpoint-uid", resourceVersion="1")
+            def patch_resource(kind, name, operations):
+                resource = resources[(kind, name)]
+                for item in operations:
+                    keys = [key.replace("~1", "/").replace("~0", "~") for key in item["path"].split("/")[1:]]
+                    parent = resource
+                    for key in keys[:-1]:
+                        parent = parent[key]
+                    if item["op"] == "test":
+                        self.assertEqual(parent[keys[-1]], item["value"])
+                    elif item["op"] == "remove":
+                        del parent[keys[-1]]
+                    else:
+                        parent[keys[-1]] = copy.deepcopy(item["value"])
+                resource["metadata"]["resourceVersion"] = str(int(resource["metadata"]["resourceVersion"]) + 1)
+            client.create.side_effect = create
+            client.patch.side_effect = patch_resource
+            kind, resource = access_target(access_settings(config), [service], routes)
+            original = access_view(resource, kind)
+            with self.subTest(ingress=ingress), tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+                directory = Path(folder)
+                plan = access_operation(config, "legacy-access-restrict", "plan", "a" * 40, directory, "", client)
+                client.create.assert_not_called()
+                client.patch.assert_not_called()
+                with self.assertRaisesRegex(ValueError, "not approved"):
+                    access_operation(config, "legacy-access-restrict", "execute", "a" * 40, directory, "b" * 64, client)
+                result = access_operation(config, "legacy-access-restrict", "execute", "a" * 40, directory, plan["planSha256"], client)
+                self.assertTrue(result["applied"])
+                self.assertFalse(result["trafficVerified"])
+                current = access_view(resource, kind)
+                self.assertEqual(current["stableSha256"], original["stableSha256"])
+                self.assertNotEqual(current["value"], original["value"])
+                checkpoint = resources[("configmap", "llmgw-legacy-access")]
+                state = json.loads(checkpoint["data"]["access.json"])
+                state["phase"] = "restricting"
+                checkpoint["data"]["access.json"] = json.dumps(state, sort_keys=True)
+                resumed = access_operation(config, "legacy-access-restrict", "plan", "a" * 40, directory, "", client)
+                access_operation(config, "legacy-access-restrict", "execute", "a" * 40, directory, resumed["planSha256"], client)
+                restore = access_operation(config, "legacy-access-restore", "plan", "a" * 40, directory, "", client)
+                resource["spec"]["externalIPs"] = ["10.99.0.1"]
+                with self.assertRaises(ValueError):
+                    access_operation(config, "legacy-access-restore", "execute", "a" * 40, directory, restore["planSha256"], client)
+                resource["spec"].pop("externalIPs")
+                result = access_operation(config, "legacy-access-restore", "execute", "a" * 40, directory, restore["planSha256"], client)
+                self.assertEqual(result["phase"], "restored")
+                self.assertEqual(access_view(resource, kind), original)
+
+    def test_legacy_access_is_scoped_after_baseline_and_not_greenfield(self):
+        from scripts.customer_migration import stage_checks, stage_fingerprint, validate_config
+        config, _, _ = self.legacy_access_fixture()
+        plain = copy.deepcopy(config)
+        plain.pop("legacyAccess")
+        validate_config(config, "test")
+        self.assertIn("legacy_source_access", stage_checks(1, config))
+        self.assertEqual(stage_fingerprint(config, 0), stage_fingerprint(plain, 0))
+        self.assertNotEqual(stage_fingerprint(config, 1), stage_fingerprint(plain, 1))
+        config["deploymentMode"] = "greenfield"
+        with self.assertRaisesRegex(ValueError, "greenfield"):
+            access_settings(config)
+
     def test_application_publish_cannot_override_active_audit_window(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl"]), patch("scripts.migration_runtime.run_command", return_value="configmap/llmgw-audit-recovery-window") as command:
             with self.assertRaisesRegex(ValueError, "audit-resume"):
@@ -56,7 +168,7 @@ class RuntimeSafetyTests(unittest.TestCase):
                     return {"state": "Succeeded", "platform": {"stage5Deployed": True, "postgresqlServerName": "new-db"}}
                 return {"storageAccountName": "syntheticbackup", "containerName": "backups"}
             if command[:3] == ["postgres", "flexible-server", "show"]:
-                return {"id": "/synthetic/new-database", "host": "new-db.postgres.database.azure.com"}
+                return {"id": group_id(config) + "/providers/Microsoft.DBforPostgreSQL/flexibleServers/new-db", "host": "new-db.postgres.database.azure.com", "auth": {"activeDirectoryAuth": "Enabled", "passwordAuth": "Disabled"}, "network": {"publicNetworkAccess": "Disabled"}}
             if command[:3] == ["storage", "blob", "download"]:
                 Path(command[command.index("--file") + 1]).write_bytes(b"synthetic-backup")
                 return {}
@@ -89,6 +201,10 @@ class RuntimeSafetyTests(unittest.TestCase):
                     self.assertFalse(any(call.args[0][0] == "pg_restore" for call in command.call_args_list))
                 else:
                     target_database_restore(config, "execute", "a" * 40, destination, plan)
+                    empty_check = next(call for call in command.call_args_list if call.args[0][0] == "psql")
+                    self.assertIn("pg_catalog.pg_class", empty_check.args[0][-1])
+                    self.assertIn("pg_catalog.pg_proc", empty_check.args[0][-1])
+                    self.assertIn("pg_catalog.pg_type", empty_check.args[0][-1])
                     restore = next(call for call in command.call_args_list if call.args[0][0] == "pg_restore")
                     self.assertEqual(restore.kwargs["environment"]["PGHOST"], "new-db.postgres.database.azure.com")
                     self.assertEqual(restore.kwargs["environment"]["PGSSLMODE"], "verify-full")
@@ -96,6 +212,19 @@ class RuntimeSafetyTests(unittest.TestCase):
                     self.assertNotIn("--clean", restore.args[0])
                     self.assertNotIn("synthetic-token", json.dumps(restore.args, default=str))
                 self.assertNotIn("synthetic-token", (destination / "runtime-summary.json").read_text())
+
+    def test_restore_blocks_replaced_public_or_password_enabled_server(self):
+        for changes in ({"id": "/unapproved/server"}, {"host": "unapproved.invalid"}, {"network": {"publicNetworkAccess": "Enabled"}}, {"auth": {"activeDirectoryAuth": "Enabled", "passwordAuth": "Enabled"}}):
+            config, azure = self.target_setup()
+            original = azure.scoped.side_effect
+            def cloud(arguments):
+                value = original(arguments)
+                return {**value, **changes} if arguments[:3] == ["postgres", "flexible-server", "show"] else value
+            azure.scoped.side_effect = cloud
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.AzureCommands", return_value=azure), patch("scripts.migration_runtime.subprocess.run") as command:
+                with self.assertRaises(ValueError):
+                    target_database_restore(config, "plan", "a" * 40, Path(directory), "")
+                command.assert_not_called()
 
     def test_failed_backup_never_outputs_passed_acceptance(self):
         config = customer_config()

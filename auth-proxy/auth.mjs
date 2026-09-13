@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, EncryptJWT, jwtDecrypt, jwtVerify } from 'jose';
+import { createRemoteJWKSet, EncryptJWT, jwtDecrypt, jwtVerify, SignJWT } from 'jose';
 import { Denied } from './policy.mjs';
 
 export function createTokenVerifier(config, keySet) {
@@ -21,6 +21,9 @@ export function createTokenVerifier(config, keySet) {
 export function createSessions(key, host) {
   if (key.length !== 32) throw new Error('Session encryption requires 32 bytes');
   return {
+    async uiToken(payload) {
+      return new SignJWT(payload).setProtectedHeader({ alg: 'HS256' }).setIssuer('llm-admin-proxy').setAudience(host).setIssuedAt().sign(key);
+    },
     async seal(payload, purpose, expiresAt) {
       return new EncryptJWT({ ...payload, purpose })
         .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
