@@ -28,6 +28,27 @@ READMES = (
 
 
 class ProjectDocumentationTests(unittest.TestCase):
+    def test_migration_guide_documents_actual_runner_check_inputs(self):
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        section = guide.split("### 2.1 Variables和Secrets", 1)[1].split("### 2.2", 1)[0]
+        rows = {
+            columns[0].strip("`"): columns[1]
+            for line in section.splitlines() if line.startswith("| `")
+            for columns in ([cell.strip() for cell in line.strip("|").split("|")],)
+        }
+        workflow = (ROOT / ".github/workflows/customer-runner-checks.yml").read_text()
+        inputs = set(re.findall(r"\$\{\{\s*(vars|secrets)\.([A-Z_]+)\s*\}\}", workflow))
+        self.assertIn(("vars", "AZURE_RUNTIME_CLIENT_ID"), inputs)
+        for context, name in inputs:
+            expected = "Environment Secret" if context == "secrets" else "Environment Variable"
+            if name == "MIGRATION_PRIVATE_RUNNER_LABELS":
+                expected = "Repository Variable"
+            with self.subTest(name=name):
+                self.assertEqual(rows.get(name), expected)
+        self.assertEqual(rows.get("AZURE_CLIENT_ID"), "Environment Variable")
+        self.assertIn("Runner检查不读取它", section)
+        self.assertNotIn("兼容Variable", section)
+
     def test_public_fork_setup_explains_secret_and_manual_confirmation_contract(self):
         for name in ("README.md", "README_ZH.md", "docs/customer-deployment-workflows-zh.md", "docs/customer-private-runner-preparation-zh.md"):
             text = (ROOT / name).read_text()
