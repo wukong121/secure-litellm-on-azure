@@ -10,11 +10,123 @@
 
 **准备一台独立的 Ubuntu 24.04 LTS、x64 Linux VM，能访问 GitHub 和新旧环境私网，安装 Docker 及下文工具，注册为客户仓库的 self-hosted runner。** 可以由实施人员协助完成。
 
-推荐放在 Azure 已有管理VNet/子网中，通过批准的路由连接新旧环境。也可使用已有的专用 Linux 执行机，只要网络、权限和工具满足相同条件。不需要GPU，不要求运行在AKS内，也不必安装Kubernetes集群或Docker Desktop。
+没有管理网络时，使用下文Bicep独立创建管理VNet及Runner；已有获准管理子网或专用Linux执行机时也可复用。通过批准的路由和DNS连接新旧环境，不需要GPU，不要求运行在AKS内，也不必安装Kubernetes集群或Docker Desktop。
 
 runner是执行部署、备份恢复和验证任务的机器，**不承载LiteLLM业务流量**。任务结束后停止runner不会停止网关，但需要再次运行workflow时必须提前启动。迁移中不要自动关机或重启。
 
 客户在Windows电脑上通过浏览器操作Actions即可；Windows电脑不必改成Linux，也不需要为了执行workflow安装完整工具链。
+
+### 1.1 用Bicep一次性建机和安装工具
+
+使用[订阅级部署模板](../infra/private-runner/deploy.bicep)，不必逐个创建网络、VM、磁盘、网卡或安装工具。它使用[管理网络模块](../infra/private-runner/management-network.bicep)、[标准Ubuntu VM模块](../infra/private-runner/standard-vm.bicep)和[首启安装脚本](../infra/private-runner/bootstrap.sh)，不依赖Gallery镜像、新AKS或旧AKS的节点子网，也不改变原有可选自动Runner模板。
+
+| 网络模式 | 如何选择 | 新建内容 |
+| --- | --- | --- |
+| 新建管理网络，默认 | 不传`subnetResourceId` | 独立VNet、Runner子网、NAT Gateway及出站公网IP；默认另建Bastion Standard、Bastion子网和独立公网IP |
+| 复用现有子网 | 传入`subnetResourceId`及`sshSourceCidr` | 只建VM、磁盘、NIC和VM级NSG；不修改原网络，不创建NAT/Bastion，也不借用AKS出站 |
+
+新建默认地址为`10.50.0.0/24`：`snet-runner=10.50.0.0/26`、`AzureBastionSubnet=10.50.0.64/26`。可用`managementAddressPrefix`换成已批准的RFC1918 IPv4 /24，两个子网自动计算。部署前必须检查新旧VNet、计划中的网络、公司VPN和Docker网段没有重叠；模板不扫描公司网络，也不代表该默认地址适用于所有客户。
+
+**自动完成：** 新建独立资源组、Ubuntu 24.04 x64 VM、私有网卡和NSG；启用Trusted Launch、Secure Boot、vTPM和主机加密；配置128 GiB系统盘、256 GiB工作盘；安装Docker、Azure CLI/Bicep、kubectl 1.35系列、Azure kubelogin、Node 24/npm、GitHub CLI、PG16客户端、skopeo、Syft、Trivy、Cosign及GitHub Runner程序。系统Python保留Ubuntu版本，workflow用setup-python准备3.13，固定Python依赖仍由workflow安装。
+
+**网络边界：** VM始终没有公网IP，公网22不开放。新建模式的NAT公网IP仅供出站，Bastion公网入口通过Azure身份授权管理连接，SSH密钥仍用于VM登录；VM级NSG只接受Bastion子网的SSH，其余入站拒绝。NAT不是防火墙，也不提供FQDN白名单；需要企业出站过滤时使用获准的现有管理网络或另行配置防火墙，不能把NAT建成说成出站策略已验收。
+
+**保留的人工步骤：** 批准地址范围、提供SSH公钥，最后交互注册GitHub并配置OIDC权限。模板不创建Peering、DNS转发或业务身份，不修改新旧业务资源。复用子网必须已具备第3节的路由、DNS和显式出站。新建时可通过Bastion从当前开发机登录，不必先建跨订阅Peering；Bastion原生客户端不支持普通Cloud Shell。
+
+**费用：** 默认会创建VM、两块Premium磁盘、NAT Gateway、两个Standard公网IP和Bastion Standard，均需按实际区域/用量计费。Bastion/NAT不会随VM关机停止收费。已有VPN等私网管理路径时可选`createBastion=false`并指定`sshSourceCidr`；该选项不替你创建VPN。未提供SSH来源且不建Bastion时默认拒绝所有入站，必须先规划其他获准管理路径。
+
+#### 执行部署
+
+在已登录Azure CLI的Bash终端、仓库根目录执行。可用Cloud Shell创建资源，原生Bastion连接需另用本机终端。管理员需要目标订阅创建资源组/部署的权限及新资源组的资源写权限；复用模式另需现有子网的读取和`join/action`权限。不要求给VM分配Owner或任何业务Managed Identity。
+
+先检查订阅的`EncryptionAtHost`状态：`az feature show --subscription "$SUBSCRIPTION_ID" --namespace Microsoft.Compute --name EncryptionAtHost --query properties.state -o tsv`。未注册时由获准管理员执行下面的注册命令；等查询结果为`Registered`后才部署，不关闭模板里的加密来绕过失败。注册不会给旧VM自动启用加密。
+
+```bash
+az feature register --subscription "$SUBSCRIPTION_ID" \
+  --namespace Microsoft.Compute --name EncryptionAtHost
+```
+
+确认所选区域的`Standard_D4s_v5`或`Standard_D8s_v5`没有区域级订阅限制，且有足够vCPU配额。`az vm list-skus --all`返回的`restrictions`比仅列VM大小更有意义；有配额不等于SKU可用。本模板未指定可用区，仍需以实际部署时的容量、策略和授权校验为准。
+
+**没有管理网络：** 下面只需填写订阅、获准区域和公钥路径；网段及资源名有默认值，Bastion会自动成为SSH来源。不需要旧或新AKS子网ID。
+
+```bash
+az deployment sub create \
+  --subscription "REPLACE_SUBSCRIPTION_ID" \
+  --name llmgw-runner-test \
+  --location "REPLACE_APPROVED_REGION" \
+  --template-file infra/private-runner/deploy.bicep \
+  --parameters \
+    sshPublicKey="$(cat ~/.ssh/id_ed25519.pub)" \
+    managementAddressPrefix="10.50.0.0/24" \
+    createBastion=true \
+  --confirm-with-what-if \
+  --query properties.outputs
+```
+
+`--confirm-with-what-if`先预览并请求确认，确认后才创建收费资源。只预览时将`create`改为`what-if`，去掉`--confirm-with-what-if`和`--query properties.outputs`。SSH公钥支持ED25519或RSA至少2048位；没有专用密钥时先在自己的受控终端交互生成并保管，不能覆盖已有密钥或把私钥/口令提供给聊天、GitHub Secret或Bicep。
+
+**已有管理子网：** 同一命令的`--parameters`改为以下内容，区域使用该VNet所在区域。`sshSourceCidr`填实际VPN管理网段或已有AzureBastionSubnet CIDR，不填`0.0.0.0/0`。
+
+```bash
+--parameters \
+  subnetResourceId="REPLACE_EXISTING_MANAGEMENT_SUBNET_RESOURCE_ID" \
+  sshPublicKey="$(cat ~/.ssh/id_ed25519.pub)" \
+  sshSourceCidr="REPLACE_APPROVED_MANAGEMENT_CIDR"
+```
+
+默认资源名称为`rg-llmgw-runner-test-<稳定后缀>`及`vm-llmgw-runner-test-<稳定后缀>`，其余资源跟随VM命名；后缀由订阅、子网ID（新建为空）和环境生成，复用模式保留原有命名。同样输入指向同一套资源，不每次创建随机机器。请保持同一网络模式、区域和环境；新建模式每个订阅/环境对应一套管理网络，不能通过改区域或地址范围当作另一套部署。`--name`只是订阅部署记录名。
+
+| 可选参数 | 默认 | 修改方式 |
+| --- | --- | --- |
+| `environmentName` | `test` | 在`--parameters`后增加`environmentName=prod`，注册标签随之变为`llmgw-prod-private` |
+| `subnetResourceId` | 空，创建网络 | 非空时复用，不创建或改变任何VNet/NAT/Bastion |
+| `managementAddressPrefix` | `10.50.0.0/24` | 仅新建模式使用，替换为不重叠的私有IPv4 /24 |
+| `createBastion` | 新建为true，复用为false | 新建可关闭，但须自行提供私网管理连接；复用模式即使传true也不创建Bastion |
+| `sshSourceCidr` | 空 | 自建Bastion模式自动选Bastion子网；其他模式为空则拒绝SSH |
+| `virtualMachineSize` | `Standard_D4s_v5`，4 vCPU/16 GiB | 可选`Standard_D8s_v5`，8 vCPU/32 GiB；需区域可用及订阅配额 |
+| `osDiskSizeGiB` | 128 | 只能按批准容量增加，不缩小已有磁盘 |
+| `dataDiskSizeGiB` | 256 | 根据数据库和镜像空间增大；已建盘扩容后仍须单独扩展文件系统 |
+| `ubuntuImageVersion` | `latest` | 可指定已批准的Canonical版本；此入口是标准镜像初始化，不是不可变工具链镜像工厂 |
+
+SSH管理员固定为`runneradmin`，Runner独立使用无sudo权限的`actions-runner`账户；Docker组仍具有接近root的能力，不能运行不可信代码。
+
+复用时要求子网与VM同订阅、同区域、可连接普通VM，且订阅支持所选SKU和主机加密。禁止向AKS托管节点资源组或不兼容的委派子网部署；不要通过关闭加密或给VM新增公网入口解决失败。新建网络也只管理本模板的子网，扩展地址/子网或移除Bastion须先审查现有资源，不能把切换布尔值当作已完成退役。新增条件为false不会自动删除以前创建的Bastion或公网IP。
+
+#### 确认安装并注册
+
+部署输出提供`resourceGroupName`、`virtualMachineName`、`virtualMachineId`、`networkMode`、`managementVnetId`、`runnerSubnetId`、`outboundPublicIp`、`bastionName`、`privateIpAddress`、`sshCommand`、`bastionSshCommand`、`runnerLabels`、`bootstrapCheck`及`registrationCommand`。
+
+新建Bastion后，在当前已登录Azure CLI的开发机运行输出的`bastionSshCommand`，即可用本机SSH私钥登录；命令默认引用`~/.ssh/id_ed25519`，使用其他公钥时改成匹配的私钥路径。不把私钥传给Bicep或粘贴进GitHub。CLI需安装`bastion`扩展，操作者需拥有VM、NIC和Bastion的读取权限；首次SSH须核对主机指纹，不关闭host key检查。
+
+已有VPN等路由时可运行`sshCommand`直接访问私网IP，没有该路由则不能直接SSH。需要文件传输时使用[Bastion原生隧道](https://learn.microsoft.com/en-us/azure/bastion/connect-vm-native-client-linux#connect-to-a-vm---tunnel-command)；这与开启公网22不同。进入VM后执行：
+
+```bash
+sudo cloud-init status --wait --long
+sudo test -f /var/lib/llmgw-runner/bootstrap-complete
+sudo cat /usr/local/share/llmgw-runner/tool-versions.txt
+sudo /usr/local/sbin/llmgw-runner-register
+```
+
+最后一条命令交互询问仓库URL和GitHub临时注册令牌。先在仓库**Settings → Actions → Runners → New self-hosted runner**取得令牌，只在VM的终端提示中输入；不要使用`--token`写入命令历史、Azure Run Command或模板参数。注册器自动使用VM名称、`llmgw-test-private`标签和数据盘工作目录，然后安装并启动systemd服务，不需要再执行下载/解包命令。
+
+模板不会验证GitHub分支保护。注册前必须先完成受保护默认分支、Environment和可信作业限制；禁止公共PR使用该私网runner。Azure部署输出中的`githubRegistered=false`是模板声明，不是实时GitHub状态；**VM部署成功不代表cloud-init成功、Runner已注册或业务权限就绪**。
+
+GitHub中确认Idle后，将输出`runnerLabels`的数组值填入Repository Variable `MIGRATION_PRIVATE_RUNNER_LABELS`；再按第7节运行`Customer private runner checks`。Environment Secrets、各OIDC身份、AKS/PG/Graph权限仍按[部署指南](customer-deployment-workflows-zh.md)配置，不能通过给VM挂管理员身份替代。
+
+工作盘挂载为`/srv/runner`，Docker数据、Runner程序、作业和tool cache均在其下；Docker启动依赖该挂载，不退回系统盘。首启只格式化全新无分区/无文件系统的数据盘，不接管已有未知文件系统。安装日志在`/var/log/llmgw-runner-bootstrap.log`，仅root可读。失败时先在受控终端查看cloud-init和该日志，修复出站或软件源后可运行`sudo /usr/local/sbin/llmgw-runner-bootstrap`继续；完成标记存在时不会重装。**重跑Bicep不会重新执行cloud-init**，也不会更新已运行机器上的工具。
+
+直接下载的6个发行包固定版本并校验SHA256；apt组件使用各项目软件源的当前候选版本，实际版本写入上面的清单，不宣称完整可复现。GitHub Runner保留正常自动更新；kubectl固定在1.35仓库且安装后hold，集群升级时单独审核更新。软件源需另放行`download.docker.com`、`packages.microsoft.com`、`deb.nodesource.com`、`cli.github.com`、`pkgs.k8s.io`及其CDN，例如`prod-cdn.packages.k8s.io`；不能仅允许GitHub主页。
+
+2026-09-13已通过Bicep编译、脚本及文档回归，以及一次性Ubuntu 24.04容器的真实工具安装；容器检查替代了挂盘、systemd和Docker daemon步骤，因此不证明云上挂载、服务启动、GitHub注册或客户网络已经通过。删除VM时两块磁盘保留，**删除整个资源组仍会删除其中磁盘**；需先确认备份及留存策略，不把删除资源组作为安装失败重试方式。
+
+#### 新旧集群的接通顺序
+
+1. 先创建独立管理网络和Runner，完成GitHub注册；不依赖新集群存在。旧AKS未指定自建VNet时通常仍有自动创建的节点VNet，不将Runner塞入该节点子网。
+2. 旧Kubernetes API是公网模式时，从Runner访问获准API端点并验证身份/RBAC；有来源白名单则批准NAT实际出口。旧PG通过Pod内命令备份，不必给PG新增公网入口。私有API则先具备对应私网连接。
+3. Stage0建立私有备份网络后，即需连接管理VNet和备份网络，配置相应Private DNS Zone关联或公司DNS转发，再运行备份上传；不是等新AKS创建才处理网络。
+4. 目标VNet/Private AKS/PG/ACR等创建后，批准双向VNet Peering或已有Hub路由、NSG与Private DNS访问，再运行私网恢复/发布。跨区域时用Global VNet Peering并核算流量费用；VNet Peering本身不自动传播Private DNS。
+5. 使用相同或替换后的合格Runner继续部署维护。它不承载LiteLLM流量，旧集群停用不等于Runner退役；模板输出`targetPrivateConnectivityVerified=false`，只创建网络不能替代逐项连通测试。
 
 ## 2. 机器要求
 
@@ -91,7 +203,7 @@ DNS应让目标服务的正常FQDN解析到其Private Endpoint；连接仍使用
 
 ## 4. 软件与工具清单
 
-机器准备阶段按官方安装文档或客户批准的软件源安装，并记录实际版本。不要在这里新增一套自动镜像工厂，也不要求客户把所有Python包逐个手装。
+使用第1.1节时由首启脚本安装，下表用于核对用途及兼容性；已有机器也可按官方安装文档或客户批准的软件源人工安装并记录实际版本。不要求自动镜像工厂，也不要求客户把所有Python包逐个手装。
 
 | 工具 | 要求 | 当前workflow行为 |
 | --- | --- | --- |

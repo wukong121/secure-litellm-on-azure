@@ -2,6 +2,9 @@ import base64
 import copy
 import json
 import hashlib
+import re
+import subprocess
+import tempfile
 import unittest
 from unittest.mock import Mock
 
@@ -13,6 +16,67 @@ from scripts.runner_lifecycle import GitHubRunnerRegistration, enroll_runner, re
 
 
 class RunnerLifecycleTests(unittest.TestCase):
+    def test_standard_runner_network_modes_preserve_existing_subnet(self):
+        entry = (ROOT / "infra/private-runner/deploy.bicep").read_text()
+        self.assertIn("param subnetResourceId string = ''", entry)
+        self.assertIn("param createBastion bool = empty(subnetResourceId)", entry)
+        self.assertIn("module network 'management-network.bicep' = if (empty(subnetResourceId))", entry)
+        self.assertIn("subnetResourceId: empty(subnetResourceId) ? network!.outputs.runnerSubnetId : subnetResourceId", entry)
+        self.assertIn("sshSourceCidr: empty(subnetResourceId) && createBastion ? network!.outputs.bastionSubnetPrefix : sshSourceCidr", entry)
+        self.assertIn("uniqueString(subscription().subscriptionId, subnetResourceId, environmentName)", entry)
+        self.assertIn("output targetPrivateConnectivityVerified bool = false", entry)
+
+    def test_standard_runner_network_has_egress_and_optional_native_bastion(self):
+        network = (ROOT / "infra/private-runner/management-network.bicep").read_text()
+        machine = (ROOT / "infra/private-runner/standard-vm.bicep").read_text()
+        self.assertIn("cidrSubnet(addressPrefix, 26, 0)", network)
+        self.assertIn("cidrSubnet(addressPrefix, 26, 1)", network)
+        self.assertIn("defaultOutboundAccess: false", network)
+        self.assertIn("natGateway: { id: nat.id }", network)
+        self.assertIn("resource bastion 'Microsoft.Network/bastionHosts@2024-07-01' = if (createBastion)", network)
+        self.assertIn("enableTunneling: true", network)
+        self.assertIn("securityRules: concat(empty(sshSourceCidr) ? [] : [", machine)
+        self.assertIn("deny-all-other-inbound", machine)
+        self.assertNotIn("publicIPAddress", machine)
+        self.assertNotIn("identity:", machine)
+        self.assertNotIn("virtualNetworkPeerings", network)
+        self.assertNotIn("roleAssignments", network)
+
+    def test_standard_runner_bootstrap_and_registration_shell_syntax(self):
+        script = ROOT / "infra/private-runner/bootstrap.sh"
+        subprocess.run(["bash", "-n", str(script)], check=True, capture_output=True)
+        source = script.read_text()
+        registration = source.split("<<'REGISTER'\n", 1)[1].split("\nREGISTER\n", 1)[0]
+        subprocess.run(["bash", "-n"], input=registration, text=True, check=True, capture_output=True)
+        self.assertLess(len(source.encode()), 65535)
+        self.assertNotIn("--token", registration)
+        self.assertIn("runuser --user actions-runner", registration)
+
+    def test_standard_runner_downloads_pin_six_https_assets(self):
+        source = (ROOT / "infra/private-runner/bootstrap.sh").read_text()
+        downloads = re.findall(r'verified_download (https://github\.com/\S+)\s+\\\n\s+"[^"\n]+" (\S+)', source)
+        self.assertEqual(len(downloads), 6)
+        for url, checksum in downloads:
+            with self.subTest(url=url):
+                self.assertNotIn("/latest/", url)
+                self.assertRegex(checksum, r"^[0-9a-f]{64}$")
+
+    def test_standard_runner_rejects_tampered_download(self):
+        source = ROOT / "infra/private-runner/bootstrap.sh"
+        probe = 'source "$1"\ndownload() { printf %s synthetic-package > "$2"; }\nverified_download https://example.invalid/package "$2" "$3"\n'
+        expected = hashlib.sha256(b"synthetic-package").hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            for checksum, accepted in ((expected, True), ("0" * 64, False)):
+                result = subprocess.run(["bash", "-s", "--", str(source), directory + "/package", checksum], input=probe, text=True, capture_output=True)
+                with self.subTest(checksum=checksum):
+                    self.assertEqual(result.returncode == 0, accepted)
+
+    def test_standard_runner_bootstrap_does_not_run_when_sourced(self):
+        source = ROOT / "infra/private-runner/bootstrap.sh"
+        probe = 'source "$1"\ndeclare -F prepare_work_disk verified_download main\n'
+        result = subprocess.run(["bash", "-s", "--", str(source)], input=probe, text=True, capture_output=True, check=True)
+        self.assertEqual(result.stdout.splitlines(), ["prepare_work_disk", "verified_download", "main"])
+
     def test_job_orchestration_records_creation_enrollment_online_and_cleanup(self):
         arm, _, _ = self.arm_fixture()
         original = arm.snapshot()
