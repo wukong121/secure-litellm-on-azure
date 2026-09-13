@@ -158,7 +158,7 @@ def build_plan(config, stage, component, revision, template_hash, parameters, ch
         "configSha256": contract["configSha256"], "templateSha256": template_hash,
         "parametersSha256": contract["parametersSha256"],
         "changes": [{"resourceId": change.get("resourceId"), "changeType": change["changeType"],
-                     "changedProperties": [delta.get("path") for delta in change.get("delta", [])]}
+                     "changedProperties": [delta.get("path") for delta in (change.get("delta") or [])]}
                     for change in relevant],
     }
 
