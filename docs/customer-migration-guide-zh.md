@@ -22,22 +22,47 @@
 
 ## 2. 客户首次准备
 
-1. 将仓库导入客户控制的私有仓库；保护主分支，要求PR审查及CI通过。不要将客户配置提交到这个公共项目。
-2. 建立`dev`、`test`、`prod` GitHub Environments，限制部署分支。默认双人策略应配置维护者与验收审批者分离、禁止自我审批；仅一位运维时可按新工作流指南显式启用single-operator并记录客户风险接受，不能宣称职责分离。GitHub审批受套餐影响，缺失时用客户外部变更流程。
-3. 为每个Environment配置独立Azure OIDC身份。Federated Credential issuer为`https://token.actions.githubusercontent.com`，audience为`api://AzureADTokenExchange`，subject精确到`repo:<customer-org>/<customer-repo>:environment:<environment>`。不要使用个人用户登录或client secret。
+1. fork到客户控制的仓库，公开或私有均可；默认分支须有生效的branch protection/ruleset，并要求受审核的代码才能执行。主要迁移workflow仅允许手动运行受保护默认分支，不能让公共PR使用私网Runner。不要将客户配置提交到Git。
+2. 先建立本次使用的GitHub Environment，例如`test`，限制部署分支；不必一次创建全部`dev`、`test`、`prod`。默认双人策略应配置维护者与验收审批者分离、禁止自我审批；仅一位运维时可按新工作流指南显式启用single-operator并记录客户风险接受，不能宣称职责分离。GitHub审批受套餐影响，缺失时用客户外部变更流程。
+3. 为每个Environment准备分离的基础设施部署身份和私网运行身份，并配置Azure OIDC联邦信任。Federated Credential issuer为`https://token.actions.githubusercontent.com`，audience为`api://AzureADTokenExchange`，subject精确到`repo:<customer-org>/<customer-repo>:environment:<environment>`。两个Client ID分别填入下表，不能用个人Object ID或Client Secret替代。
 4. 确认预算和配额，使用阶段0的bootstrap组件先plan、批准后deploy创建新目标RG和Log Analytics workspace；无需手工预建。已有同RG Workspace可显式选existing。目标RG必须与旧RG不同；跨RG共享资源仍需扩展和测试。旧网关没有日志库时由阶段1legacy-logging创建，再onboard监控。
 5. 由网络Owner批准区域、VM SKU、Kubernetes版本、CIDR、路由及私网执行位置。示例CIDR、HA Disabled、Redis规格均不是客户默认架构决策。
-6. 安装或批准Azure CLI/Bicep、kubectl、Python及Docker验证工具。部署到Private AKS和访问私有ACR/Blob需要客户受控私网终端或隔离self-hosted runner，不为GitHub-hosted runner开放生产公网。
+6. 按[Runner准备说明](customer-private-runner-preparation-zh.md)部署或复用专用执行机、注册服务并设置仓库标签变量。Runner建机不创建上述OIDC身份或授予业务权限；本机执行过`az login`也不会让Actions自动登录。部署到Private AKS和访问私有ACR/Blob需要获准私网路径，不为GitHub-hosted runner开放生产公网。
 
 ### 2.1 Variables和Secrets
 
-| GitHub Environment配置 | 类型 | 用途与限制 |
+**2026-09-13配置清单修正：** 原表遗漏了`AZURE_RUNTIME_CLIENT_ID`、`WORKFLOW_ARTIFACT_KEY`和Runner标签变量；只按原表填写不足以运行Runner检查。`AZURE_TENANT_ID`仍然需要，不应删除或改名。
+
+以下位置对应实际workflow读取方式：
+
+- **Environment Variable / Secret**：仓库`Settings → Environments → 本次environment`下的`Environment variables`或`Environment secrets`。运行时选择`test`就配置在`test`，不是只配到`prod`。
+- **Repository Variable**：仓库`Settings → Secrets and variables → Actions → Variables → New repository variable`。
+
+| 名称 | 存放位置 | 使用时机与用途 |
 | --- | --- | --- |
-| `AZURE_CLIENT_ID` | Variable | 本Environment的OIDC应用/托管身份client ID，不是用户object ID |
-| `AZURE_TENANT_ID` | Variable | 必须与客户配置中的tenantId一致 |
-| `AZURE_SUBSCRIPTION_ID` | Variable | 必须与客户配置中的subscriptionId一致 |
-| `CUSTOMER_CONFIG_JSON` | Secret推荐，兼容Variable | 按[客户配置模板](../config/customer.example.json)填写完整JSON；Secret优先，避免Actions打印step env；仍禁止运行时凭据 |
-| `MIGRATION_EVIDENCE_JSON` | Secret | 按[证据模板](../config/migration-evidence.example.json)保存阶段验收元数据；阶段0可为空数组；不要放报告原文、下载Token或备份 |
+| `AZURE_CLIENT_ID` | Environment Variable | 基础设施plan/deploy、Azure What-if及镜像晋级使用的部署身份Client ID；Runner检查不读取它 |
+| `AZURE_RUNTIME_CLIENT_ID` | Environment Variable | **Customer private runner checks必需**；普通私网运行操作也使用此身份Client ID，不是个人Object ID或VM资源ID |
+| `AZURE_TENANT_ID` | Environment Variable | Runner检查及Azure操作必需；必须与客户配置中的tenantId一致 |
+| `AZURE_SUBSCRIPTION_ID` | Environment Variable | Runner检查及Azure操作必需；必须与客户配置中的subscriptionId一致 |
+| `CUSTOMER_CONFIG_JSON` | Environment Secret | 按[客户配置模板](../config/customer.example.json)填写完整JSON；主要迁移workflow只读取Secret，不再回退到同名Variable；不能含运行时凭据 |
+| `WORKFLOW_ARTIFACT_KEY` | Environment Secret | 独立随机32字节的base64值，供计划、Runner检查结果及验收附件加密；生成及保管方法见[部署指南](customer-deployment-workflows-zh.md) |
+| `MIGRATION_PRIVATE_RUNNER_LABELS` | Repository Variable | Runner选择器，填匹配实际标签的JSON数组；不能放在Secret，也不要只放Environment |
+
+例如Runner标签变量的值为：
+
+```json
+["self-hosted", "Linux", "X64", "llmgw-test-private"]
+```
+
+**Runner检查的最小清单：** 三个Azure Variables（`AZURE_RUNTIME_CLIENT_ID`、`AZURE_TENANT_ID`、`AZURE_SUBSCRIPTION_ID`）、两个Environment Secrets和一个Repository标签变量；还要有已配置联邦信任及所需AKS读取权限的运行身份。这不是全部迁移阶段的权限清单。
+
+当前[Runner检查workflow](../.github/workflows/customer-runner-checks.yml)使用`vars.AZURE_RUNTIME_CLIENT_ID`和`vars.AZURE_TENANT_ID`作为`azure/login`输入。只配置`AZURE_CLIENT_ID`不会自动替代运行身份；放入同名Secret、客户JSON或本机终端变量也不会被这个登录步骤读取。不要为补空值直接把两个身份合并；须确认各自Client ID及批准的授权范围。`SERVICE_PRINCIPAL`是OIDC路径的正常默认值，不需要改成`IDENTITY`或创建Client Secret。
+
+首次先运行`Customer staged migration`的`stage=0, mode=config-check, component=none`；准备齐全后运行`Customer private runner checks`，首次`check_target=false`。变量和Secrets的名称/位置、分支保护及Runner Idle应先核对，不通过后续反复失败来猜配置。
+
+**后续阶段按需补充：** `POSTGRES_RESTORE_IMAGE`在Stage0备份恢复前提供；Stage5使用`AZURE_DATABASE_CLIENT_ID`及备份引用；Stage7使用`AZURE_ENTRA_CLIENT_ID`、`AZURE_ENTRA_ACCESS_CLIENT_ID`；选择自动证书动作时使用`AZURE_CERTIFICATE_CLIENT_ID`。它们的作用域、权限及完整清单统一见[客户部署与验收工作流第2节](customer-deployment-workflows-zh.md#2-一次性前置准备)，不是Runner检查的额外必填项。
+
+`MIGRATION_EVIDENCE_JSON`仅保留旧入口兼容，不是当前Actions首次运行的必填Secret。单人验收采用`draft → confirm`后，后续workflow自动读取加密账本，不要求逐阶段手改证据Secret，也不要求提供旧`record`入口的报告/审批人JSON。
 
 配置中的`ownerEmail`用于资源标签、告警邮箱以及备份Owner描述，不用于推断RBAC。`backupOwnerPrincipalId`是客户明确批准的Entra用户object ID；当前备份模板的principalType为User，不能填workflow应用ID或用`az ad signed-in-user`推断。需组/服务主体时先修改并测试该角色边界。
 
@@ -51,11 +76,11 @@
 
 指导和离线预检job没有`id-token: write`。仅What-if job申请OIDC；Azure What-if仍要求目标资源的相应部署权限，不等于Azure Reader即可。由客户平台管理员按官方What-if权限要求授予目标范围的必要权限，涉及RBAC的模块单独审批；不要因为一个权限错误授予订阅Owner。workflow只调用what-if，不代表其Azure身份在RBAC上天然无法部署。
 
-原只读workflow的参数/What-if/诊断不上传artifact。新增部署workflow仅允许客户私有仓库，会保存7天审查计划、无秘密输出和执行记录；runtime保存受控发布摘要/待验收结果，绝不上传数据库dump、kubeconfig、原始stderr和参数。客户需检查Actions日志和artifact访问权限；Secret保护不替代报告/ConfigMap的秘密审查。
+主要迁移workflow支持公开fork，计划、运行结果和验收账本使用`WORKFLOW_ARTIFACT_KEY`认证加密后上传，通常保留7天；仅选用增强L3时的治理workflow仍有独立限制。绝不上传数据库dump、kubeconfig或原始stderr。公开仓库的运行元数据、workflow输入和非秘密Variables仍可能公开，不能在其中填写正文或凭据；加密附件不替代保护分支、Environment权限及内容审查。解密审核步骤见[客户部署与验收工作流](customer-deployment-workflows-zh.md)。
 
 ## 3. 证据与批准机制
 
-阶段N的`preflight`/原`what-if`及实际deploy/execute必须具备0至N-1的通过记录；独立config-check和部署plan不要求验收。记录包含阶段、环境、配置哈希、完整Git SHA、全部checks、与governance匹配的审批者、时间和报告引用。用Customer stage acceptance生成pending报告，实测审核后record生成账本，再更新证据Secret，不需要先伪造passed才能开始阶段0。
+阶段N的`preflight`/原`what-if`及实际deploy/execute必须具备0至N-1的通过记录；独立config-check和部署plan不要求验收。记录包含阶段、环境、配置哈希、完整Git SHA、全部checks、与governance匹配的审批者、时间和报告引用。用Customer stage acceptance的draft生成pending报告，实测审核后由已配置的单人操作者confirm生成账本；record保留为外部报告/双人策略兼容入口。后续workflow自动读取同修订的成功加密账本，不需要更新证据Secret，也不需要先伪造passed才能开始阶段0。
 
 新记录使用stage-config绑定，只覆盖当前及前序阶段相关配置，后续PLS/审计身份输出补填不使阶段0失效；旧full-config记录仍可使用。相关配置、审批策略或代码改变后需重新审核，不直接改哈希冒充验收。记录仍限最近7天，长期迁移要复核早期备份和回退有效性。新报告哈希是规范JSON哈希，由工具计算。
 
