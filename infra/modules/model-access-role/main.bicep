@@ -6,6 +6,9 @@ param accountName string
 @description('LiteLLM workload identity principal ID.')
 param principalId string
 
+@description('Optional stable identity resource ID for first-deployment What-if. Empty preserves existing principal-based assignment names.')
+param principalSourceResourceId string = ''
+
 var cognitiveServicesOpenAIUserRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
@@ -16,7 +19,7 @@ resource account 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
 }
 
 resource modelDataPlaneRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(account.id, principalId, cognitiveServicesOpenAIUserRoleId)
+  name: guid(account.id, empty(principalSourceResourceId) ? principalId : principalSourceResourceId, cognitiveServicesOpenAIUserRoleId)
   scope: account
   properties: {
     principalId: principalId
