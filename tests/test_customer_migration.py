@@ -117,6 +117,27 @@ class CustomerMigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_evidence([self.record], 1, self.config, self.revision, self.now)
 
+    def test_stage4_role_naming_is_explicit_stage_scoped_and_preserved_in_stage5(self):
+        original = copy.deepcopy(self.config)
+        _, document = parameters_for(self.config, 4, "platform")
+        self.assertNotIn("stage4RoleAssignmentNaming", document["parameters"])
+        self.config["parameters"]["platform"]["stage4RoleAssignmentNaming"] = "resource-id"
+        validate_config(self.config, "test")
+        for stage in range(4):
+            self.assertEqual(stage_fingerprint(original, stage), stage_fingerprint(self.config, stage))
+        self.assertNotEqual(stage_fingerprint(original, 4), stage_fingerprint(self.config, 4))
+        _, early = parameters_for(self.config, 3, "platform")
+        self.assertNotIn("stage4RoleAssignmentNaming", early["parameters"])
+        self.config["parameters"]["platform"]["stage5Data"] = {"postgresqlDatabaseName": "litellm"}
+        for mode in ("resource-id", "principal-id"):
+            self.config["parameters"]["platform"]["stage4RoleAssignmentNaming"] = mode
+            for stage in (4, 5):
+                _, document = parameters_for(self.config, stage, "platform")
+                self.assertEqual(document["parameters"]["stage4RoleAssignmentNaming"]["value"], mode)
+        self.config["parameters"]["platform"]["stage4RoleAssignmentNaming"] = "skip-validation"
+        with self.assertRaisesRegex(ValueError, "Invalid Stage 4 role assignment naming mode"):
+            parameters_for(self.config, 4, "platform")
+
     def test_certificate_vault_parameters_are_stage4_only_and_preserve_early_fingerprints(self):
         self.config = certificate_config()
         previous = copy.deepcopy(self.config)

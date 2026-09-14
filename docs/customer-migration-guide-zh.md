@@ -653,6 +653,8 @@ S1-04之后先验证真实Container Insights日志已到达，再预览依赖这
 
 **开始前：** Stage3已验收；目标VNet/PE子网由Stage0建立。核对AKS版本、节点SKU、区域限制/配额、网络段和Firewall出站；模型连接填真实账号Resource ID及别名。共享模型账号的公网/Local Auth关闭不能先于旧业务依赖核对，不能误伤其他使用者。
 
+**首次platform部署的角色命名：** 新目标AKS/工作负载身份尚未创建时，在客户JSON的`parameters.platform`加入`"stage4RoleAssignmentNaming":"resource-id"`，新示例已提供。该模式按目标AKS/UAMI资源ID、授权资源及角色生成稳定的角色分配名称，实际principalId仍取创建后的正确身份输出，授权范围不扩大。旧模式用尚未知的Object ID计算角色分配名称，会使What-if返回`Unsupported`并被门禁拒绝；不能把Unsupported当作通过。已有Stage4角色分配时保持原模式，省略字段等同`principal-id`，不要直接切换以免产生重复角色分配。首次部署后Stage5继续使用同一模式；AKS/UAMI若被删除重建并改变Principal ID，须单独审核旧授权处理，不能自动删除或覆盖旧角色。此字段仅从Stage4绑定配置指纹，代码合并后的同SHA证据要求仍按第3节执行。
+
 **本阶段配置：** 先按4-A填写`parameters.certificate-vault`，由S4-03/04创建两套证书共用的**独立证书Vault**；不是合并Stage5/7业务Vault。此时可不启用顶层privateIngress，不要求Vault内已有证书。S4-04之后按4-C手动导入，入口发布前再补privateIngress的API/admin `tlsSecretId`和`allowedCidrs`，结构见[私有入口参考](customer-deployment-workflows-zh.md#stage4自动私有入口)。
 
 自动API签发可选：另配`AZURE_CERTIFICATE_CLIENT_ID`、已委派Azure DNS Zone以及顶层`certificates={zoneResourceId,termsAccepted:true,publicApiHostnameAccepted:true}`。API tlsSecretId必须无版本；admin证书由企业PKI准备。未选择自动签发则跳过S4-09/10，按4-C手动导入两套证书；本组件不为自动签发身份授予整库权限。来源CIDR覆盖实际Runner私网路径和未来PLS NAT地址，admin只覆盖批准管理网段。

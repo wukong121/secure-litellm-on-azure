@@ -63,6 +63,7 @@
         "postgresqlEntraAdministratorPrincipalType": "Group",
         "redisSkuName": "Balanced_B0"
       },
+      "stage4RoleAssignmentNaming": "resource-id",
       "createStage5KeyVaultPrivateDnsZone": false,
       "createStage5PostgresqlPrivateDnsZone": true,
       "createStage5ManagedRedisPrivateDnsZone": true,

@@ -85,6 +85,13 @@ param bootstrapPrincipalId string = ''
 @description('Create the Stage 5 Key Vault private DNS zone. Keep false when the central zone already exists.')
 param createStage5KeyVaultPrivateDnsZone bool = false
 
+@description('Use resource-id before the first Stage 4 deployment so What-if can resolve role names. Retain principal-id for existing assignments unless separately migrated.')
+@allowed([
+  'principal-id'
+  'resource-id'
+])
+param stage4RoleAssignmentNaming string = 'principal-id'
+
 @description('Keep false when the Stage 4 certificate-vault component or DNS Owner manages the Key Vault VNet link.')
 param configureStage5KeyVaultDnsLink bool = true
 
@@ -279,6 +286,7 @@ module acrPullRole '../modules/acr-pull-role/main.bicep' = if (deployStage4 && d
   params: {
     registryName: containerRegistry!.outputs.registry.name
     kubeletPrincipalId: privateAks!.outputs.aks.kubeletObjectId
+    principalSourceResourceId: stage4RoleAssignmentNaming == 'resource-id' ? resourceId('Microsoft.ContainerService/managedClusters', stage4Aks.name) : ''
   }
 }
 
@@ -301,6 +309,7 @@ module azureOpenAIDataPlaneRoles '../modules/model-access-role/main.bicep' = [fo
   params: {
     accountName: connection.accountName
     principalId: workloadIdentity!.outputs.workloadIdentity.principalId
+    principalSourceResourceId: stage4RoleAssignmentNaming == 'resource-id' ? resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'id-litellm-workload-${environmentName}') : ''
   }
 }]
 

@@ -45,6 +45,8 @@ class CustomerTemplateTests(unittest.TestCase):
             compiled = json.loads(result.stdout)
             if component == "certificate-vault":
                 self.assert_certificate_vault_contract(compiled)
+            if component == "platform":
+                self.assert_stage4_role_naming_contract(compiled)
             declarations = compiled["parameters"]
             for stage in ((3, 4, 5) if component == "platform" else (first_stage,)):
                 with self.subTest(component=component, stage=stage):
@@ -59,6 +61,36 @@ class CustomerTemplateTests(unittest.TestCase):
                         expected = declaration["type"]
                         types = {"string": str, "object": dict, "array": list, "bool": bool, "int": int}
                         self.assertIsInstance(item["value"], types[expected], name)
+
+    def assert_stage4_role_naming_contract(self, compiled):
+        mode = compiled["parameters"]["stage4RoleAssignmentNaming"]
+        self.assertEqual(mode["defaultValue"], "principal-id")
+        self.assertEqual(set(mode["allowedValues"]), {"principal-id", "resource-id"})
+        contracts = (
+            ("acrPullRole", "Microsoft.ContainerService/managedClusters", "kubeletPrincipalId", "kubeletObjectId", "Microsoft.ContainerRegistry/registries", "registryName", "acrPullRoleId", "7f951dda-4ed3-4680-a7ca-43fe172d538d"),
+            ("azureOpenAIDataPlaneRoles", "Microsoft.ManagedIdentity/userAssignedIdentities", "principalId", "principalId", "Microsoft.CognitiveServices/accounts", "accountName", "cognitiveServicesOpenAIUserRoleId", "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"),
+        )
+        for module_name, source_type, principal_parameter, principal_output, scope_type, scope_parameter, role_variable, role_id in contracts:
+            with self.subTest(module=module_name):
+                module = compiled["resources"][module_name]
+                source = json.dumps(module["properties"]["parameters"]["principalSourceResourceId"])
+                self.assertIn("parameters('stage4RoleAssignmentNaming')", source)
+                self.assertIn("resourceId('" + source_type + "'", source)
+                self.assertNotIn("reference(", source)
+                self.assertNotIn("principalId", source)
+                actual_principal = module["properties"]["parameters"][principal_parameter]["value"]
+                self.assertIn("reference(", actual_principal)
+                self.assertIn(principal_output, actual_principal)
+                nested = module["properties"]["template"]
+                self.assertEqual(nested["parameters"]["principalSourceResourceId"]["defaultValue"], "")
+                roles = [resource for resource in nested["resources"] if resource["type"] == "Microsoft.Authorization/roleAssignments"]
+                self.assertEqual(len(roles), 1)
+                assignment = roles[0]
+                self.assertEqual(assignment["name"], f"[guid(resourceId('{scope_type}', parameters('{scope_parameter}')), if(empty(parameters('principalSourceResourceId')), parameters('{principal_parameter}'), parameters('principalSourceResourceId')), variables('{role_variable}'))]")
+                self.assertEqual(assignment["scope"], f"[resourceId('{scope_type}', parameters('{scope_parameter}'))]")
+                self.assertEqual(assignment["properties"]["principalId"], f"[parameters('{principal_parameter}')]")
+                self.assertEqual(assignment["properties"]["principalType"], "ServicePrincipal")
+                self.assertIn(role_id, nested["variables"][role_variable])
 
     def assert_certificate_vault_contract(self, compiled):
         resources = compiled["resources"]

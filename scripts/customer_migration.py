@@ -35,7 +35,7 @@ COMPONENTS = {
     "runner-connectivity": (0, "runner-connectivity", {"runnerVirtualNetworkId", "managePeering", "manageBlobDnsLink"}),
     "legacy-logging": (1, "legacy-logging", {"workspaceMode"}),
     "monitoring": (1, "monitoring", {"logAnalyticsWorkspaceName"}),
-    "platform": (3, "environments", {"containerRegistryName", "logAnalyticsWorkspaceName", "stage4Network", "stage4Aks", "stage5Data", "approvedHttpsFqdns", "azureOpenAIConnections", "createStage5KeyVaultPrivateDnsZone", "createStage5PostgresqlPrivateDnsZone", "createStage5ManagedRedisPrivateDnsZone"}),
+    "platform": (3, "environments", {"containerRegistryName", "logAnalyticsWorkspaceName", "stage4Network", "stage4Aks", "stage4RoleAssignmentNaming", "stage5Data", "approvedHttpsFqdns", "azureOpenAIConnections", "createStage5KeyVaultPrivateDnsZone", "createStage5PostgresqlPrivateDnsZone", "createStage5ManagedRedisPrivateDnsZone"}),
     "certificate-vault": (4, "certificate-vault", {"vaultName", "ingressReaderPrincipalId", "certificateImporterPrincipalId", "certificateImporterPrincipalType", "runnerVirtualNetworkId", "createPrivateDnsZone", "manageRunnerDnsLink", "manageTargetDnsLink"}),
     "audit-foundation": (8, "audit-foundation", set()),
     "observability": (8, "observability", set()),
@@ -157,6 +157,7 @@ def stage_fingerprint(config, stage):
             selected.pop("stage5Data", None)
         if component == "platform" and stage < 4:
             selected.pop("azureOpenAIConnections", None)
+            selected.pop("stage4RoleAssignmentNaming", None)
         scoped["parameters"][component] = selected
     return fingerprint(scoped)
 
@@ -309,6 +310,7 @@ def parameters_for(config, stage, component):
         parameters.pop("stage5Data", None)
     if component == "platform" and stage < 4:
         parameters.pop("azureOpenAIConnections", None)
+        parameters.pop("stage4RoleAssignmentNaming", None)
     require(REQUIRED[component].issubset(parameters) and configured(parameters), "Component configuration is missing or contains placeholders")
     if component == "bootstrap":
         logging = config["parameters"].get("backup", config["parameters"].get("platform", {}))
@@ -320,6 +322,7 @@ def parameters_for(config, stage, component):
         require(configured(workspace_name), "Legacy monitoring workspace name is required")
         parameters["logAnalyticsWorkspaceName"] = workspace_name
     elif component == "platform":
+        require(parameters.get("stage4RoleAssignmentNaming", "principal-id") in {"principal-id", "resource-id"}, "Invalid Stage 4 role assignment naming mode")
         if stage >= 5:
             require("stage5Data" in parameters, "Stage 5 database configuration is required")
             if "certificate-vault" in config["parameters"]:
