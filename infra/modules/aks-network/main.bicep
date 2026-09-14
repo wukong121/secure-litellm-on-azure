@@ -93,6 +93,9 @@ resource systemSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-07-01' = {
 resource userSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-07-01' = {
   parent: virtualNetwork
   name: userSubnetName
+  dependsOn: [
+    systemSubnet
+  ]
   properties: {
     addressPrefix: userSubnetPrefix
     networkSecurityGroup: {
@@ -114,6 +117,9 @@ resource userSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-07-01' = {
 resource ingressSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-07-01' = {
   parent: virtualNetwork
   name: ingressSubnetName
+  dependsOn: [
+    userSubnet
+  ]
   properties: {
     addressPrefix: ingressSubnetPrefix
     networkSecurityGroup: {
