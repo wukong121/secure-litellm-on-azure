@@ -20,6 +20,7 @@ echo "[2/5] Stage 4 static safety"
 
 echo "[3/5] Stage 4 Bicep modules"
 for file in \
+  infra/certificate-vault/main.bicep \
   infra/modules/network-foundation/main.bicep \
   infra/modules/firewall-egress/main.bicep \
   infra/modules/aks-network/main.bicep \

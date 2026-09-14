@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import tempfile
@@ -6,9 +7,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from scripts.customer_migration import ROOT, parameters_for
+from scripts.customer_migration import ROOT, parameters_for, stage_checks, stage_fingerprint, validate_config
 from scripts.migration_deploy import assert_change_scope, build_plan, deploy_component, group_id, resolve_origin
-from tests.test_customer_migration import customer_config
+from tests.test_customer_migration import certificate_config, customer_config
 
 
 class FakeAzure:
@@ -221,6 +222,146 @@ class MigrationDeploymentTests(unittest.TestCase):
         template, parameters = parameters_for(self.config, 0, "bootstrap")
         self.assertEqual(template.parent.name, "bootstrap")
         self.assertEqual(parameters["parameters"]["resourceGroupName"]["value"], "rg-secure")
+
+    def certificate_azure(self, config):
+        from unittest.mock import Mock
+        from scripts.certificate_vault import certificate_resource_ids
+        state = {"vaults": [], "zones": [], "links": [], "dnsServers": []}
+        azure = Mock()
+        azure.run.return_value = {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}
+        def scoped(command):
+            if command[:2] == ["keyvault", "list"]:
+                return state["vaults"]
+            if command[:4] == ["network", "private-dns", "zone", "list"]:
+                return state["zones"]
+            if command[:4] == ["network", "private-dns", "link", "vnet"]:
+                return state["links"]
+            if command[:3] == ["network", "vnet", "show"]:
+                return {"id": command[-1], "dhcpOptions": {"dnsServers": state["dnsServers"]}}
+            if "what-if" in command:
+                return {"status": "Succeeded", "changes": [{"resourceId": identifier, "changeType": "Create"} for identifier in sorted(certificate_resource_ids(config))]}
+            if command[:3] == ["deployment", "group", "create"]:
+                return {"properties": {"provisioningState": "Succeeded"}}
+            raise AssertionError(command)
+        azure.scoped.side_effect = scoped
+        return azure, state
+
+    def test_certificate_vault_scope_is_exact_and_never_allows_secrets_or_business_resources(self):
+        from scripts.certificate_vault import certificate_resource_ids
+        config = certificate_config()
+        allowed = certificate_resource_ids(config)
+        assert_change_scope(config, "certificate-vault", [{"resourceId": identifier, "changeType": "Create"} for identifier in allowed])
+        prefix = group_id(config) + "/providers/"
+        blocked = (
+            prefix + "Microsoft.Network/virtualNetworks/target-vnet",
+            prefix + "Microsoft.Network/virtualNetworks/target-vnet/subnets/snet-pe",
+            prefix + "Microsoft.KeyVault/vaults/kv-lt-test-backend",
+            prefix + "Microsoft.KeyVault/vaults/kv-customer-cert-test/secrets/api-tls",
+            prefix + "Microsoft.KeyVault/vaults/kv-customer-cert-test/providers/Microsoft.Authorization/roleAssignments/extra",
+            prefix + "Microsoft.Network/privateDnsZones/privatelink.vaultcore.azure.net/virtualNetworkLinks/foreign",
+        )
+        for identifier in blocked:
+            with self.subTest(identifier=identifier), self.assertRaisesRegex(ValueError, "unapproved"):
+                assert_change_scope(config, "certificate-vault", [{"resourceId": identifier, "changeType": "Modify"}])
+        for change_type in ("Delete", "Unsupported"):
+            with self.assertRaises(ValueError):
+                assert_change_scope(config, "certificate-vault", [{"resourceId": next(iter(allowed)), "changeType": change_type}])
+        config["parameters"]["certificate-vault"].update(createPrivateDnsZone=False, manageRunnerDnsLink=False, manageTargetDnsLink=False)
+        self.assertFalse(any("privateDnsZones".lower() in identifier for identifier in certificate_resource_ids(config)))
+
+    def test_certificate_config_rejects_invalid_identities_networks_and_secret_mappings(self):
+        from scripts.certificate_vault import certificate_vault_parameters
+        original = certificate_config()
+        settings = original["parameters"]["certificate-vault"]
+        cases = (
+            {"vaultName": "kv-lt-test-backend"}, {"vaultName": "not--valid"},
+            {"ingressReaderPrincipalId": "00000000-0000-0000-0000-000000000000"},
+            {"certificateImporterPrincipalId": settings["ingressReaderPrincipalId"]},
+            {"certificateImporterPrincipalType": "ServicePrincipal"}, {"manageRunnerDnsLink": "false"},
+            {"runnerVirtualNetworkId": settings["runnerVirtualNetworkId"] + "/subnets/runner"},
+            {"runnerVirtualNetworkId": settings["runnerVirtualNetworkId"].replace(original["azure"]["subscriptionId"], "55555555-5555-4555-8555-555555555555")},
+        )
+        for updates in cases:
+            config = copy.deepcopy(original)
+            config["parameters"]["certificate-vault"].update(updates)
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                validate_config(config, "test")
+        config = copy.deepcopy(original)
+        config["privateIngress"] = {plane: {"tlsSecretId": f"https://{settings['vaultName']}.vault.azure.net/secrets/{plane}-tls", "allowedCidrs": ["10.50.0.0/26"]} for plane in ("api", "admin")}
+        validate_config(config, "test")
+        config["privateIngress"]["api"]["tlsSecretId"] = config["privateIngress"]["admin"]["tlsSecretId"]
+        with self.assertRaises(ValueError):
+            certificate_vault_parameters(config)
+        with self.assertRaises(ValueError):
+            validate_config(config, "test")
+
+    def test_certificate_dns_ownership_does_not_revert_at_stage5(self):
+        config = certificate_config()
+        config["parameters"]["platform"]["stage5Data"] = {"postgresqlDatabaseName": "litellm"}
+        _, parameters = parameters_for(config, 5, "platform")
+        self.assertFalse(parameters["parameters"]["createStage5KeyVaultPrivateDnsZone"]["value"])
+        self.assertFalse(parameters["parameters"]["configureStage5KeyVaultDnsLink"]["value"])
+        config["parameters"]["platform"]["createStage5KeyVaultPrivateDnsZone"] = True
+        with self.assertRaisesRegex(ValueError, "owns Key Vault DNS"):
+            parameters_for(config, 5, "platform")
+        config["parameters"].pop("certificate-vault")
+        _, parameters = parameters_for(config, 5, "platform")
+        self.assertTrue(parameters["parameters"]["createStage5KeyVaultPrivateDnsZone"]["value"])
+        self.assertNotIn("configureStage5KeyVaultDnsLink", parameters["parameters"])
+
+    def test_certificate_preflight_blocks_vault_adoption_custom_dns_and_link_conflicts(self):
+        from scripts.certificate_vault import inspect_certificate_infrastructure, ZONE_NAME
+        config = certificate_config()
+        settings = config["parameters"]["certificate-vault"]
+        mutations = (
+            lambda state: state["vaults"].append({"name": settings["vaultName"], "tags": {"purpose": "backend"}}),
+            lambda state: state["dnsServers"].append("10.50.0.10"),
+            lambda state: state["links"].append({"name": "other-link", "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}}),
+            lambda state: state["links"].append({"name": "certificate-runner-link", "registrationEnabled": True, "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}}),
+        )
+        for mutate in mutations:
+            azure, state = self.certificate_azure(config)
+            state["zones"] = [{"name": ZONE_NAME}]
+            mutate(state)
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                inspect_certificate_infrastructure(config, azure)
+        config["parameters"]["certificate-vault"]["createPrivateDnsZone"] = False
+        azure, _ = self.certificate_azure(config)
+        with self.assertRaisesRegex(ValueError, "private DNS zone first"):
+            inspect_certificate_infrastructure(config, azure)
+
+    def test_certificate_preflight_reuses_owned_resources_and_same_vnet(self):
+        from scripts.certificate_vault import certificate_resource_ids, inspect_certificate_infrastructure, ZONE_NAME
+        config = certificate_config()
+        settings = config["parameters"]["certificate-vault"]
+        azure, state = self.certificate_azure(config)
+        state["vaults"] = [{"name": settings["vaultName"], "tags": {"purpose": "ingress-certificates"}}]
+        state["zones"] = [{"name": ZONE_NAME}]
+        state["links"] = [{"name": "certificate-runner-link", "registrationEnabled": False, "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}}]
+        inspect_certificate_infrastructure(config, azure)
+        settings.update(manageRunnerDnsLink=False, manageTargetDnsLink=False)
+        state["dnsServers"] = ["10.50.0.10"]
+        inspect_certificate_infrastructure(config, azure)
+        settings["runnerVirtualNetworkId"] = group_id(config) + "/providers/Microsoft.Network/virtualNetworks/target-vnet"
+        settings.update(manageRunnerDnsLink=True, manageTargetDnsLink=True)
+        self.assertFalse(any("certificate-runner-link" in identifier for identifier in certificate_resource_ids(config)))
+
+    def test_certificate_deployment_requires_evidence_and_matching_plan_without_reading_secrets(self):
+        config = certificate_config()
+        azure, _ = self.certificate_azure(config)
+        records = [{"stage": stage, "environment": "test", "binding": "stage-config", "configSha256": stage_fingerprint(config, stage), "revision": self.revision, "status": "passed", "checks": stage_checks(stage, config), "approvedBy": [config["azure"]["tenantId"], config["azure"]["subscriptionId"]], "observedAt": datetime.now(timezone.utc).isoformat(), "reportUrl": "https://evidence.customer.invalid/report", "reportSha256": "b" * 64} for stage in range(4)]
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_deploy.subprocess.run", side_effect=self.compile):
+            plan = deploy_component(config, 4, "certificate-vault", self.revision, "plan", [], directory, azure=azure)
+            self.assertFalse(any("create" in call.args[0] for call in azure.scoped.call_args_list))
+            with self.assertRaisesRegex(ValueError, "Prior stage evidence"):
+                deploy_component(config, 4, "certificate-vault", self.revision, "deploy", [], directory, plan["planSha256"], azure)
+            with self.assertRaisesRegex(ValueError, "Plan changed"):
+                deploy_component(config, 4, "certificate-vault", self.revision, "deploy", records, directory, "f" * 64, azure)
+            deploy_component(config, 4, "certificate-vault", self.revision, "deploy", records, directory, plan["planSha256"], azure)
+            creates = [call.args[0] for call in azure.scoped.call_args_list if call.args[0][:3] == ["deployment", "group", "create"]]
+            self.assertEqual(len(creates), 1)
+            self.assertIn("Incremental", creates[0])
+            self.assertFalse(any("secret" in call.args[0] for call in azure.scoped.call_args_list))
 
     def test_plan_accepts_null_what_if_delta_without_changing_reviewed_response(self):
         changes = [{**self.change, "delta": None}]

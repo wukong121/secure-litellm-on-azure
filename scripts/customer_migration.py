@@ -36,6 +36,7 @@ COMPONENTS = {
     "legacy-logging": (1, "legacy-logging", {"workspaceMode"}),
     "monitoring": (1, "monitoring", {"logAnalyticsWorkspaceName"}),
     "platform": (3, "environments", {"containerRegistryName", "logAnalyticsWorkspaceName", "stage4Network", "stage4Aks", "stage5Data", "approvedHttpsFqdns", "azureOpenAIConnections", "createStage5KeyVaultPrivateDnsZone", "createStage5PostgresqlPrivateDnsZone", "createStage5ManagedRedisPrivateDnsZone"}),
+    "certificate-vault": (4, "certificate-vault", {"vaultName", "ingressReaderPrincipalId", "certificateImporterPrincipalId", "certificateImporterPrincipalType", "runnerVirtualNetworkId", "createPrivateDnsZone", "manageRunnerDnsLink", "manageTargetDnsLink"}),
     "audit-foundation": (8, "audit-foundation", set()),
     "observability": (8, "observability", set()),
     "proxy-foundation": (7, "proxy-foundation", set()),
@@ -51,6 +52,7 @@ REQUIRED = {
     "runner-connectivity": {"runnerVirtualNetworkId"},
     "monitoring": {"logAnalyticsWorkspaceName"},
     "platform": {"containerRegistryName", "logAnalyticsWorkspaceName", "stage4Network", "stage4Aks"},
+    "certificate-vault": {"vaultName", "ingressReaderPrincipalId", "certificateImporterPrincipalId", "certificateImporterPrincipalType", "runnerVirtualNetworkId", "createPrivateDnsZone", "manageRunnerDnsLink"},
     "audit-foundation": set(),
     "observability": set(),
     "proxy-foundation": set(),
@@ -244,6 +246,10 @@ def validate_config(config, environment):
     for component, parameters in config["parameters"].items():
         require(isinstance(parameters, dict) and not set(parameters) - COMPONENTS[component][2], "Unknown or reserved component parameter")
         require(mode != "greenfield" or component not in {"monitoring", "legacy-logging"}, "Legacy monitoring components do not apply to greenfield")
+    certificate_vault = config["parameters"].get("certificate-vault")
+    if certificate_vault is not None and (configured(certificate_vault) or "privateIngress" in config):
+        from scripts.certificate_vault import certificate_vault_parameters
+        certificate_vault_parameters(config)
     network = config["parameters"].get("network")
     if network is not None:
         require(REQUIRED["network"].issubset(network), "Network bootstrap configuration is incomplete")
@@ -316,6 +322,9 @@ def parameters_for(config, stage, component):
     elif component == "platform":
         if stage >= 5:
             require("stage5Data" in parameters, "Stage 5 database configuration is required")
+            if "certificate-vault" in config["parameters"]:
+                require(not parameters.get("createStage5KeyVaultPrivateDnsZone", False), "certificate-vault owns Key Vault DNS; set createStage5KeyVaultPrivateDnsZone=false")
+                parameters.update(createStage5KeyVaultPrivateDnsZone=False, configureStage5KeyVaultDnsLink=False)
             if "databaseAccess" in config:
                 parameters["bootstrapPrincipalId"] = config["databaseAccess"]["migrationPrincipalId"]
         if deployment_mode(config) == "migration":
@@ -326,6 +335,9 @@ def parameters_for(config, stage, component):
     elif component == "runner-connectivity":
         from scripts.runner_connectivity import connectivity_parameters
         parameters = connectivity_parameters(config)
+    elif component == "certificate-vault":
+        from scripts.certificate_vault import certificate_vault_parameters
+        parameters = certificate_vault_parameters(config)
     elif component == "monitoring":
         require(config["legacy"]["namespace"] == "litellm" and config["legacy"]["postgresPvc"] == "pg-data", "Monitoring queries currently require litellm namespace and pg-data PVC; adapt and test queries first")
         parameters.update(aksClusterName=config["legacy"]["aksClusterName"], ownerEmail=config["ownerEmail"])

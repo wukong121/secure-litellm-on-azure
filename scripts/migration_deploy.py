@@ -35,6 +35,10 @@ def assert_change_scope(config, component, changes, connectivity=None):
         if change["changeType"] in {"NoChange", "Ignore"}:
             continue
         resource = change.get("resourceId", "").lower()
+        if component == "certificate-vault":
+            from scripts.certificate_vault import certificate_resource_ids
+            require(resource in certificate_resource_ids(config), "Certificate plan attempts to modify an unapproved resource")
+            continue
         if component == "runner-connectivity":
             from scripts.runner_connectivity import connectivity_resource_ids
             require(connectivity is not None, "Connectivity changes require resolved backup resources")
@@ -188,6 +192,9 @@ def deploy_component(config, stage, component, revision, operation, previous, di
     context = azure.run(["account", "show", "--query", "{tenantId:tenantId,id:id}"])
     require(context == {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}, "Azure login scope does not match customer configuration")
     connectivity = None
+    if component == "certificate-vault":
+        from scripts.certificate_vault import inspect_certificate_infrastructure
+        inspect_certificate_infrastructure(config, azure)
     if component == "runner-connectivity":
         from scripts.runner_connectivity import inspect_connectivity
         connectivity = inspect_connectivity(config, azure)

@@ -23,6 +23,21 @@ def customer_config():
     }
 
 
+def certificate_config():
+    config = customer_config()
+    config["parameters"]["platform"]["stage4Network"]["privateEndpointSubnetName"] = "snet-pe"
+    config["parameters"]["certificate-vault"] = {
+        "vaultName": "kv-customer-cert-test",
+        "ingressReaderPrincipalId": "33333333-3333-4333-8333-333333333333",
+        "certificateImporterPrincipalId": "44444444-4444-4444-8444-444444444444",
+        "certificateImporterPrincipalType": "User",
+        "runnerVirtualNetworkId": f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/rg-runner/providers/Microsoft.Network/virtualNetworks/runner-vnet",
+        "createPrivateDnsZone": True,
+        "manageRunnerDnsLink": True,
+    }
+    return config
+
+
 class CustomerMigrationTests(unittest.TestCase):
     def setUp(self):
         self.config = customer_config()
@@ -101,6 +116,24 @@ class CustomerMigrationTests(unittest.TestCase):
         self.config["azure"]["subscriptionId"] = "33333333-3333-4333-8333-333333333333"
         with self.assertRaises(ValueError):
             validate_evidence([self.record], 1, self.config, self.revision, self.now)
+
+    def test_certificate_vault_parameters_are_stage4_only_and_preserve_early_fingerprints(self):
+        self.config = certificate_config()
+        previous = copy.deepcopy(self.config)
+        previous["parameters"].pop("certificate-vault")
+        validate_config(self.config, "test")
+        for stage in range(4):
+            self.assertEqual(stage_fingerprint(previous, stage), stage_fingerprint(self.config, stage))
+        template, document = parameters_for(self.config, 4, "certificate-vault")
+        self.assertEqual(template, ROOT / "infra/certificate-vault/main.bicep")
+        values = {key: item["value"] for key, item in document["parameters"].items()}
+        self.assertEqual(values["virtualNetworkName"], "target-vnet")
+        self.assertEqual(values["privateEndpointSubnetName"], "snet-pe")
+        self.assertEqual(values["logAnalyticsWorkspaceName"], "customer-logs")
+        self.assertNotIn("workloadPrincipalId", values)
+        for stage in (0, 3, 5):
+            with self.assertRaisesRegex(ValueError, "does not belong"):
+                parameters_for(self.config, stage, "certificate-vault")
 
     def test_supply_chain_gates_separate_source_from_private_target(self):
         self.assertIn("source_image_sbom_scan", stage_checks(3, self.config))
