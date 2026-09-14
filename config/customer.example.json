@@ -16,6 +16,7 @@
     "backup": {
       "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
       "backupOwnerPrincipalId": "REPLACE_APPROVED_USER_OBJECT_ID",
+      "backupAutomationPrincipalId": "REPLACE_RUNTIME_SERVICE_PRINCIPAL_OBJECT_ID",
       "virtualNetworkName": "REPLACE_TARGET_VNET",
       "virtualNetworkAddressPrefix": "10.30.0.0/16",
       "privateEndpointSubnetName": "snet-private-endpoints",
