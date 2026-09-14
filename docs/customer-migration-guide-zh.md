@@ -102,7 +102,7 @@
 
 `MIGRATION_EVIDENCE_JSON`仅保留旧入口兼容，不是当前Actions首次运行的必填Secret。单人验收采用`draft → confirm`后，后续workflow自动读取加密账本，不要求逐阶段手改证据Secret，也不要求提供旧`record`入口的报告/审批人JSON。
 
-配置中的`ownerEmail`用于资源标签、告警邮箱以及备份Owner描述，不用于推断RBAC。`backupOwnerPrincipalId`是客户明确批准的Entra用户object ID；当前备份模板的principalType为User，不能填workflow应用ID或用`az ad signed-in-user`推断。需组/服务主体时先修改并测试该角色边界。
+配置中的`ownerEmail`用于资源标签、告警邮箱以及备份Owner描述，不用于推断RBAC。`backupOwnerPrincipalId`是客户明确批准的Entra用户Object ID；`backupAutomationPrincipalId`是`AZURE_RUNTIME_CLIENT_ID`对应服务主体的Object ID，两者不能替换。当前备份Owner模板的principalType为User，不能填workflow应用ID或用`az ad signed-in-user`推断。需组/服务主体作为人工保管人时先修改并测试该角色边界。两类ID的Portal/CLI获取、核验及回填步骤见[0-A1](#0-a1-备份身份的获取与核验)。
 
 `baseDomain`自动生成`llm-api.<客户域名>`和`llm-admin.<客户域名>`；只有API可进入Front Door，admin保持私网。`legacy`记录实际旧RG、AKS、namespace和PG PVC；`parameters`按组件填写客户资源值。可留待后续阶段填写其他组件，但使用当前组件前必须清除其占位符。Stage3/4不校验尚未启用的`stage5Data`，Stage3不校验尚未使用的模型连接。
 
@@ -270,11 +270,72 @@ draft可以在阶段操作前生成，用作检查清单；所有实测完成后
 | `POSTGRES_RESTORE_IMAGE` | `test`的Environment Variable；按下面方法取得完整镜像digest引用 | **运行backup-restore前必填**，不是Secret、不是workflow输入，也不放进客户JSON |
 | `target.resourceGroup`、`location` | `CUSTOMER_CONFIG_JSON`；批准的新目标RG名和区域 | bootstrap前；目标RG必须与旧RG不同 |
 | `parameters.backup.logAnalyticsWorkspaceName` | 客户JSON；新日志工作区名，与platform等新环境组件统一 | bootstrap及backup前；不是旧监控工作区 |
-| `parameters.backup.backupOwnerPrincipalId` | 客户JSON；备份保管人的Entra用户Object ID | backup前；不是Client ID |
-| `parameters.backup.backupAutomationPrincipalId` | 客户JSON；`AZURE_RUNTIME_CLIENT_ID`对应服务主体的Object ID | 建议backup前填好，模板授予其备份容器范围Blob Data Contributor；省略则须另外批准数据权限 |
+| `parameters.backup.backupOwnerPrincipalId` | 客户JSON；备份保管人的Entra用户Object ID，按0-A1从客户租户Users取得 | backup前；不是Client ID，不自动选择当前登录用户 |
+| `parameters.backup.backupAutomationPrincipalId` | 客户JSON；按0-A1由`AZURE_RUNTIME_CLIENT_ID`查询服务主体Object ID | 本文OIDC备份路径在backup前填写，模板授予备份容器范围Blob Data Contributor；仅在已另行批准并配置等效数据权限时才省略 |
 | 备份VNet与PE子网名称/CIDR | 客户JSON的`parameters.backup` | backup前；与后续platform一致，不能和Runner/企业网络重叠 |
 
 `parameters.bootstrap`可省略，默认创建工作区；可显式配置`{"workspaceMode":"create","logRetentionDays":30}`。已有同RG工作区并获准复用时用`workspaceMode=existing`；不要先删旧集群仍在使用的日志库来“去重”。
+
+#### 0-A1. 备份身份的获取与核验
+
+旧版[客户示例](../config/customer.example.json)漏列了`backupAutomationPrincipalId`。从旧版复制配置的客户应在`parameters.backup`内补上该字段，保留已有`backupOwnerPrincipalId`；不要把新字段建成同名GitHub Variable，也不要照抄其他租户的GUID。模板技术上允许省略它，以兼容另行管理RBAC的客户，但不会因此自动把人工Owner的权限给Actions。
+
+| 值 | 代表谁 | 获取位置与回填位置 |
+| --- | --- | --- |
+| `AZURE_RUNTIME_CLIENT_ID` | 用于普通runtime workflow的OIDC登录身份 | 第2.2节预先准备的运行身份：应用注册的Application (client) ID，或用户分配托管身份的Client ID；填所选GitHub Environment Variable |
+| `backupAutomationPrincipalId` | 上述登录身份在客户租户中的服务主体 | Enterprise applications的Object ID，或该托管身份的Principal ID；填客户JSON的`parameters.backup` |
+| `backupOwnerPrincipalId` | 客户明确批准的人工备份保管人 | 客户租户Microsoft Entra ID → Users → 指定用户 → Object ID；填客户JSON的`parameters.backup` |
+
+**取得自动化身份，先锁定Client ID再查Object ID：** 打开客户仓库Settings → Environments → 本次环境，记录`AZURE_RUNTIME_CLIENT_ID`的值。GitHub Variable不会自动成为你本机终端的环境变量；下面的`RUNTIME_CLIENT_ID`要显式填这个值，不取`AZURE_CLIENT_ID`，也不取Runner VM资源ID或登录VM的用户。如果尚无运行身份，先完成第2.2节的身份/OIDC准备，不临时用个人ID凑数。
+
+Portal路径：切换到客户的Entra租户 → Enterprise applications（企业应用）→ All applications，按上述Application ID查找，必要时调整应用类型筛选。在Overview同时核对Application ID与Object ID，后者才是要回填的值。应用注册Overview中另一个Object ID属于application对象，**不是**这里的service principal对象，不能使用。
+
+CLI路径：在已获准读取客户目录的管理终端执行。先核对`az account show`输出与客户JSON的`azure.tenantId`、`azure.subscriptionId`一致；不一致先登录/切换到正确租户和订阅，再继续。以下查询不创建身份、不生成密码、不授予权限：
+
+```bash
+az account show --query '{tenantId:tenantId,subscriptionId:id}' --output json
+RUNTIME_CLIENT_ID="REPLACE_WITH_AZURE_RUNTIME_CLIENT_ID"
+az ad sp show --id "$RUNTIME_CLIENT_ID" \
+  --query '{displayName:displayName,clientId:appId,objectId:id}' --output json
+```
+
+检查输出`clientId`与输入完全一致，`displayName`对应客户批准的运行身份，把输出`objectId`填入`parameters.backup.backupAutomationPrincipalId`。Object ID是租户内标识，同一多租户应用在不同客户租户里的值也可能不同；不要使用`az ad app show`的`id`代替它。
+
+若运行身份是**用户分配托管身份（UAMI）**，也可从Azure Portal → Managed Identities → 该身份 → Overview取Principal ID。下面的RG、身份名称和订阅来自这个身份资源本身，不默认是Runner RG或VM名称；同样核对返回的`clientId`等于GitHub中的运行Client ID：
+
+```bash
+az identity show --subscription "REPLACE_SUBSCRIPTION_ID" \
+  --resource-group "REPLACE_IDENTITY_RESOURCE_GROUP" --name "REPLACE_IDENTITY_NAME" \
+  --query '{tenantId:tenantId,clientId:clientId,objectId:principalId}' --output json
+```
+
+如果`az ad sp show`因目录读取权限失败或找不到对象，请客户Entra管理员在正确租户核验并提供匹配的两项ID，或使用已获准读取的UAMI资源查询。订阅Contributor不等于Microsoft Graph目录读取权限；不要为查询ID而给日常运行身份添加宽泛Graph权限，也不要随意新建一个同名应用。
+
+**取得人工Owner：** 先由客户确认谁负责保管备份，再查询该用户。`ownerEmail`可能只是通知邮箱，当前CLI登录人也可能是顾问，不能自动当作Owner。Portal在客户租户Users中核验该用户的UPN、用户类型和Object ID；CLI可使用该用户在客户租户中的实际UPN：
+
+```bash
+BACKUP_OWNER_UPN="REPLACE_APPROVED_USER_UPN_IN_CUSTOMER_TENANT"
+az ad user show --id "$BACKUP_OWNER_UPN" \
+  --query '{displayName:displayName,userPrincipalName:userPrincipalName,objectId:id}' --output json
+```
+
+将这里的`objectId`填入`parameters.backup.backupOwnerPrincipalId`。来宾用户应取**客户租户内**的来宾对象ID与UPN（可能含`#EXT#`），不是其主租户Object ID，也不是仅按显示名称匹配的另一个用户。当前模板为该User授予Storage Account Contributor和Storage Blob Data Owner；自动化服务主体则仅获备份容器范围Storage Blob Data Contributor，两者须分别批准。
+
+**这类故障中怎样反查实际调用者：** 如果已有workflow运行，可在旧AKS的Activity log中按运行时间定位`Microsoft.ContainerService/managedClusters/listClusterUserCredential/action`，检查事件JSON的`claims.appid`与`claims["http://schemas.microsoft.com/identity/claims/objectidentifier"]`，分别对应Client ID和服务主体Object ID，再与上面的身份查询交叉核验。不能只看`caller`的显示形式就猜是哪种ID。活动日志只证明该条管理操作由谁执行及其结果，不证明Blob上传或数据库恢复成功；全新客户无需先故意运行失败来获取ID。
+
+**回填与授权后核验：** 修改受控客户JSON后，更新同一GitHub Environment的`CUSTOMER_CONFIG_JSON` Secret。Stage0内补填该字段后，对`component=backup`重新运行`plan`并审核RBAC变更，再用该plan的run ID执行`deploy`；不是重跑bootstrap或直接重用旧plan。已有阶段验收时按第3节复核受影响证据；Stage4以后不要回套Stage0网络模板，应单独审批授权变更。
+
+可从Storage Account → Containers → litellm-postgresql → Access control (IAM)核验容器范围授权，或使用以下只读查询。`RUNTIME_OBJECT_ID`来自上述输出；`BACKUP_CONTAINER_SCOPE`中的Storage ARM资源ID从备份账户Portal的JSON View取得，后接实际容器路径（当前模板固定为`litellm-postgresql`），不是Blob URL：
+
+```bash
+RUNTIME_OBJECT_ID="REPLACE_RUNTIME_SERVICE_PRINCIPAL_OBJECT_ID"
+BACKUP_CONTAINER_SCOPE="REPLACE_BACKUP_STORAGE_RESOURCE_ID/blobServices/default/containers/litellm-postgresql"
+az role assignment list --assignee-object-id "$RUNTIME_OBJECT_ID" \
+  --scope "$BACKUP_CONTAINER_SCOPE" --include-inherited --fill-principal-name false \
+  --query '[].{role:roleDefinitionName,scope:scope,principalId:principalId}' --output json
+```
+
+核对容器范围的Storage Blob Data Contributor（或客户另行批准的等效数据权限）与运行Object ID匹配；新授权还需等待传播并验证实际访问。此查询不证明网络可达，也不完整评估组成员、自定义角色或条件权限，不能仅凭角色名称认定备份已可执行。继续完成S0-05的Runner私网/DNS/443核验，不打开Storage公网，也不授予订阅Owner代替这些步骤。
 
 #### 0-B. 获取POSTGRES_RESTORE_IMAGE
 

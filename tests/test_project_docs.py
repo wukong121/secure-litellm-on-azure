@@ -79,6 +79,32 @@ class ProjectDocumentationTests(unittest.TestCase):
         self.assertNotIn("Stage8/application仍要求auditRuntime", guide)
         self.assertNotIn("本仓库尚未自动编排该controller/LB", guide)
 
+    def test_backup_identity_example_and_value_discovery_match_runtime_contract(self):
+        from scripts.customer_migration import COMPONENTS, parameters_for
+        from tests.test_customer_migration import customer_config
+
+        example = json.loads((ROOT / "config/customer.example.json").read_text())
+        for name in ("backupOwnerPrincipalId", "backupAutomationPrincipalId"):
+            with self.subTest(parameter=name):
+                self.assertIn(name, COMPONENTS["backup"][2])
+                self.assertRegex(example["parameters"]["backup"][name], r"^REPLACE_[A-Z_]+$")
+        config = customer_config()
+        principal = "55555555-5555-4555-8555-555555555555"
+        config["parameters"]["backup"] = {
+            **example["parameters"]["backup"],
+            "logAnalyticsWorkspaceName": "customer-logs",
+            "backupOwnerPrincipalId": "33333333-3333-4333-8333-333333333333",
+            "backupAutomationPrincipalId": principal,
+            "virtualNetworkName": "target-vnet",
+        }
+        _, document = parameters_for(config, 0, "backup")
+        self.assertEqual(document["parameters"]["backupAutomationPrincipalId"]["value"], principal)
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        identity = guide.split("#### 0-A1. ", 1)[1].split("#### 0-B. ", 1)[0]
+        for required in ("backupOwnerPrincipalId", "backupAutomationPrincipalId", "AZURE_RUNTIME_CLIENT_ID", "Enterprise applications", 'az ad sp show --id "$RUNTIME_CLIENT_ID"', "clientId:appId,objectId:id", "az identity show", "objectId:principalId", 'az ad user show --id "$BACKUP_OWNER_UPN"', "claims.appid", "claims/objectidentifier", "CUSTOMER_CONFIG_JSON", "component=backup", "Storage Blob Data Contributor", "--assignee-object-id", "--include-inherited"):
+            with self.subTest(required=required):
+                self.assertIn(required, identity)
+
     def test_runbook_covers_configuration_for_all_primary_workflows(self):
         guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
         configuration = guide.split("### 2.1 Variables和Secrets", 1)[1].split("### 2.2", 1)[0]
