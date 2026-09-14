@@ -32,6 +32,7 @@ COMPONENTS = {
     "bootstrap": (0, "bootstrap", {"workspaceMode", "logRetentionDays"}),
     "network": (0, "network-bootstrap", {"virtualNetworkName", "virtualNetworkAddressPrefix", "privateEndpointSubnetName", "privateEndpointSubnetPrefix"}),
     "backup": (0, "backup-storage", {"storageAccountName", "virtualNetworkName", "virtualNetworkAddressPrefix", "privateEndpointSubnetName", "privateEndpointSubnetPrefix", "logAnalyticsWorkspaceName", "backupOwnerPrincipalId", "backupAutomationPrincipalId", "storageSku", "softDeleteRetentionDays"}),
+    "runner-connectivity": (0, "runner-connectivity", {"runnerVirtualNetworkId", "managePeering", "manageBlobDnsLink"}),
     "legacy-logging": (1, "legacy-logging", {"workspaceMode"}),
     "monitoring": (1, "monitoring", {"logAnalyticsWorkspaceName"}),
     "platform": (3, "environments", {"containerRegistryName", "logAnalyticsWorkspaceName", "stage4Network", "stage4Aks", "stage5Data", "approvedHttpsFqdns", "azureOpenAIConnections", "createStage5KeyVaultPrivateDnsZone", "createStage5PostgresqlPrivateDnsZone", "createStage5ManagedRedisPrivateDnsZone"}),
@@ -47,6 +48,7 @@ REQUIRED = {
     "network": {"virtualNetworkName", "virtualNetworkAddressPrefix", "privateEndpointSubnetName", "privateEndpointSubnetPrefix"},
     "legacy-logging": set(),
     "backup": {"logAnalyticsWorkspaceName", "backupOwnerPrincipalId", "virtualNetworkName", "virtualNetworkAddressPrefix", "privateEndpointSubnetName", "privateEndpointSubnetPrefix"},
+    "runner-connectivity": {"runnerVirtualNetworkId"},
     "monitoring": {"logAnalyticsWorkspaceName"},
     "platform": {"containerRegistryName", "logAnalyticsWorkspaceName", "stage4Network", "stage4Aks"},
     "audit-foundation": set(),
@@ -321,6 +323,9 @@ def parameters_for(config, stage, component):
         parameters.update(environmentName=config["environment"], deployContainerRegistry=True, deployStage4=stage >= 4, deployStage5=stage >= 5, containerRegistryPublicNetworkAccess="Disabled")
     elif component == "backup":
         parameters["backupOwnerUpn"] = config["ownerEmail"]
+    elif component == "runner-connectivity":
+        from scripts.runner_connectivity import connectivity_parameters
+        parameters = connectivity_parameters(config)
     elif component == "monitoring":
         require(config["legacy"]["namespace"] == "litellm" and config["legacy"]["postgresPvc"] == "pg-data", "Monitoring queries currently require litellm namespace and pg-data PVC; adapt and test queries first")
         parameters.update(aksClusterName=config["legacy"]["aksClusterName"], ownerEmail=config["ownerEmail"])

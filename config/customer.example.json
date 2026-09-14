@@ -22,6 +22,11 @@
       "privateEndpointSubnetName": "snet-private-endpoints",
       "privateEndpointSubnetPrefix": "10.30.8.0/24"
     },
+    "runner-connectivity": {
+      "runnerVirtualNetworkId": "REPLACE_RUNNER_VNET_RESOURCE_ID",
+      "managePeering": true,
+      "manageBlobDnsLink": true
+    },
     "monitoring": {"logAnalyticsWorkspaceName": "REPLACE_LEGACY_LOG_WORKSPACE"},
     "platform": {
       "containerRegistryName": "REPLACE_GLOBALLY_UNIQUE_ACR_NAME",

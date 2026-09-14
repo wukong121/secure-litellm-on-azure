@@ -23,7 +23,7 @@ def group_id(config, legacy=False):
     return f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{config['legacy' if legacy else 'target']['resourceGroup']}"
 
 
-def assert_change_scope(config, component, changes):
+def assert_change_scope(config, component, changes, connectivity=None):
     allowed_types = {"Create", "Modify", "NoChange", "Ignore"}
     allowed_group = group_id(config, component in {"monitoring", "legacy-logging"}).lower()
     external_accounts = {
@@ -35,6 +35,11 @@ def assert_change_scope(config, component, changes):
         if change["changeType"] in {"NoChange", "Ignore"}:
             continue
         resource = change.get("resourceId", "").lower()
+        if component == "runner-connectivity":
+            from scripts.runner_connectivity import connectivity_resource_ids
+            require(connectivity is not None, "Connectivity changes require resolved backup resources")
+            require(resource in connectivity_resource_ids(config, connectivity["privateDnsZoneName"]), "Connectivity plan attempts to modify an unapproved resource")
+            continue
         local = resource.startswith(allowed_group + "/") or (component == "bootstrap" and resource == allowed_group)
         external_role = component == "platform" and any(
             resource.startswith(account + "/providers/microsoft.authorization/roleassignments/")
@@ -143,8 +148,8 @@ def resolve_origin(config, component, azure):
     return resolved
 
 
-def build_plan(config, stage, component, revision, template_hash, parameters, changes):
-    assert_change_scope(config, component, changes)
+def build_plan(config, stage, component, revision, template_hash, parameters, changes, connectivity=None):
+    assert_change_scope(config, component, changes, connectivity)
     relevant = sorted((change for change in changes if change["changeType"] != "Ignore"), key=lambda change: change.get("resourceId", ""))
     contract = {
         "stage": stage, "component": component, "environment": config["environment"],
@@ -182,6 +187,10 @@ def deploy_component(config, stage, component, revision, operation, previous, di
     azure = azure or AzureCommands(config, directory)
     context = azure.run(["account", "show", "--query", "{tenantId:tenantId,id:id}"])
     require(context == {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}, "Azure login scope does not match customer configuration")
+    connectivity = None
+    if component == "runner-connectivity":
+        from scripts.runner_connectivity import inspect_connectivity
+        connectivity = inspect_connectivity(config, azure)
     resolved = resolve_origin(config, component, azure)
     template, path = prepare(resolved, stage, component, directory)
     if release is not None:
@@ -218,7 +227,10 @@ def deploy_component(config, stage, component, revision, operation, previous, di
     common = [*scope_args, "--name", deployment_name(config, stage, component), "--template-file", str(compiled), "--parameters", f"@{path}"]
     response = azure.scoped(["deployment", scope, "what-if", *common, "--result-format", "FullResourcePayloads", "--no-pretty-print"])
     require(response.get("status") == "Succeeded" and isinstance(response.get("changes"), list), "What-if did not produce a successful change list")
-    plan = build_plan(config, stage, component, revision, template_hash, {"parameters": json.loads(path.read_text()), "release": release}, response["changes"])
+    reviewed_parameters = {"parameters": json.loads(path.read_text()), "release": release}
+    if connectivity is not None:
+        reviewed_parameters["connectivity"] = connectivity
+    plan = build_plan(config, stage, component, revision, template_hash, reviewed_parameters, response["changes"], connectivity)
     private_write(directory / "reviewed-plan.json", json.dumps({"planSha256": plan["planSha256"], "revision": revision, "changes": [change for change in response["changes"] if change["changeType"] != "Ignore"]}, indent=2) + "\n")
     private_write(directory / "plan-summary.json", json.dumps(plan, indent=2) + "\n")
     print(json.dumps({"planSha256": plan["planSha256"], "stage": stage, "component": component, "deploymentPerformed": False}))

@@ -1,6 +1,6 @@
 # 客户既有LiteLLM迁移执行手册：架构阶段0与阶段1
 
-> 核对日期：2026-09-13。本文是按当前workflow输入及控制代码核对的主操作手册，不是客户云上全流程已经验收的证明。
+> 核对日期：2026-09-14。本文是按当前workflow输入及控制代码核对的主操作手册，不是客户云上全流程已经验收的证明。
 >
 > 适用：已有LiteLLM on AKS，先加固旧环境，再并行新建、迁移、验证、切流和停旧。示例统一使用GitHub Environment `test`；客户实际用`prod`时须整套一致替换，不混用环境。
 >
@@ -21,7 +21,7 @@
 | workflow显示名称 | 用途/执行机 | 表单输入 |
 | --- | --- | --- |
 | [Customer staged migration](../.github/workflows/customer-migration.yml) | 配置检查/阶段预检，GitHub托管Runner；不部署 | environment、stage、mode、component |
-| [Customer private runner checks](../.github/workflows/customer-runner-checks.yml) | 检查自托管Runner工具、Docker、身份范围和AKS只读访问 | environment、check_target |
+| [Customer private runner checks](../.github/workflows/customer-runner-checks.yml) | 检查工具、身份范围、AKS只读访问；可选备份私网/Blob只读检查 | environment、check_target、check_backup |
 | [Customer infrastructure deployment](../.github/workflows/customer-deploy.yml) | Azure资源plan/deploy，GitHub托管Runner | environment、stage、component、operation、release、approved_run_id、approved_plan_sha256、confirm_environment |
 | [Customer private runtime operations](../.github/workflows/customer-runtime.yml) | 私网备份/恢复、Kubernetes发布、身份/证书动作，自托管Runner | environment、stage、action、operation、approved_run_id、approved_plan_sha256、audit_continue_run_id、confirm_environment |
 | [Customer stage acceptance](../.github/workflows/customer-acceptance.yml) | 检查清单与验收记录，GitHub托管Runner | environment、stage、operation、reviewed_run_id、checked_items、evidence_notes、confirm_environment |
@@ -120,6 +120,7 @@
 | --- | --- | --- |
 | deploy，Stage0/bootstrap | 订阅范围的RG创建/嵌套部署及目标日志资源部署；plan的What-if也需相应权限 | Reader不够；不默认授予订阅Owner |
 | deploy，backup/platform等 | 批准目标RG内的资源部署；涉及角色分配需相应受控RBAC管理权限；旧监控另外限定旧RG | Contributor不含角色分配；跨订阅模型角色须在对应账号范围另行授权 |
+| deploy，Stage0/runner-connectivity | 两个指定VNet的读取及Peering写入/peer权限、目标Blob DNS zone的链接管理、Runner VNet的join权限；两侧RG内所需ARM部署/What-if权限 | 不修改整个VNet、NSG或路由；此组件不自行授予网络权限，详见0-A2 |
 | runtime，Runner检查/备份 | 旧AKS读取、Cluster User凭据获取及Kubernetes Deployment/Pod读取；备份另需postgres exec/cp、目标部署输出读取、Blob容器数据读写 | ARM权限不等于Kubernetes RBAC或Storage数据权限 |
 | runtime，新环境发布 | 目标AKS/命名空间发布、指定Vault访问、镜像读写及目标RG操作回执权限，随动作授权 | 不给日常应用身份DDL或管理权限 |
 | database，Stage5/database-roles | 配置为PG Entra管理员服务主体或其获准管理员组成员，能建立新库角色及授权 | 个人User管理员不能通过服务主体OIDC模拟；不能直接填个人UPN |
@@ -138,7 +139,7 @@
 | --- | --- | --- |
 | 首次检查 | schemaVersion=1、environment、azure、location、baseDomain、ownerEmail、legacy、target、parameters | 来自实际客户租户/订阅、域名及旧部署；目标RG不同于旧RG，不能用Runner RG冒充目标RG |
 | 首次验收前，建议开始即冻结 | governance | 单人confirm须有本人Entra用户Object ID、GitHub login及明确风险接受，例子如下；改governance会影响早期证据 |
-| Stage0 | parameters.backup、可选parameters.bootstrap | 新备份网络/工作区与两类备份Owner；见0-A |
+| Stage0 | parameters.backup、parameters.runner-connectivity、可选parameters.bootstrap | 新备份网络/工作区、两类备份身份及Runner VNet资源ID；见0-A、0-A2 |
 | Stage1 | parameters.monitoring、可选parameters.legacy-logging、legacyAccess | 旧日志工作区及真实批准来源；旧/新工作区不同不代表重复 |
 | Stage2 | contentAudit | 本文采用native；此后正文决策绑定证据 |
 | Stage3 | parameters.platform的ACR/日志名及stage4Network、stage4Aks | 这些网络/集群字段Stage3已要求提供，不能等Stage4才填写；stage5Data和模型连接可稍后补齐 |
@@ -167,7 +168,7 @@ Client ID用于登录，Principal/Object ID用于RBAC或用户批准，模型`de
 | 步骤 | workflow | 完整输入 | 成功后/失败时 |
 | --- | --- | --- | --- |
 | P-01 | Customer staged migration | branch=main，environment=test，stage=0，mode=config-check，component=none | 检查客户基础JSON，不查询Azure；失败先修配置 |
-| P-02 | Customer private runner checks | branch=main，environment=test，check_target=false | 确认作业落到实际Runner并完成工具/身份/旧AKS只读检查；不是全部写权限或Blob私网证明 |
+| P-02 | Customer private runner checks | branch=main，environment=test，check_target=false，check_backup=false | 初次检查只核对工具/身份/旧AKS；备份资源及连接建立后再选check_backup=true |
 | P-03 | 人工核对 | 保护分支、Environment变量/Secrets、Owner授权、镜像/容量/网络清单 | 清楚下一步收费/作用域后进入S0-01 |
 
 可在组件首次plan前重复P-01，把stage/component换成本次组件，提前发现参数问题。`guide/config-check/preflight`成功不能当作deploy已批准；Runner显示Idle也不等于读写权限和私网已经验证。
@@ -337,6 +338,34 @@ az role assignment list --assignee-object-id "$RUNTIME_OBJECT_ID" \
 
 核对容器范围的Storage Blob Data Contributor（或客户另行批准的等效数据权限）与运行Object ID匹配；新授权还需等待传播并验证实际访问。此查询不证明网络可达，也不完整评估组成员、自定义角色或条件权限，不能仅凭角色名称认定备份已可执行。继续完成S0-05的Runner私网/DNS/443核验，不打开Storage公网，也不授予订阅Owner代替这些步骤。
 
+#### 0-A2. 由workflow建立Runner备份连接
+
+`backup`创建备份侧资源，`runner-connectivity`是独立的Stage0组件：在已存在的Runner和备份VNet上创建双向Peering，并把备份Blob Private DNS链接到Runner VNet。使用现有Customer infrastructure deployment的plan/deploy与相同加密批准机制，不需要新增workflow、GitHub Secret或Client ID。管理面操作在GitHub托管Runner执行，不要求私网已通。
+
+在客户JSON的`parameters`内加入以下块，示例配置已包含它：
+
+```json
+"runner-connectivity": {
+  "runnerVirtualNetworkId": "REPLACE_RUNNER_VNET_RESOURCE_ID",
+  "managePeering": true,
+  "manageBlobDnsLink": true
+}
+```
+
+`runnerVirtualNetworkId`的来源：Runner VM → Networking → NIC → IP configurations → 关联的VNet → JSON View中的`id`。应以`/providers/Microsoft.Network/virtualNetworks/<VNet名称>`结尾，是完整ARM资源ID，不带`/subnets/<子网>`，也不是VM/NIC资源ID。可在0-C1核实名称后，用`az network vnet show --subscription "$SUBSCRIPTION_ID" --resource-group "$RUNNER_RG" --name "$RUNNER_VNET" --query id --output tsv`只读取得。更新本地JSON后须同步Environment Secret `CUSTOMER_CONFIG_JSON`。
+
+当前自动化支持**同订阅、不同VNet、可跨RG/区域**，要求CIDR不重叠；目标VNet/Storage/PE/DNS从成功的backup部署输出读取并与实际资源核验，不重新手填。跨订阅或同VNet部署不走此组件，沿用批准的网络方案。Global VNet Peering产生相应流量费用；Peering允许两VNet间的网络访问，不是仅放行Blob的应用权限，NSG和网络范围仍须由网络Owner批准。
+
+- `managePeering=true`：管理固定名称的双向直接Peering，允许VNet访问，不启用转发流量/网关传递/远程网关。名称由两个VNet ID确定，重跑不会随机增加连接。已有同目标但不同名的Peering时拒绝创建重复连接，核对后改为false复用；已有同名但不同目标或网关设置时停止，不覆盖。
+- `manageBlobDnsLink=true`：管理固定名称的Runner DNS链接，关闭自动注册。已有不同名链接时选择false复用；Runner使用自定义DNS时也必须选择false，由DNS Owner核验转发。不会修改DNS服务器、创建重复zone或改hosts。
+- 已有Hub/企业DNS时可将两个开关均设false并跳过连接部署，保留真实Runner VNet ID供备份检查使用；仍须实测私网。false表示停止管理该类资源，不自动删除以前创建的连接。
+
+**一次性授权与计划审核：** 基础设施登录身份`AZURE_CLIENT_ID`需预先获准读取backup部署、Storage、PE/NIC、两VNet及DNS链接，并能在两个精确VNet写入Peering；DNS链接写入还需要目标zone和Runner VNet对应权限。Runner RG需要嵌套ARM部署的读取/What-if/部署权限，目标RG继续使用既有部署权限。由客户权限管理员在批准范围授予所需操作，不把日常runtime身份改成网络管理员。runtime为check_backup需读取备份部署、Storage、PE/NIC及既有Blob容器列表权限，不需Peering写权限。
+
+组件的变更allowlist只包括两个固定Peering、一个固定DNS链接和Runner RG中的固定嵌套部署记录。plan不准修改VNet主体、子网、NSG、路由、VM或RBAC；依然阻止Delete、Unsupported和越界变更。审核创建范围和费用后用该plan的run ID执行deploy。plan期间还会检查已有连接冲突与地址重叠，但不证明数据面已通。
+
+部署完成后按S0-07运行`check_backup=true`。公开摘要仅显示固定的`backup-resources`、`backup-private-dns`、`backup-private-tls`、`backup-blob-read`及结果；详细范围与未覆盖项在加密runner-readiness报告。DNS错误时不会继续请求Blob；TLS检查必须连到PE的实际私有IP，随后使用同一次OIDC登录身份做容器只读列举。NSG/Hub/企业DNS造成的失败交给网络Owner修复，workflow不会自动放宽规则。检查不执行数据库备份、不上传/下载已有Blob，也不自动签发Stage0验收。
+
 #### 0-B. 获取POSTGRES_RESTORE_IMAGE
 
 先核对旧服务器和Pod内`pg_dump`的大版本，选匹配大版本及所需扩展的批准镜像。下面以PG16、Linux x64 Runner为例，在有Docker的受控机器上执行；客户不是PG16时必须换成相应批准版本，不能直接照抄。
@@ -367,20 +396,141 @@ postgres@sha256:e17e86066e5ef83e0952a9347f5c792b7ece00972e2aa787a6986f471b3dd3d5
 | S0-02 | Customer infrastructure deployment | 0 | component=bootstrap | deploy | S0-01成功且已审核的run ID | test |
 | S0-03 | Customer infrastructure deployment | 0 | component=backup | plan | 留空 | 留空 |
 | S0-04 | Customer infrastructure deployment | 0 | component=backup | deploy | S0-03成功且已审核的run ID | test |
-| S0-05 | 人工网络/权限准备，不是workflow按钮 | - | 完成下述私网及权限核验 | - | - | - |
-| S0-06 | Customer private runtime operations | 0 | action=backup-restore | execute | 留空 | test |
+| S0-05 | Customer infrastructure deployment | 0 | component=runner-connectivity | plan | 留空 | 留空 |
+| S0-06 | Customer infrastructure deployment | 0 | component=runner-connectivity | deploy | S0-05成功且已审核的run ID | test |
+| S0-07 | Customer private runner checks | - | check_target=false，check_backup=true | - | - | - |
+| S0-08 | Customer private runtime operations | 0 | action=backup-restore | execute | 留空 | test |
 
 所有上述操作的`approved_plan_sha256`留空；基础设施的`release`不勾选；runtime的`audit_continue_run_id`留空。**backup-restore只支持execute，不运行plan，也不填bootstrap/backup的批准ID。** 执行前可以用Stage0验收draft查看检查范围，但draft不是自动批准备份。
 
-**S0-05不能跳过：** Runner管理VNet与备份VNet要有获准双向Peering/Hub路由、NSG及Blob Private DNS关联或转发。VM同订阅不代表私网互通，NAT也不能代替Peering。由网络管理员从Runner确认备份Blob FQDN解析到该账户PE的私有IP且TLS/443可达；不得打开Storage公网解决。运行身份须能读旧AKS信息/获取用户凭据、读旧Deployment/Pod并执行postgres Pod的exec/cp，还须读目标RG部署输出、向备份容器上传/下载Blob。Azure Contributor不自动授予Blob数据或Kubernetes权限。
+**网络及权限检查不能跳过：** 默认按S0-05/06建立连接；已批准Hub/既有网络时按0-A2设置复用开关，两个均false可跳过这两次部署，但S0-07仍须通过。VM同订阅不代表私网互通，NAT也不能代替Peering。Runner需解析备份Blob FQDN到该账户PE私有IP且TLS/443可达；不得打开Storage公网解决。运行身份还须读旧AKS信息/获取用户凭据、读Deployment/Pod并执行postgres Pod的exec/cp、读目标部署输出及上传/下载Blob。Azure Contributor不自动授予这些数据权限。
+
+具体计划审核与失败排查见[0-C1：S0-05逐项审查](#0-c1-s0-05逐项审查)。一项不通过就停在连接/检查步骤，不把重复执行backup-restore当作网络探针。
 
 **成功后核对：** bootstrap只创建目标RG和新Log Analytics工作区；backup创建私有Storage、容器、VNet/PE/DNS及获批RBAC，但尚未导出旧库。backup-restore才会执行Pod内pg_dump、拷到Runner、在无网络/无宿主端口的临时Docker PG中恢复，再上传Blob并回读校验。它不会把数据恢复到新生产PG，也不覆盖旧库。
 
-解密S0-06的`runtime-test-0-<run ID>`附件，查看`acceptance-report.json`的`observations`：`fullRestoreSucceeded`、`backupBlob`、`backupSha256`、`backupBytes`、`publicTableCount`和`restoreSeconds`。安全保留备份引用和SHA256，Stage5要用；`restoreSeconds`不是包含所有步骤的生产停机时间。无错误完成恢复也不代表角色/ACL或业务密文已验证，流程使用了`--no-owner --no-acl`。
+解密S0-08的`runtime-test-0-<run ID>`附件，查看`acceptance-report.json`的`observations`：`fullRestoreSucceeded`、`backupBlob`、`backupSha256`、`backupBytes`、`publicTableCount`和`restoreSeconds`。安全保留备份引用和SHA256，Stage5要用；`restoreSeconds`不是包含所有步骤的生产停机时间。无错误完成恢复也不代表角色/ACL或业务密文已验证，流程使用了`--no-owner --no-acl`。
 
 **失败后：** 停在本阶段，先看错误分类及加密结果。可能已产生一次独立备份Blob，重跑会使用新的备份名；不要删旧库、清空PVC或将dump上传GitHub。临时容器和文件会按流程清理，但机器异常中断后的残留仍须受控检查。不要只凭`pg_restore -l`成功认定恢复成功。
 
 **阶段验收：** 按第3节运行`Customer stage acceptance`，`stage=0, operation=draft`，实测后`confirm`。本阶段检查为`inventory`、`backup_restore`、`key_salt_recovery`、`protocol_baseline`，以该draft实际列出的ID为准。备份/密钥恢复或客户实际客户端基线未通过时不进入Stage1。详见[备份模板说明](../infra/backup-storage/README_ZH.md)。
+
+#### 0-C1. S0-05逐项审查
+
+**先分清执行位置和身份：** 本节保留plan审查与故障定位命令；常规执行优先使用0-A2及S0-05至07的自动化。Azure Portal/管理终端核对已部署配置；DNS/TLS由实际Runner检查，不从笔记本或Cloud Shell代替。Blob/Kubernetes授权验证须使用`AZURE_RUNTIME_CLIENT_ID`对应身份，管理员自己的成功不能代替Actions。以下命令只读，不创建Peering或修改NSG；可由组件处理的连接先plan/批准/deploy，其他缺项交相应Owner。
+
+**1. 取实际资源值，不猜名称。** 在已登录正确客户租户的管理终端填写前三项；值来自客户JSON的`azure.subscriptionId`、`target.resourceGroup`和`environment`。它们是本机shell变量，不会从GitHub自动同步。
+
+```bash
+SUBSCRIPTION_ID="REPLACE_SUBSCRIPTION_ID"
+TARGET_RG="REPLACE_TARGET_RESOURCE_GROUP"
+ENVIRONMENT_NAME="test"
+az account show --query '{tenantId:tenantId,subscriptionId:id}' --output json
+az deployment group show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
+  --name "llmgw-${ENVIRONMENT_NAME}-s0-backup" \
+  --query '{state:properties.provisioningState,runtimeObjectId:properties.parameters.backupAutomationPrincipalId.value,storage:properties.outputs.backupStorage.value.storageAccountName,container:properties.outputs.backupStorage.value.containerName,vnet:properties.outputs.backupStorage.value.virtualNetworkName,pe:properties.outputs.backupStorage.value.privateEndpointName,dnsZone:properties.outputs.backupStorage.value.privateDnsZoneName}' \
+  --output json
+```
+
+通过条件：部署状态为`Succeeded`；使用模板授权时，`runtimeObjectId`与0-A1核实的运行Object ID一致，不是空值；另外核验实际角色，部署记录本身不能证明授权仍存在。其他检查要用的值按下表取得，记录在受控位置，不上传公开日志。
+
+| 变量/值 | 客户侧获取位置 |
+| --- | --- |
+| `BACKUP_VNET`、`PE_NAME`、`DNS_ZONE`、`STORAGE_ACCOUNT` | 上述部署输出的vnet、pe、dnsZone、storage；当前模板在TARGET_RG内创建它们 |
+| `RUNNER_RG`、`RUNNER_VNET`、`RUNNER_NIC_ID` | Runner VM → Networking → 实际NIC → IP configurations：核对私有IP、VNet/子网；VNet的RG不一定是VM的RG，NIC资源ID从其JSON View取得 |
+| `BLOB_HOST` | 备份Storage → Endpoints → Blob service，只取主机名，不含https://或路径；不要改用privatelink域名或裸IP访问HTTPS |
+| `PE_IP` | Storage → Networking → Private endpoint connections → 对应PE → Network interface → IP configurations；核对它确实属于上述备份账户 |
+
+以下各块依次执行。替换全部`REPLACE_`，命令查询为空或失败就停止核对，不把空字符串当成通过。
+
+**2. 核验Private Endpoint和双向路径，管理终端执行。** Portal先确认PE目标为该Storage、子资源为`blob`、连接状态为`Approved`，并位于批准的PE子网。下面通过PE关联的NIC读取IP，与后面的Runner DNS结果比较：
+
+```bash
+PE_NAME="REPLACE_PE_NAME_FROM_DEPLOYMENT"
+az network private-endpoint show --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TARGET_RG" --name "$PE_NAME" \
+  --query '{subnet:subnet.id,connections:privateLinkServiceConnections[].{target:privateLinkServiceId,groups:groupIds,state:privateLinkServiceConnectionState.status}}' --output json
+PE_NIC_ID=$(az network private-endpoint show --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TARGET_RG" --name "$PE_NAME" --query 'networkInterfaces[0].id' --output tsv)
+az network nic show --ids "$PE_NIC_ID" --query 'ipConfigurations[].privateIPAddress' --output json
+
+RUNNER_RG="REPLACE_RUNNER_VNET_RESOURCE_GROUP"
+RUNNER_VNET="REPLACE_RUNNER_VNET_NAME"
+BACKUP_VNET="REPLACE_BACKUP_VNET_FROM_DEPLOYMENT"
+az network vnet peering list --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$RUNNER_RG" --vnet-name "$RUNNER_VNET" \
+  --query '[].{remote:remoteVirtualNetwork.id,state:peeringState,sync:peeringSyncLevel,allowAccess:allowVirtualNetworkAccess}' --output json
+az network vnet peering list --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TARGET_RG" --vnet-name "$BACKUP_VNET" \
+  --query '[].{remote:remoteVirtualNetwork.id,state:peeringState,sync:peeringSyncLevel,allowAccess:allowVirtualNetworkAccess}' --output json
+```
+
+直接Peering方案的通过条件：两端remote都指向正确的对方VNet，两端`Connected`、`allowAccess=true`，地址空间同步（返回sync时应为`FullyInSync`）；两侧CIDR不重叠。Portal分别打开两个VNet → Peerings检查，不能只查一侧。返回`[]`是没有连接，不是“没有错误”。跨订阅时分别使用VNet所属订阅；此处命令示例为同订阅。不同区域可使用获准的Global VNet Peering，不要求为此搬迁Runner。
+
+Hub方案不要求直接Peering，但网络Owner须提供到PE及返回Runner的有效路由、NVA/Firewall转发规则与实测结果。VNet Peering不自动传递：仅有Runner→Hub和Hub→备份VNet两条Peering不等于互通；NAT公网出口也不是私网路径。
+
+**3. 核验DNS归属，管理终端执行。** 打开部署输出的Private DNS zone → Recordsets，确认Storage账户的A记录指向刚查到的PE_IP；再看Virtual network links。
+
+```bash
+DNS_ZONE="REPLACE_DNS_ZONE_FROM_DEPLOYMENT"
+az network private-dns link vnet list --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TARGET_RG" --zone-name "$DNS_ZONE" \
+  --query '[].{network:virtualNetwork.id,state:virtualNetworkLinkState,registration:registrationEnabled}' --output json
+```
+
+Runner使用Azure提供的DNS时，该zone应有到Runner VNet的有效链接（`state=Completed`，PE场景无需自动注册）。只有备份VNet链接还不够，Peering不会自动共享Private DNS。Runner使用自定义DNS时，应由DNS Owner核验企业解析器/Private Resolver的条件转发和zone可见性；仅加VNet链接未必生效，不创建同名冲突zone，不修改hosts绕过。最终都以第5项的Runner解析结果为准。
+
+**4. 核验NSG及有效路由，管理终端执行。** Runner必须运行。Portal从Runner NIC看Effective routes / Effective security rules，并检查PE子网关联的NSG和路由表。CLI可读取Runner端有效配置：
+
+```bash
+RUNNER_NIC_ID="REPLACE_RUNNER_NIC_RESOURCE_ID"
+az network nic show-effective-route-table --ids "$RUNNER_NIC_ID" --output json
+az network nic list-effective-nsg --ids "$RUNNER_NIC_ID" --output json
+```
+
+网络Owner须核对**实际Runner私有源IP → PE_IP:TCP/443**没有命中更高优先级Deny，Runner NIC/子网出站、PE子网入站（网络策略生效时）均允许；PE目标匹配的有效路由走获准私网路径而非Internet/None。Hub/NVA还要核验回程；NSG有状态连接无需再开宽泛反向入站规则。DNS服务器的UDP/TCP 53也需可达。无自定义NSG规则不等于拒绝或通过，要结合默认规则、服务标签和有效配置；不要删除NSG、开放0.0.0.0/0或关闭PE网络策略来验证。
+
+**5. 从实际Runner测试DNS与HTTPS，无需Azure登录。** 通过已批准的Bastion/SSH进入Runner；不要在VS Code所在的另一台VM代跑。按第1项取得BLOB_HOST，使用正常域名/SNI验证，不用`curl -k`、裸PE_IP URL或`--resolve`掩盖DNS问题。
+
+```bash
+BLOB_HOST="REPLACE_BLOB_ENDPOINT_HOST"
+getent ahostsv4 "$BLOB_HOST"
+curl --noproxy '*' --connect-timeout 5 --max-time 15 --silent --show-error \
+  --output /dev/null --write-out 'remote_ip=%{remote_ip} http_code=%{http_code}\n' \
+  "https://${BLOB_HOST}/"
+```
+
+通过条件：解析结果与该账户PE_IP匹配，不是“任意10.x地址”；curl正常完成TLS且remote_ip也匹配PE_IP。这条匿名请求常返回400/403，**这里只能证明DNS/TCP/TLS路径，不能证明Blob授权**。不使用`--fail`是为了区分HTTP响应与连接失败，不是忽略权限错误。http_code=000、超时、证书失败、公网IP均不通过。`--noproxy '*'`验证Runner直连路径；客户强制私有代理时由网络Owner单独核验代理的PE解析、路由和证书链，不以代理公网403冒充PE直连成功。
+
+**6. 审查Actions身份、Kubernetes和Blob权限。** 先按0-A1检查部署参数与**容器范围**RBAC：运行Object ID应具备Storage Blob Data Contributor或获准等效数据权限，只有Contributor/RBAC管理员不算通过。运行`Customer private runner checks`，选择`test, check_target=false, check_backup=true`；`azure-scope`、`legacy-cluster-read`、`docker-daemon`及四项backup检查均应通过。该选项覆盖备份管理面读取、PE DNS/TLS和Blob容器列举，**不覆盖Pod exec/cp、Blob上传/下载**。
+
+下列命令是自动化检查的人工定位参考，只供实施人员在已获准的**相同运行身份上下文**执行。手工终端的个人`az login`、root或`kubectl --as`不能替代；工作流完成后OIDC登录会清理，不应指望登录VM即可复用它。Blob只读探针已由check_backup覆盖；额外Pod权限探针仍需在审核后的同身份诊断步骤中执行，不索取/复制OIDC Token、生成长期Client Secret或关闭日志保护。
+
+```bash
+STORAGE_ACCOUNT="REPLACE_STORAGE_FROM_DEPLOYMENT"
+az account show --query '{tenantId:tenantId,subscriptionId:id,identity:user.name,type:user.type}' --output json
+az storage blob list --account-name "$STORAGE_ACCOUNT" --container-name litellm-postgresql \
+  --auth-mode login --num-results 1 --query 'length(@)' --output json --only-show-errors
+```
+
+确认当前身份对应预期Client ID后才使用结果；命令成功返回0也可能只是空容器，表示列举可用，不打印Blob名或内容。403可能来自数据RBAC、网络规则或条件策略，要结合第5项区分。**列举成功不能证明上传/下载成功**；纯审查只能核对所需dataActions，若客户要求备份前实测写入，应另行批准无业务内容的唯一测试Blob上传/回读/哈希校验及清理范围，不拿已有备份试写或删除。
+
+Kubernetes检查使用同一身份的非admin kubeconfig，`PRIVATE_KUBECONFIG`为受控临时路径，`LEGACY_NAMESPACE`取客户JSON。由实施人员按现有`connect_cluster`流程获取/转换凭据，不使用个人默认context，不打印或上传kubeconfig：
+
+```bash
+PRIVATE_KUBECONFIG="REPLACE_PRIVATE_KUBECONFIG_PATH"
+LEGACY_NAMESPACE="REPLACE_LEGACY_NAMESPACE"
+kubectl --kubeconfig "$PRIVATE_KUBECONFIG" -n "$LEGACY_NAMESPACE" auth can-i get deployments.apps
+kubectl --kubeconfig "$PRIVATE_KUBECONFIG" -n "$LEGACY_NAMESPACE" auth can-i list pods
+kubectl --kubeconfig "$PRIVATE_KUBECONFIG" -n "$LEGACY_NAMESPACE" auth can-i create pods --subresource=exec
+kubectl --kubeconfig "$PRIVATE_KUBECONFIG" -n "$LEGACY_NAMESPACE" get deployment postgres litellm-mi-proxy -o name
+kubectl --kubeconfig "$PRIVATE_KUBECONFIG" -n "$LEGACY_NAMESPACE" get pods -l app=postgres \
+  -o 'custom-columns=NAME:.metadata.name,PHASE:.status.phase,DELETING:.metadata.deletionTimestamp'
+```
+
+前三项应返回yes，两个Deployment存在，标签匹配的Postgres恰好一个Running且无deletionTimestamp，挂载PVC与JSON中的postgresPvc一致。`kubectl cp`通过Pod exec和容器内tar工作，不存在独立的“cp角色”；还须确认postgres容器有pg_dump/tar、Runner磁盘及Docker资源足够。can-i仅检查授权，不能证明Admission、Pod状态、导出或容器恢复成功，不能据此签发Stage0通过。
+
+**审查结论怎样记录：** 第6.1节记录实际Runner、身份、时间、PE_IP与DNS/TLS结果、双向路径、作用域授权和未覆盖项，凭据/正文不入记录。S0-07及其他未覆盖权限满足后才允许S0-08；S0-08真实导出/恢复/上传/回读成功后，再做Stage0人工验收。这不是要求把checklist手写成passed来解锁workflow。
 
 ### 阶段1：旧环境最小加固
 

@@ -13,6 +13,40 @@ from scripts.workflow_security import SEALED_FILE, open_values, run_private, sea
 
 
 class WorkflowArtifactTests(unittest.TestCase):
+    @patch.dict("os.environ", {"WORKFLOW_ARTIFACT_KEY": base64.b64encode(b"k" * 32).decode()}, clear=True)
+    def test_runner_summary_only_exposes_fixed_probe_names_and_statuses(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder, patch("scripts.workflow_security.ROOT", Path(folder)), patch("sys.stdout", new_callable=io.StringIO) as output:
+            report = Path(folder) / "temp/runner-readiness/runner-readiness.json"
+            report.parent.mkdir(parents=True)
+            checks = [
+                {"name": "backup-private-dns", "status": "failed", "details": "PRIVATE_HOST_AND_RESPONSE"},
+                {"name": "PRIVATE_CUSTOMER_NAME", "status": "failed"},
+                {"name": "backup-private-tls", "status": "PRIVATE_SECRET"},
+                {"name": ["malformed"], "status": "failed"},
+            ]
+            def execute(arguments, **kwargs):
+                report.write_text(json.dumps({"checks": checks}))
+                kwargs["stderr"].write("PRIVATE_STDERR")
+                return SimpleNamespace(returncode=1)
+            summary = Path(folder) / "summary.md"
+            with patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": str(summary)}), patch("scripts.workflow_security.subprocess.run", side_effect=execute):
+                self.assertEqual(run_private("scripts.installation_readiness", []), 1)
+            self.assertIn("Runner check backup-private-dns: failed.", output.getvalue())
+            self.assertNotIn("PRIVATE_", output.getvalue() + summary.read_text())
+
+    @patch.dict("os.environ", {"WORKFLOW_ARTIFACT_KEY": base64.b64encode(b"k" * 32).decode()}, clear=True)
+    def test_runner_failure_cannot_reuse_a_previous_successful_report(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder, patch("scripts.workflow_security.ROOT", Path(folder)), patch("sys.stdout", new_callable=io.StringIO) as output:
+            report = Path(folder) / "temp/runner-readiness/runner-readiness.json"
+            report.parent.mkdir(parents=True)
+            report.write_text(json.dumps({"checks": [{"name": "backup-blob-read", "status": "passed"}]}))
+            with patch("scripts.workflow_security.subprocess.run", return_value=SimpleNamespace(returncode=1)):
+                self.assertEqual(run_private("scripts.installation_readiness", []), 1)
+            self.assertFalse(report.exists())
+            self.assertNotIn("backup-blob-read: passed", output.getvalue())
+
     def test_real_draft_subprocess_and_encrypted_review_need_no_cloud_or_plaintext_upload(self):
         from scripts.customer_migration import ROOT
         config = customer_config()

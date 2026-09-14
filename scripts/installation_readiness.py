@@ -33,7 +33,7 @@ def installation_readiness(observations):
     return {"checks": checks, "readyForDeployment": all(check["status"] == "passed" for check in checks.values()), "stageAccepted": False}
 
 
-def inspect_runner(config, directory, check_target=False, run=subprocess.run):
+def inspect_runner(config, directory, check_target=False, run=subprocess.run, check_backup=False):
     from scripts.migration_runtime import connect_cluster
     from scripts.runner_lifecycle import TOOLS
 
@@ -79,23 +79,39 @@ def inspect_runner(config, directory, check_target=False, run=subprocess.run):
                 execute([*command, "get", "deployments", "-o", "name"])
                 return "Authenticated deployment listing succeeded; no workload was changed"
             probe("legacy-cluster-read" if legacy else "target-cluster-read", cluster_access)
+        if check_backup:
+            from scripts.runner_connectivity import check_backup_access
+            class ProbeAzure:
+                def run(self, arguments):
+                    return json.loads(execute(["az", *arguments, "--output", "json", "--only-show-errors"]))
+
+                def scoped(self, arguments):
+                    return self.run([*arguments, "--subscription", config["azure"]["subscriptionId"]])
+
+            results.extend(check_backup_access(config, ProbeAzure(), execute))
+    elif check_backup:
+        from scripts.runner_connectivity import BACKUP_PROBES
+        results.extend({"name": name, "status": "skipped", "details": "Azure login scope was not verified"} for name in BACKUP_PROBES)
+    if not check_backup:
+        results.append({"name": "backup-resources", "status": "not-selected", "details": "Select check_backup after backup resources and connectivity are prepared"})
     if not check_target:
         results.append({"name": "target-cluster-read", "status": "not-selected", "details": "Select check_target after target AKS is deployed"})
     return {"version": 1, "environment": config["environment"], "revision": os.environ.get("GITHUB_SHA", ""), "configSha256": fingerprint(config),
             "observedAt": datetime.now(timezone.utc).isoformat(), "status": "failed" if any(item["status"] == "failed" for item in results) else "passed",
             "checks": results, "stageAccepted": False, "readyForDeployment": False,
-            "notCovered": ["write permissions", "Vault/Blob/ACR/PostgreSQL/Graph data access", "database size and restore time", "private target resources not yet deployed", "client and model authentication"]}
+            "notCovered": ["write permissions, including Blob upload", "Blob download and backup contents", "Pod exec/cp", "Vault/ACR/PostgreSQL/Graph data access", "database size and restore time", "private target resources not yet deployed", "client and model authentication"] + ([] if check_backup else ["Blob connectivity and read access"])}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--environment", choices=("dev", "test", "prod"), required=True)
     parser.add_argument("--check-target", action="store_true")
+    parser.add_argument("--check-backup", action="store_true")
     args = parser.parse_args()
     directory = ROOT / "temp/runner-readiness"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     config = validate_config(json.loads(os.environ["CUSTOMER_CONFIG_JSON"]), args.environment)
-    report = inspect_runner(config, directory, args.check_target)
+    report = inspect_runner(config, directory, args.check_target, check_backup=args.check_backup)
     private_write(directory / "runner-readiness.json", json.dumps(report, indent=2))
     lines = ["## 私网 Runner 只读检查", "", "| 检查 | 结果 |", "| --- | --- |"]
     lines.extend(f"| {item['name']} | {item['status']} |" for item in report["checks"])

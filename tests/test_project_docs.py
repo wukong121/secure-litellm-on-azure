@@ -30,6 +30,28 @@ READMES = (
 
 
 class ProjectDocumentationTests(unittest.TestCase):
+    def test_runner_connectivity_workflow_example_and_runbook_stay_aligned(self):
+        from scripts.customer_migration import COMPONENTS
+        from scripts.runner_connectivity import BACKUP_PROBES
+        example = json.loads((ROOT / "config/customer.example.json").read_text())
+        settings = example["parameters"]["runner-connectivity"]
+        self.assertEqual(set(settings), COMPONENTS["runner-connectivity"][2])
+        self.assertTrue(settings["managePeering"])
+        self.assertTrue(settings["manageBlobDnsLink"])
+        self.assertTrue(settings["runnerVirtualNetworkId"].startswith("REPLACE_"))
+        for filename in ("customer-deploy.yml", "customer-migration.yml"):
+            workflow = yaml.load((ROOT / ".github/workflows" / filename).read_text(), Loader=yaml.BaseLoader)
+            self.assertIn("runner-connectivity", workflow["on"]["workflow_dispatch"]["inputs"]["component"]["options"])
+        source = (ROOT / ".github/workflows/customer-runner-checks.yml").read_text()
+        workflow = yaml.load(source, Loader=yaml.BaseLoader)
+        self.assertEqual(workflow["on"]["workflow_dispatch"]["inputs"]["check_backup"]["default"], "false")
+        self.assertIn("${{ inputs.check_backup }}", source)
+        self.assertIn("--check-backup", source)
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        for value in (*settings, *BACKUP_PROBES, "check_backup=true", "同订阅", "S0-08"):
+            self.assertIn(value, guide)
+        self.assertNotIn("人工网络/权限准备，不是workflow按钮", guide)
+
     def test_runbook_stage_tables_match_workflows_and_controllers(self):
         from scripts.customer_migration import COMPONENTS
         from scripts.migration_runtime import validate_action
@@ -78,6 +100,19 @@ class ProjectDocumentationTests(unittest.TestCase):
             self.assertIn(required, guide)
         self.assertNotIn("Stage8/application仍要求auditRuntime", guide)
         self.assertNotIn("本仓库尚未自动编排该controller/LB", guide)
+
+    def test_backup_preflight_review_separates_network_identity_and_data_proofs(self):
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        review = guide.split("#### 0-C1. S0-05逐项审查", 1)[1].split("### 阶段1：", 1)[0]
+        for required in ("properties.parameters.backupAutomationPrincipalId.value", "properties.outputs.backupStorage.value", "networkInterfaces[0].id", "ipConfigurations[].privateIPAddress", "peeringState", "allowVirtualNetworkAccess", "FullyInSync", "az network private-dns link vnet list", "show-effective-route-table", "list-effective-nsg", 'getent ahostsv4 "$BLOB_HOST"', "--noproxy '*'", "remote_ip=%{remote_ip}", "--connect-timeout 5", "Storage Blob Data Contributor", "--auth-mode login", "--subresource=exec", "Blob只读探针已由check_backup覆盖", "不能证明Blob授权", "列举成功不能证明上传/下载成功"):
+            with self.subTest(required=required):
+                self.assertIn(required, review)
+        commands = "\n".join(re.findall(r"```bash\n(.*?)\n```", review, re.S))
+        self.assertEqual(commands.count("az network vnet peering list"), 2)
+        self.assertNotRegex(commands, r"az\s+network\s+[^\n]*(?:\bcreate\b|\bdelete\b|\bupdate\b)")
+        self.assertNotIn("role assignment create", commands)
+        self.assertNotIn("curl -k", commands)
+        self.assertNotIn("kubectl exec", commands)
 
     def test_backup_identity_example_and_value_discovery_match_runtime_contract(self):
         from scripts.customer_migration import COMPONENTS, parameters_for
