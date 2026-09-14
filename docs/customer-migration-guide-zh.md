@@ -130,6 +130,8 @@
 
 从[部署参考的身份说明](customer-deployment-workflows-zh.md#4-哪些-id-人工提供哪些自动输出)逐项核对实际授权；上述是分工，不是“一项角色覆盖全部动作”。权限缺口交给对应Owner，不通过关闭TLS/租户检查或扩大到订阅Owner解决。
 
+模型分布在多个订阅时，首次Stage4/platform plan前须逐个准备模型RG和账号的部署身份授权，详见[4-0模型账号的一次性授权](#4-0-模型账号的一次性授权)。管理员个人的Owner权限、身份已创建或OIDC登录成功，都不会自动把权限授给workflow。
+
 主要迁移workflow支持公开fork，计划、运行结果和验收账本使用`WORKFLOW_ARTIFACT_KEY`认证加密后上传，通常保留7天；仅选用增强L3时的治理workflow仍有独立限制。绝不上传数据库dump、kubeconfig或原始stderr。公开仓库的运行元数据、workflow输入和非秘密Variables仍可能公开，不能在其中填写正文或凭据；加密附件不替代保护分支、Environment权限及内容审查。解密审核步骤见[客户部署与验收工作流](customer-deployment-workflows-zh.md)。
 
 ### 2.3 客户JSON分批准备
@@ -653,11 +655,115 @@ S1-04之后先验证真实Container Insights日志已到达，再预览依赖这
 
 **开始前：** Stage3已验收；目标VNet/PE子网由Stage0建立。核对AKS版本、节点SKU、区域限制/配额、网络段和Firewall出站；模型连接填真实账号Resource ID及别名。共享模型账号的公网/Local Auth关闭不能先于旧业务依赖核对，不能误伤其他使用者。
 
+**先完成4-0的模型授权再执行S4-01。** 这是管理员一次性准备，不是新增workflow按钮；同订阅也要核对，不能只检查新AKS所在RG。多订阅是受支持的模型容量来源，不应为了绕过授权错误而删除已批准的模型连接。
+
 **首次platform部署的角色命名：** 新目标AKS/工作负载身份尚未创建时，在客户JSON的`parameters.platform`加入`"stage4RoleAssignmentNaming":"resource-id"`，新示例已提供。该模式按目标AKS/UAMI资源ID、授权资源及角色生成稳定的角色分配名称，实际principalId仍取创建后的正确身份输出，授权范围不扩大。旧模式用尚未知的Object ID计算角色分配名称，会使What-if返回`Unsupported`并被门禁拒绝；不能把Unsupported当作通过。已有Stage4角色分配时保持原模式，省略字段等同`principal-id`，不要直接切换以免产生重复角色分配。首次部署后Stage5继续使用同一模式；AKS/UAMI若被删除重建并改变Principal ID，须单独审核旧授权处理，不能自动删除或覆盖旧角色。此字段仅从Stage4绑定配置指纹，代码合并后的同SHA证据要求仍按第3节执行。
 
 **本阶段配置：** 先按4-A填写`parameters.certificate-vault`，由S4-03/04创建两套证书共用的**独立证书Vault**；不是合并Stage5/7业务Vault。此时可不启用顶层privateIngress，不要求Vault内已有证书。S4-04之后按4-C手动导入，入口发布前再补privateIngress的API/admin `tlsSecretId`和`allowedCidrs`，结构见[私有入口参考](customer-deployment-workflows-zh.md#stage4自动私有入口)。
 
 自动API签发可选：另配`AZURE_CERTIFICATE_CLIENT_ID`、已委派Azure DNS Zone以及顶层`certificates={zoneResourceId,termsAccepted:true,publicApiHostnameAccepted:true}`。API tlsSecretId必须无版本；admin证书由企业PKI准备。未选择自动签发则跳过S4-09/10，按4-C手动导入两套证书；本组件不为自动签发身份授予整库权限。来源CIDR覆盖实际Runner私网路径和未来PLS NAT地址，admin只覆盖批准管理网段。
+
+#### 4-0. 模型账号的一次性授权
+
+**适用范围与分工。** 本节用于同一Entra租户内、同订阅或跨订阅的Azure OpenAI模型账号；跨租户身份不属于本节已支持路径。根据`parameters.platform.azureOpenAIConnections`逐个核对，每个不同模型RG和账号都要覆盖。角色分配模块使用该连接自己的订阅/RG，Private Endpoint使用完整accountResourceId，不要求把模型迁到网关订阅。各订阅quota仍独立，后续由LiteLLM路由利用多个兼容部署的容量。
+
+| 身份 | 本阶段权限 | 由谁准备 |
+| --- | --- | --- |
+| 部署身份，GitHub Environment的`AZURE_CLIENT_ID`对应UAMI/企业应用服务主体 | 模型RG的ARM部署/What-if及私网连接审批；模型账号范围的受限角色分配 | 有权管理员在首次plan前一次性授予 |
+| 新LiteLLM工作负载身份 | 每个获批模型账号的`Cognitive Services OpenAI User`调用权限 | platform部署按实际工作负载Principal ID创建，不给它部署管理员角色 |
+| 现场操作人/客户IT | 有权创建或复用批准的角色定义、分配角色；PIM资格须先激活 | 按客户授权政策准备，不把个人权限视作Actions权限 |
+
+**1. 取得客户自己的标识。** 下面的变量是受控终端中的本机变量，不是新增GitHub配置。模型订阅可以与`azure.subscriptionId`不同；主订阅和workflow登录变量保持不变。
+
+| 值 | 获取与核验方法 |
+| --- | --- |
+| `DEPLOY_CLIENT_ID` | 客户仓库Settings → Environments → 本次环境 → Variables中的`AZURE_CLIENT_ID`。不是`AZURE_RUNTIME_CLIENT_ID`；演练复用身份不代表客户也应合并 |
+| `DEPLOY_OBJECT_ID` | UAMI：Azure Portal → Managed Identities → 该身份Overview的Principal ID；企业应用：Entra ID → Enterprise applications，按上述Application ID查找，取Object ID，并核对Client ID。不能使用App registrations的应用对象Object ID或现场人员ID |
+| `MODEL_SUBSCRIPTION_ID`、`MODEL_RG`、`MODEL_ACCOUNT`、`MODEL_ACCOUNT_SCOPE` | 从每个模型账号Overview及JSON View取得，与azureOpenAIConnections的subscriptionId、resourceGroupName、accountName、accountResourceId逐项比较；账号scope须以`/providers/Microsoft.CognitiveServices/accounts/<账号名>`结尾，不是模型deployment子资源 |
+
+在已登录客户正确租户的获准管理终端，只读查询部署服务主体和模型账号；目录读取失败时请Entra管理员核验，UAMI也可按0-A1的`az identity show`方法取得Principal ID：
+
+```bash
+az account show --query '{tenantId:tenantId,subscriptionId:id,identityType:user.type}' --output json
+DEPLOY_CLIENT_ID="REPLACE_AZURE_CLIENT_ID_FROM_ENVIRONMENT"
+az ad sp show --id "$DEPLOY_CLIENT_ID" \
+  --query '{name:displayName,clientId:appId,objectId:id,type:servicePrincipalType}' --output json
+DEPLOY_OBJECT_ID="REPLACE_VERIFIED_DEPLOY_SERVICE_PRINCIPAL_OBJECT_ID"
+MODEL_SUBSCRIPTION_ID="REPLACE_MODEL_SUBSCRIPTION_ID"
+MODEL_RG="REPLACE_MODEL_RESOURCE_GROUP"
+MODEL_ACCOUNT="REPLACE_MODEL_ACCOUNT_NAME"
+az account show --subscription "$MODEL_SUBSCRIPTION_ID" \
+  --query '{tenantId:tenantId,subscriptionId:id}' --output json
+az cognitiveservices account show --subscription "$MODEL_SUBSCRIPTION_ID" \
+  --resource-group "$MODEL_RG" --name "$MODEL_ACCOUNT" \
+  --query '{id:id,name:name,resourceGroup:resourceGroup}' --output json
+```
+
+确认两个订阅属于同一客户租户。没有相应订阅访问或资源值不匹配时停止，不改配置掩盖差异。授权时Portal的Members选择**Managed identity**，在身份所在订阅查找UAMI，该订阅未必是模型订阅；企业应用使用**User, group, or service principal**选项并按已核对的应用标识定位，不能只按显示名称猜对象。
+
+**2. 创建或复用模型部署角色，再在每个模型RG分配。** 建议使用下述不含角色管理能力的自定义角色`LLMGW Model Deployment Operator`。已有同名角色时先核对权限和Assignable scopes，符合则复用，不因重跑再创建或擅自修改其他团队的角色。
+
+管理员从**模型资源组 → Access control (IAM) → Add → Add custom role**进入。创建自定义角色需要在所有Assignable scopes上具备`Microsoft.Authorization/roleDefinitions/write`；只有`Role Based Access Control Administrator`不包含该权限。角色分配需要的是另一项`Microsoft.Authorization/roleAssignments/write`。有RG级User Access Administrator但无订阅级定义写权限时，从RG入口创建且scope仅保留获批RG；仍无权限则请管理员预建角色，不申请订阅Owner或自制管理员等价角色绕过限制。已生效PIM权限下Portal按钮仍灰色时先刷新/重新进入，尚未激活的Eligible资格不能当作有效授权。
+
+在JSON页点击Edit，使用下面的**Portal角色定义**，不是写入CUSTOMER_CONFIG_JSON。`*/read`、`Microsoft.Resources/deployments/*`不能在Add permissions选择器中逐项找到，必须用JSON页；私网审批动作属于Microsoft.CognitiveServices，不是Microsoft.Network。用客户模型RG的完整ARM ID替换两个示例scope，只有一个RG时删去第二项，多个RG时逐项加入；不要保留整个订阅scope。
+
+```json
+{
+  "properties": {
+    "roleName": "LLMGW Model Deployment Operator",
+    "description": "Read model resource metadata, manage ARM deployments and approve private endpoint connections in approved resource groups.",
+    "assignableScopes": [
+      "/subscriptions/REPLACE_MODEL_SUBSCRIPTION_ID_1/resourceGroups/REPLACE_MODEL_RG_1",
+      "/subscriptions/REPLACE_MODEL_SUBSCRIPTION_ID_2/resourceGroups/REPLACE_MODEL_RG_2"
+    ],
+    "permissions": [{
+      "actions": [
+        "*/read",
+        "Microsoft.Resources/deployments/*",
+        "Microsoft.CognitiveServices/accounts/privateEndpointConnectionsApproval/action"
+      ],
+      "notActions": [],
+      "dataActions": [],
+      "notDataActions": []
+    }]
+  }
+}
+```
+
+Save → 核对Assignable scopes → Review + create。通配符包含匹配的未来管理操作，`*/read`覆盖所授RG内所有资源的管理面元数据，私网审批也覆盖该RG内的模型账号，须由客户批准；它不包含读取账号Key、模型数据调用、模型资源写删或角色分配权限。Private Endpoint本体部署在网关目标RG，沿用该侧既有网络授权；本角色不能代替目标RG权限或资源提供程序注册。相关订阅的Microsoft.Network、Microsoft.CognitiveServices注册由有权管理员核对，不为此给日常应用订阅权限。
+
+角色定义创建成功不等于已授权。分别打开**每个模型RG → IAM → Add role assignment**，选择该自定义角色，Members选择已核实的部署身份并Review + assign。多个账号在同一RG时无需重复这条RG授权；不授给现场人员、Runner VM身份或新LiteLLM工作负载身份。
+
+**3. 在每个模型账号授予受限制的角色管理能力。** 模型账号 → IAM → Add role assignment → Privileged administrator roles，选择**Role Based Access Control Administrator**（`f58310d9-a9f6-439a-9e8d-f62e7b41a168`），Members仍选择部署身份。在Conditions选择**Allow user to only assign selected roles to selected principals (fewer privileges)** → Select roles and principals，按客户批准策略选择：
+
+| 条件模板 | 配置与实际边界 |
+| --- | --- |
+| `Constrain roles` | Roles只选`Cognitive Services OpenAI User`（`5e0bd9bd-7b93-4f28-af87-19fc36ad61bd`）。限制可分配/删除的角色，但不限制接收者，可给用户、组或服务主体授予该角色。客户明确接受此范围时可用，功能上满足当前模板，不宣称主体隔离 |
+| `Constrain roles and principal types` | 推荐的收紧方式：同一角色，Principal types只选`Service principals`；仍允许该账号上其他服务主体获得此角色，不是仅限本次LiteLLM身份 |
+| `Constrain roles and principals` | 新工作负载身份已存在、其Principal ID已验证时，可进一步只允许该身份；不能在首次创建前猜测Object ID |
+
+Save → Review + assign。检查条件版本为`2.0`，**同时限制新增和删除**：`Microsoft.Authorization/roleAssignments/write`使用`@Request`属性、`Microsoft.Authorization/roleAssignments/delete`使用`@Resource`属性，两者均只允许上述模型调用RoleDefinitionId。若选择主体类型/具体主体限制，两条动作分别以AND加入相应限制，不用OR放宽。不要选择无条件管理员授权或包含Owner、User Access Administrator等其他角色。
+
+已有授权需要调整时，从账号IAM → Role assignments → 对应部署身份的Condition **View/Edit**进入，不删除重建。记录中的顶层`principalType=ServicePrincipal`只表示接收RBAC管理员授权的部署身份类型，不能代替条件里的`PrincipalType`限制。操作人已有的带条件User Access Administrator若禁止转授RBAC Administrator，必须由有权管理员明确批准并配置这项委派；自定义部署角色不解决该限制。
+
+**4. 回读授权并以真实Actions身份验证。** 以下只读查询逐个模型账号执行；MODEL_ACCOUNT_SCOPE来自第1步账号id，不填订阅、RG或模型deployment的ID。模型账号上的查询使用include-inherited，同时检查继承的RG部署角色和账号直接RBAC角色：
+
+```bash
+MODEL_ACCOUNT_SCOPE="REPLACE_VERIFIED_MODEL_ACCOUNT_RESOURCE_ID"
+az role definition list --subscription "$MODEL_SUBSCRIPTION_ID" \
+  --name "LLMGW Model Deployment Operator" \
+  --query '[].{id:id,role:roleName,assignableScopes:assignableScopes,permissions:permissions}' --output json
+az role assignment list --subscription "$MODEL_SUBSCRIPTION_ID" \
+  --assignee-object-id "$DEPLOY_OBJECT_ID" --scope "$MODEL_ACCOUNT_SCOPE" \
+  --include-inherited --fill-principal-name false \
+  --query '[].{role:roleDefinitionName,roleDefinitionId:roleDefinitionId,scope:scope,principalId:principalId,principalType:principalType,condition:condition,conditionVersion:conditionVersion}' --output json
+```
+
+通过条件：部署身份Object ID匹配；自定义角色权限/可分配范围符合批准内容，实际分配在模型RG；受限RBAC管理员角色实际分配在**模型账号级**，条件与客户选择一致。还要核对组成员、继承角色和条件，不能仅凭角色显示名称判断有效权限；已有更宽授权不会被新增条件自动收紧。管理面读取成功不是模型调用或数据面私网已通过。
+
+授权传播生效后，从**Run workflow新建S4-01**，选择main、environment=test、stage=4、component=platform、operation=plan，release不勾选，两个approved字段及confirm_environment均留空。仅补Azure授权且代码SHA、阶段配置和artifact key不变时，无需因此重录已有有效验收；独立plan本身不要求前序验收，但deploy仍检查同SHA有效的Stage0–3账本。合并文档或代码产生新SHA时仍按第3节复核，不能把本段当作跨版本豁免。
+
+先确认plan整个workflow成功，解密并审核实际资源/RBAC/网络变化后才运行S4-02 deploy，引用本次成功plan的run ID。个人账号的本地plan成功不能替代Actions身份验证；IAM查询也不能保证不存在Policy、配额、传播或其他阻断。如果仍失败，保留新run链接并定位具体错误，不删除跨订阅模型连接、不移除What-if门禁或直接扩为订阅Owner。参考[自定义角色JSON编辑](https://learn.microsoft.com/en-us/azure/role-based-access-control/custom-roles-portal)和[受限角色委派](https://learn.microsoft.com/en-us/azure/role-based-access-control/delegate-role-assignments-portal)。
 
 #### 4-A. 共用证书Vault的配置与取值
 
@@ -711,6 +817,8 @@ Stage5复用该DNS区域和链接：配置了certificate-vault时，`parameters.
 | S4-10 | Customer private runtime operations | 4 | action=certificate-renew | execute | S4-09的plan ID | test |
 | S4-11 | Customer private runtime operations | 4 | action=private-ingress | plan | 留空 | 留空 |
 | S4-12 | Customer private runtime operations | 4 | action=private-ingress | execute | S4-11的plan ID | test |
+
+**S4-02部分失败时：** 在目标RG → Deployments → `llmgw-<environment>-s4-platform`查看失败子部署及Operation details，不只看GitHub的通用execution-failed。`aksNetwork`若报`AnotherOperationInProgress`，先核对失败子网和错误中指定的网络操作状态；同一VNet的子网并行写入会发生冲突，模板应通过dependsOn依次更新系统、业务、入口子网。即使顶层Failed，Firewall、DNS、Private Endpoint或其他子网也可能已经成功并产生费用，须逐项核对，不能声称自动回滚或删除已成功资源。冲突操作结束、模板修复经审核后，新建S4-01并审核当前状态下的增量变化，再用新的成功plan ID执行S4-02；旧plan和Re-run jobs不能代替重新审批，也不要回放Stage0网络模板或关闭门禁。代码修复合并产生新SHA时，deploy前仍须按第3节复核前序验收；后续AKS/身份资源是否创建以实际状态为准。
 
 **S4-04之后、S4-05之前：** 按4-C手动导入证书；由网络Owner核验管理VNet到新AKS/ACR/证书Vault的路由、Private DNS和允许端口。确认ARM读取、Kubernetes用户凭据及命名空间权限；运行`Customer private runner checks`，environment=test、check_target=true。该检查不读取证书Secret，Vault访问和CA信任另按4-C核验；失败不开放私有AKS/Vault公网。
 

@@ -34,6 +34,56 @@ READMES = (
 
 
 class ProjectDocumentationTests(unittest.TestCase):
+    def test_stage4_partial_network_failure_requires_replanning(self):
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        section = guide.split("**S4-02部分失败时：**", 1)[1].split("**S4-04之后", 1)[0]
+        for required in ("Operation details", "AnotherOperationInProgress", "dependsOn", "冲突操作结束", "产生费用", "不能声称自动回滚", "新建S4-01", "新的成功plan ID", "不要回放Stage0", "新SHA"):
+            self.assertIn(required, section)
+
+    def test_stage4_model_authorization_matches_templates_and_safe_instructions(self):
+        import subprocess
+
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        section = guide.split("#### 4-0. 模型账号的一次性授权", 1)[1].split("#### 4-A.", 1)[0]
+        self.assertLess(guide.index("#### 4-0."), guide.index("| S4-01 |"))
+        self.assertIn("#4-0-模型账号的一次性授权", guide)
+        definition = json.loads(re.search(r"```json\n(.*?)\n```", section, re.S).group(1))["properties"]
+        self.assertEqual(definition["roleName"], "LLMGW Model Deployment Operator")
+        self.assertEqual(len(definition["permissions"]), 1)
+        permissions = definition["permissions"][0]
+        self.assertEqual(set(permissions["actions"]), {
+            "*/read", "Microsoft.Resources/deployments/*",
+            "Microsoft.CognitiveServices/accounts/privateEndpointConnectionsApproval/action",
+        })
+        for field in ("notActions", "dataActions", "notDataActions"):
+            self.assertEqual(permissions[field], [])
+        self.assertEqual(len(definition["assignableScopes"]), 2)
+        for scope in definition["assignableScopes"]:
+            self.assertRegex(scope, r"^/subscriptions/REPLACE_MODEL_SUBSCRIPTION_ID_[12]/resourceGroups/REPLACE_MODEL_RG_[12]$")
+        role_id = "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"
+        self.assertIn(role_id, (ROOT / "infra/modules/model-access-role/main.bicep").read_text())
+        self.assertIn(role_id, section)
+        for required in (
+            "AZURE_CLIENT_ID", "不是`AZURE_RUNTIME_CLIENT_ID`", "Enterprise applications", "az ad sp show",
+            "Assignable scopes", "roleDefinitions/write", "JSON页", "数据面", "同一Entra租户",
+            "Constrain roles", "不限制接收者", "Constrain roles and principal types", "Service principals",
+            "@Request", "@Resource", "roleAssignments/write", "roleAssignments/delete", "同时限制新增和删除",
+            "顶层`principalType=ServicePrincipal`", "仅补Azure授权", "新SHA", "plan本身不要求前序验收",
+        ):
+            self.assertIn(required, section)
+        workflow = yaml.load((ROOT / ".github/workflows/customer-deploy.yml").read_text(), Loader=yaml.BaseLoader)
+        login = next(step for step in workflow["jobs"]["infrastructure"]["steps"] if step.get("uses", "").startswith("azure/login@"))
+        self.assertEqual(login["with"]["client-id"], "${{ vars.AZURE_CLIENT_ID }}")
+        snippets = re.findall(r"```bash\n(.*?)\n```", section, re.S)
+        self.assertEqual(len(snippets), 2)
+        for source in snippets:
+            result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for forbidden in ("role assignment create", "role definition create", "get-access-token", "list-keys", "--debug"):
+                self.assertNotIn(forbidden, source)
+        for value in ("--include-inherited", "--assignee-object-id", "--fill-principal-name false", "conditionVersion:conditionVersion"):
+            self.assertIn(value, snippets[-1])
+
     def test_certificate_workflow_example_and_manual_import_stay_aligned(self):
         import subprocess
         from scripts.customer_migration import COMPONENTS
@@ -49,7 +99,7 @@ class ProjectDocumentationTests(unittest.TestCase):
         section = guide.split("### 阶段4：", 1)[1].split("### 阶段5：", 1)[0]
         for value in (*settings, "Secrets User", "Secrets Officer", "certificateMaterialsImported=false", "25KB", "S4-03", "S4-04", "S4-11", "S4-12", "Object ID", "不打开Vault公网", "CA的私钥独立保管"):
             self.assertIn(value, section)
-        snippets = re.findall(r"```bash\n(.*?)\n```", section, re.S)
+        snippets = re.findall(r"```bash\n(.*?)\n```", section.split("#### 4-C.", 1)[1], re.S)
         self.assertEqual(len(snippets), 3)
         for source in snippets:
             result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)

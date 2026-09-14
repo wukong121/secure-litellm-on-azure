@@ -32,6 +32,25 @@ def example_customer():
 
 
 class CustomerTemplateTests(unittest.TestCase):
+    def test_aks_subnet_writes_are_serialized_without_replacing_vnet(self):
+        result = subprocess.run(["az", "bicep", "build", "--file", str(ROOT / "infra/modules/aks-network/main.bicep"), "--stdout"], capture_output=True, text=True, check=True)
+        compiled = json.loads(result.stdout)
+        resources = compiled["resources"]
+        self.assertIsInstance(resources, list)
+        self.assertFalse(any(resource["type"] == "Microsoft.Network/virtualNetworks" for resource in resources))
+        subnets = {resource["name"]: resource for resource in resources if resource["type"] == "Microsoft.Network/virtualNetworks/subnets"}
+        self.assertEqual(len(subnets), 3)
+        for parameter, previous in (("systemSubnetName", None), ("userSubnetName", "systemSubnetName"), ("ingressSubnetName", "userSubnetName")):
+            with self.subTest(subnet=parameter):
+                resource = subnets[f"[format('{{0}}/{{1}}', parameters('virtualNetworkName'), parameters('{parameter}'))]"]
+                dependencies = resource["dependsOn"]
+                expected = [] if previous is None else [f"[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('virtualNetworkName'), parameters('{previous}'))]"]
+                self.assertEqual([dependency for dependency in dependencies if "Microsoft.Network/virtualNetworks/subnets" in dependency], expected)
+                properties = resource["properties"]
+                self.assertEqual(properties["routeTable"]["id"], "[resourceId('Microsoft.Network/routeTables', 'rt-litellm-aks-egress')]")
+                self.assertEqual(properties["privateEndpointNetworkPolicies"], "Enabled")
+                self.assertEqual(properties["privateLinkServiceNetworkPolicies"], "Disabled" if parameter == "ingressSubnetName" else "Enabled")
+
     def test_generated_parameters_match_compiled_bicep_contracts(self):
         config = example_customer()
         config["databaseAccess"] = {"migrationPrincipalId": "33333333-3333-4333-8333-333333333333"}
