@@ -10,6 +10,9 @@ param configureStage5Zones bool = false
 @description('Create the Key Vault private DNS zone. Keep false when a centrally managed zone already exists.')
 param createKeyVaultZone bool = false
 
+@description('Manage the Key Vault VNet link only when no earlier component or DNS Owner manages it.')
+param configureKeyVaultLink bool = true
+
 @description('Create the PostgreSQL private DNS zone. Keep false when a centrally managed zone already exists.')
 param createPostgresqlZone bool = false
 
@@ -66,7 +69,7 @@ resource keyVaultZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (confi
   tags: tags
 }
 
-resource keyVaultLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (configureStage5Zones) {
+resource keyVaultLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (configureStage5Zones && configureKeyVaultLink) {
   #disable-next-line use-parent-property
   name: '${keyVaultZoneName}/${virtualNetworkName}-link'
   location: 'global'

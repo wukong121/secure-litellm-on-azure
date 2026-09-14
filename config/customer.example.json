@@ -63,10 +63,20 @@
         "postgresqlEntraAdministratorPrincipalType": "Group",
         "redisSkuName": "Balanced_B0"
       },
-      "createStage5KeyVaultPrivateDnsZone": true,
+      "createStage5KeyVaultPrivateDnsZone": false,
       "createStage5PostgresqlPrivateDnsZone": true,
       "createStage5ManagedRedisPrivateDnsZone": true,
       "azureOpenAIConnections": []
+    },
+    "certificate-vault": {
+      "vaultName": "REPLACE_GLOBALLY_UNIQUE_CERTIFICATE_VAULT_NAME",
+      "ingressReaderPrincipalId": "REPLACE_RUNTIME_SERVICE_PRINCIPAL_OBJECT_ID",
+      "certificateImporterPrincipalId": "REPLACE_APPROVED_CERTIFICATE_IMPORTER_OBJECT_ID",
+      "certificateImporterPrincipalType": "User",
+      "runnerVirtualNetworkId": "REPLACE_RUNNER_VNET_RESOURCE_ID",
+      "createPrivateDnsZone": true,
+      "manageTargetDnsLink": true,
+      "manageRunnerDnsLink": true
     },
     "audit": {
       "virtualNetworkName": "REPLACE_TARGET_VNET",

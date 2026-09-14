@@ -85,6 +85,9 @@ param bootstrapPrincipalId string = ''
 @description('Create the Stage 5 Key Vault private DNS zone. Keep false when the central zone already exists.')
 param createStage5KeyVaultPrivateDnsZone bool = false
 
+@description('Keep false when the Stage 4 certificate-vault component or DNS Owner manages the Key Vault VNet link.')
+param configureStage5KeyVaultDnsLink bool = true
+
 @description('Create the Stage 5 PostgreSQL private DNS zone. Keep false when the central zone already exists.')
 param createStage5PostgresqlPrivateDnsZone bool = false
 
@@ -183,6 +186,7 @@ module privateDns '../modules/private-dns/main.bicep' = if (deployStage4) {
     virtualNetworkName: stage4Network.virtualNetworkName
     configureStage5Zones: deployStage5
     createKeyVaultZone: createStage5KeyVaultPrivateDnsZone
+    configureKeyVaultLink: configureStage5KeyVaultDnsLink
     createPostgresqlZone: createStage5PostgresqlPrivateDnsZone
     createManagedRedisZone: createStage5ManagedRedisPrivateDnsZone
     tags: tags

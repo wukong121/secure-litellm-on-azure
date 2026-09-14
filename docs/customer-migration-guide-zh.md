@@ -121,6 +121,7 @@
 | deploy，Stage0/bootstrap | 订阅范围的RG创建/嵌套部署及目标日志资源部署；plan的What-if也需相应权限 | Reader不够；不默认授予订阅Owner |
 | deploy，backup/platform等 | 批准目标RG内的资源部署；涉及角色分配需相应受控RBAC管理权限；旧监控另外限定旧RG | Contributor不含角色分配；跨订阅模型角色须在对应账号范围另行授权 |
 | deploy，Stage0/runner-connectivity | 两个指定VNet的读取及Peering写入/peer权限、目标Blob DNS zone的链接管理、Runner VNet的join权限；两侧RG内所需ARM部署/What-if权限 | 不修改整个VNet、NSG或路由；此组件不自行授予网络权限，详见0-A2 |
+| deploy，Stage4/certificate-vault | 目标RG的Vault/PE/DNS/诊断/锁部署和Vault范围角色分配；读取两个VNet及DNS链接，获准链接的VNet join权限 | 不导入证书，不自动授予部署身份Secret读取权；不是订阅Owner授权 |
 | runtime，Runner检查/备份 | 旧AKS读取、Cluster User凭据获取及Kubernetes Deployment/Pod读取；备份另需postgres exec/cp、目标部署输出读取、Blob容器数据读写 | ARM权限不等于Kubernetes RBAC或Storage数据权限 |
 | runtime，新环境发布 | 目标AKS/命名空间发布、指定Vault访问、镜像读写及目标RG操作回执权限，随动作授权 | 不给日常应用身份DDL或管理权限 |
 | database，Stage5/database-roles | 配置为PG Entra管理员服务主体或其获准管理员组成员，能建立新库角色及授权 | 个人User管理员不能通过服务主体OIDC模拟；不能直接填个人UPN |
@@ -143,7 +144,7 @@
 | Stage1 | parameters.monitoring、可选parameters.legacy-logging、legacyAccess | 旧日志工作区及真实批准来源；旧/新工作区不同不代表重复 |
 | Stage2 | contentAudit | 本文采用native；此后正文决策绑定证据 |
 | Stage3 | parameters.platform的ACR/日志名及stage4Network、stage4Aks | 这些网络/集群字段Stage3已要求提供，不能等Stage4才填写；stage5Data和模型连接可稍后补齐 |
-| Stage4 | azureOpenAIConnections、privateIngress；可选certificates | 模型账号资源ID，API/admin证书和允许来源；自动证书配置才需证书身份 |
+| Stage4 | azureOpenAIConnections、parameters.certificate-vault；入口发布前补privateIngress；可选certificates | workflow先创建两套证书共用的独立Vault，再手动导入证书；自动签发才需专项证书身份，见4-A至4-C |
 | Stage5 | stage5Data、databaseAccess、DNS归属开关 | 批准数据库SKU/HA/Entra管理员，runtime服务主体Object ID；不能用用户ID代替运行身份 |
 | Stage6 | application | 派生后台镜像digest和模型组/真实deployment映射，见Stage6 |
 | Stage7 | entra、proxy | 分离初始化/准入身份，代理镜像digest，用户或服务主体绑定，见Stage7 |
@@ -255,6 +256,8 @@ draft可以在阶段操作前生成，用作检查清单；所有实测完成后
 阶段N的`preflight`/原`what-if`及实际deploy/execute必须具备0至N-1的通过记录；独立config-check和部署plan不要求验收。记录包含阶段、环境、配置哈希、完整Git SHA、全部checks、与governance匹配的审批者、时间和报告引用。用Customer stage acceptance的draft生成pending报告，实测审核后由已配置的单人操作者confirm生成账本；record保留为外部报告/双人策略兼容入口。后续workflow自动读取同修订的成功加密账本，不需要更新证据Secret，也不需要先伪造passed才能开始阶段0。
 
 新记录使用stage-config绑定，只覆盖当前及前序阶段相关配置，后续PLS/审计身份输出补填不使阶段0失效；旧full-config记录仍可使用。相关配置、审批策略或代码改变后需重新审核，不直接改哈希冒充验收。记录仍限最近7天，长期迁移要复核早期备份和回退有效性。新报告哈希是规范JSON哈希，由工具计算。
+
+**合并代码后的重跑边界：** 当前账本和批准plan仍绑定完整Git SHA，新增Stage4证书组件也不例外。已完成Stage0–3时，在新SHA依次draft、复核有效的实际证据、confirm；单人路径共8次验收运行。不必仅因SHA变化重建资源或重做全部备份/恢复，但过期或受影响的检查须重测，源镜像扫描按新SHA重跑。尚未执行的旧plan须重新生成，不能改旧报告的revision或哈希。补parameters.certificate-vault本身不改变Stage0–3的配置指纹；更改早期platform字段则另行复核。
 
 **这是人工验收记录，不是自动事实认证**：`independentlyVerified=false`。工具校验清单、代码/配置、时效和已配置操作者，不独立证明技术事实。不要把“workflow绿勾”“resource存在”“本机模拟测试通过”当作所有check均通过；记录实际证据后再确认。阶段N重录会使后续旧账本失效。
 
@@ -400,6 +403,29 @@ postgres@sha256:e17e86066e5ef83e0952a9347f5c792b7ece00972e2aa787a6986f471b3dd3d5
 | S0-06 | Customer infrastructure deployment | 0 | component=runner-connectivity | deploy | S0-05成功且已审核的run ID | test |
 | S0-07 | Customer private runner checks | - | check_target=false，check_backup=true | - | - | - |
 | S0-08 | Customer private runtime operations | 0 | action=backup-restore | execute | 留空 | test |
+
+**执行完S0-08不等于完成Stage0验收。** 上表是资源准备与备份操作；旧版顺序表没有列出下面的验收收尾，容易误以为八步绿勾后可直接进入Stage1。不能将这八个步骤号填入`checked_items`，也不能把四项检查ID视为八步自动完成的结果。
+
+四项检查的逐步操作、命令、通过标准及confirm填写方法见[Stage0四项验收操作指南](customer-stage0-acceptance-checklist-zh.md)。S0-10按该指南执行，不需要另外寻找四个对应的workflow。
+
+| confirm中的检查ID | S0-01至S0-08实际覆盖 | 确认前还需核对 |
+| --- | --- | --- |
+| `inventory` | 配置中记录旧RG/AKS/namespace/PVC；S0-08读取两个Deployment及镜像、验证PG挂载PVC | 复核实际旧版本、数据库容量/扩展、模型/Key/预算配置及恢复材料位置；仅填了JSON不等于盘点完成 |
+| `backup_restore` | S0-08成功后有pg_dump、隔离PG恢复、基础表检查、Blob上传/下载及SHA256一致的观察结果 | 审核本次成功运行报告和备份引用，按批准范围复核数据完整性；不把任意旧Blob或一次green job当作全部验收 |
+| `key_salt_recovery` | 这八步未自动检查 | 获准保管人从受控备份材料取回原Master/Salt，核对与旧部署实际使用值一致并记录恢复方法；不能用artifact key替代，也不能新生成/轮换旧密钥来验证。涉及恢复/解密实测时使用批准的隔离环境，不打印秘密 |
+| `protocol_baseline` | 这八步未自动检查 | 在旧入口用实际首发客户端和获准测试内容验证所需调用，例如连续对话、流式、工具调用；记录客户端版本、时间、结果。近期实际使用记录经复核可作为证据，不要求此时测试尚未部署的新入口 |
+
+**验收收尾按下面顺序完成，branch=main、environment=test、stage=0。** 单人路径需先完成第2.3节的governance配置并同步Secret；draft生成后不再变更同阶段配置、代码或artifact key。draft可提前运行，但confirm只能在四项实际核验后运行。
+
+| 步骤 | 执行方式 | operation | reviewed_run_id | checked_items / evidence_notes | confirm_environment |
+| --- | --- | --- | --- | --- | --- |
+| S0-09 | Customer stage acceptance | draft | 留空 | 均留空；生成pending清单 | 留空 |
+| S0-10 | 人工核对上表四项并记录证据，不是workflow按钮 | - | - | 未完成项继续核验；已有近期证据可复核引用，不重建已有资源 | - |
+| S0-11 | Customer stage acceptance | confirm | S0-09成功的draft运行ID，不是S0-08的备份ID | 全部通过后填`inventory,backup_restore,key_salt_recovery,protocol_baseline`；说明中逐项填真实结果与证据引用 | test |
+
+截图中`For confirm, every check ID personally verified...`对应`checked_items`，`For confirm, actual observations and evidence references...`对应`evidence_notes`。**如果只执行了八步、尚未核验密钥恢复和协议基线，现在没有可以如实提交的完整confirm填写值。** 当前confirm不支持部分通过；不能只填`backup_restore`提交，也不能补两个未做过的检查ID绕过门禁。可在私下工作记录写“资源准备/备份操作已完成，人工验收待完成”，不要提交成Stage0通过记录。已核验的项目不必为填表重复执行，缺失或不可读的证据须先通过获准渠道补齐。
+
+四项完成后，`evidence_notes`用普通文本逐项说明：盘点记录引用；成功备份run ID及恢复/回读结果；Master/Salt恢复核验记录引用；旧客户端版本及测试结果引用。长度12至4000字符，不填凭据、Prompt、完整客户配置或敏感资源详情；公开仓库workflow输入可能公开。没有完成的检查不能编造“通过”说明。S0-11成功产生验收账本后再进入Stage1；若补governance等相关配置，旧plan失效，应重新plan/审核，而不是重跑已完成的资源部署。
 
 所有上述操作的`approved_plan_sha256`留空；基础设施的`release`不勾选；runtime的`audit_continue_run_id`留空。**backup-restore只支持execute，不运行plan，也不填bootstrap/backup的批准ID。** 执行前可以用Stage0验收draft查看检查范围，但draft不是自动批准备份。
 
@@ -559,6 +585,16 @@ S1-04之后先验证真实Container Insights日志已到达，再预览依赖这
 
 **阶段验收：** draft/confirm，stage=1；`legacy_health`、`alerts_received`、`rollback_snapshot`，配置legacyAccess后另有`legacy_source_access`。此外，批准的一期旧管理路径、废弃凭据及业务连续性必须实际检查；workflow做不到的必需控制仍须补齐，不能以探针成功代替整套加固。
 
+具体操作、客户值获取、命令/Portal路径、通过标准及确认表单见[Stage1验收操作指南](customer-stage1-acceptance-checklist-zh.md)。**尚未执行S1-08时先按该指南R-1保存原Deployment配置；已执行且未保存时按R-3处理，runtime审核摘要不是完整回退快照。** 未选来源限制且明确获批接受本次演练范围时，可跳过S1-09/10，但仍须完成三项默认验收，不能推广为客户生产豁免。
+
+| 步骤 | 执行方式 | operation | reviewed_run_id | checked_items / evidence_notes | confirm_environment |
+| --- | --- | --- | --- | --- | --- |
+| S1-11 | Customer stage acceptance | draft | 留空 | 均留空；main、test、stage=1，查看pending清单 | 留空 |
+| S1-12 | 按Stage1指南完成人工H/A/R项；已配置legacyAccess时另做S项 | - | - | 记录真实结果与证据；不是新增workflow按钮 | - |
+| S1-13 | Customer stage acceptance | confirm | S1-11成功且仍有效的draft运行ID | 默认三项全通过填`legacy_health,alerts_received,rollback_snapshot`；已配置来源限制另加`legacy_source_access`，说明逐项真实结果 | test |
+
+当前confirm不支持部分通过；采集/规则已配置不等于邮件已收到，当前Deployment导出不等于变更前快照。没有对应证据的项目保持待核验，不填完整checked_items推进Stage2。
+
 ### 阶段2：冻结客户决策
 
 本阶段没有infrastructure组件部署。确定区域/SKU配额、VNet/Pod/Service/Docker网段、模型私网与访问身份、API/admin域名、PG认证/HA/RTO、实际客户端版本、必要管理操作、正文读取者及留存策略。开发人数不能代替数据库大小或一小时停机可行性实测。
@@ -577,6 +613,17 @@ S1-04之后先验证真实Container Insights日志已到达，再预览依赖这
 
 运行`Customer staged migration`：branch=main、environment=test、stage=2、mode=config-check、component=none；随后`Customer stage acceptance`的stage=2 draft，完成决策核验后confirm。原生模式检查为`network_capacity`、`identity_owners`、`pg_auth_ha`、`content_audit_policy`、`protocol_scope`；不再把增强L3的旧`l3_policy`当作必选。
 
+逐项检查、客户值获取、通过标准与表单填写见[Stage2客户决策验收指南](customer-stage2-acceptance-checklist-zh.md)。本阶段验收的是获批、可实施的方案及责任分工，不要求提前部署新AKS/PG，也不能把后续HA、恢复或协议测试写成已通过。`contentPolicyAccepted`只确认政策接受，正文读取权限另由管理代理绑定等控制。
+
+| 步骤 | workflow/执行方式 | 输入/操作 | 成功后 |
+| --- | --- | --- | --- |
+| S2-01 | Customer staged migration | main、test、stage=2、mode=config-check、component=none | 配置合法；不代表配额/网络/政策已核验 |
+| S2-02 | Customer stage acceptance | main、test、stage=2、operation=draft；其他确认字段留空 | 取得本Stage pending清单及draft运行ID |
+| S2-03 | 按Stage2指南人工核对五项 | 保存真实决定、批准记录、后续实施节点和阻断条件 | 未决定或不可行项目先解决，不提交部分通过 |
+| S2-04 | Customer stage acceptance | operation=confirm；reviewed_run_id填S2-02有效draft ID；confirm_environment=test | 五项全完成后填写`network_capacity,identity_owners,pg_auth_ha,content_audit_policy,protocol_scope`及真实evidence_notes |
+
+更新完整CUSTOMER_CONFIG_JSON Secret后再运行；同完整Git SHA、环境和有效账本要求沿用第3节。Stage2指纹不自动锁定后续parameters.platform的全部决策，部署前须与受控批准记录核对。Stage3/platform首次plan前就要填齐stage4Network/stage4Aks，不等到Stage4再补；当前confirm不支持部分通过。
+
 ### 阶段3：供应链与目标基础
 
 **开始前：** Stage2已验收；准备deploy身份、ACR唯一名称、目标Workspace以及完整stage4Network/stage4Aks配置。Stage3只创建平台早期资源，不创建新PG，不关闭旧模型账号的访问路径；Stage4才建立私网连接。
@@ -592,30 +639,151 @@ S1-04之后先验证真实Container Insights日志已到达，再预览依赖这
 
 **阶段验收：** stage=3 draft/confirm；`oidc_scope`、`source_image_sbom_scan`、`target_isolation`。旧名称`image_signature_sbom`不再是Stage3的清单，具体用draft输出。
 
+三项操作、客户值获取、报告字段/哈希核对及通过标准见[Stage3验收操作指南](customer-stage3-acceptance-checklist-zh.md)。source-image附件是明文，不需要解密；platform计划/部署及验收附件仍使用原WORKFLOW_ARTIFACT_KEY。Stage3的ACR公网关闭但尚未建立本阶段之外的私网连接，不要求提前完成Stage4目标镜像签名/拉取。
+
+| 步骤 | 执行方式 | operation | reviewed_run_id | checked_items / evidence_notes | confirm_environment |
+| --- | --- | --- | --- | --- | --- |
+| S3-03 | Customer stage acceptance | draft | 留空 | 均留空；main、test、stage=3，查看pending清单 | 留空 |
+| S3-04 | 按Stage3指南人工核对OIDC、源报告和实际目标隔离 | - | - | 保留真实运行/资源及旧业务观察证据；不是新增workflow按钮 | - |
+| S3-05 | Customer stage acceptance | confirm | S3-03成功且仍有效的draft运行ID | 三项全通过填`oidc_scope,source_image_sbom_scan,target_isolation`，说明逐项真实结果 | test |
+
+当前confirm不支持部分通过。源扫描或部署回执的stageAccepted=false正常，不手改报告；输出里的未来AKS/PG名称不代表这些资源已创建，须核对阶段开关和实际资源。
+
 ### 阶段4：私网、Private AKS与身份
 
 **开始前：** Stage3已验收；目标VNet/PE子网由Stage0建立。核对AKS版本、节点SKU、区域限制/配额、网络段和Firewall出站；模型连接填真实账号Resource ID及别名。共享模型账号的公网/Local Auth关闭不能先于旧业务依赖核对，不能误伤其他使用者。
 
-**本阶段配置：** 顶层privateIngress分别提供API/admin的`tlsSecretId`和`allowedCidrs`，结构见[私有入口参考](customer-deployment-workflows-zh.md#stage4自动私有入口)。证书应已在获准的证书Vault中可读，值为对应域名的PEM证书链及未加密私钥；API/admin材料分离，至少有效7天，Runner信任CA。不要依赖尚未创建的Stage5/7业务Vault提供Stage4证书。
+**本阶段配置：** 先按4-A填写`parameters.certificate-vault`，由S4-03/04创建两套证书共用的**独立证书Vault**；不是合并Stage5/7业务Vault。此时可不启用顶层privateIngress，不要求Vault内已有证书。S4-04之后按4-C手动导入，入口发布前再补privateIngress的API/admin `tlsSecretId`和`allowedCidrs`，结构见[私有入口参考](customer-deployment-workflows-zh.md#stage4自动私有入口)。
 
-自动API签发可选：另配`AZURE_CERTIFICATE_CLIENT_ID`、已委派Azure DNS Zone以及顶层`certificates={zoneResourceId,termsAccepted:true,publicApiHostnameAccepted:true}`。API tlsSecretId必须无版本；admin证书由企业PKI准备。未选择自动签发则跳过S4-07/08，但证书准备本身不能跳过。来源CIDR覆盖实际Runner私网路径和未来PLS NAT地址，admin只覆盖批准管理网段。
+自动API签发可选：另配`AZURE_CERTIFICATE_CLIENT_ID`、已委派Azure DNS Zone以及顶层`certificates={zoneResourceId,termsAccepted:true,publicApiHostnameAccepted:true}`。API tlsSecretId必须无版本；admin证书由企业PKI准备。未选择自动签发则跳过S4-09/10，按4-C手动导入两套证书；本组件不为自动签发身份授予整库权限。来源CIDR覆盖实际Runner私网路径和未来PLS NAT地址，admin只覆盖批准管理网段。
+
+#### 4-A. 共用证书Vault的配置与取值
+
+在客户JSON的`parameters`内增加以下块，再同步完整Environment Secret `CUSTOMER_CONFIG_JSON`。这些是客户JSON字段，不是新增GitHub Variables/Secrets：
+
+```json
+"certificate-vault": {
+  "vaultName": "REPLACE_GLOBALLY_UNIQUE_CERTIFICATE_VAULT_NAME",
+  "ingressReaderPrincipalId": "REPLACE_RUNTIME_SERVICE_PRINCIPAL_OBJECT_ID",
+  "certificateImporterPrincipalId": "REPLACE_APPROVED_CERTIFICATE_IMPORTER_OBJECT_ID",
+  "certificateImporterPrincipalType": "User",
+  "runnerVirtualNetworkId": "REPLACE_RUNNER_VNET_RESOURCE_ID",
+  "createPrivateDnsZone": true,
+  "manageTargetDnsLink": true,
+  "manageRunnerDnsLink": true
+}
+```
+
+| 字段 | 含义、获取及核验方法 |
+| --- | --- |
+| `vaultName` | 客户批准的新证书Vault名称，3–24位小写字母/数字/连字符，字母开头、字母数字结尾，不连续连字符；不得用后台`kv-lt-`名称。名称需全局唯一；在Portal创建Key Vault表单只检查名称可用性，不点击创建；已删除但保留中的同名Vault须由Owner处理，不擅自purge |
+| `ingressReaderPrincipalId` | 从所选Environment的`AZURE_RUNTIME_CLIENT_ID`定位服务主体，按0-A1执行`az ad sp show --id "$RUNTIME_CLIENT_ID" --query '{clientId:appId,objectId:id}' --output json`；取objectId。UAMI取Principal ID，不能填Client ID或AKS应用工作负载身份 |
+| `certificateImporterPrincipalId` / `certificateImporterPrincipalType` | 客户批准的人工证书导入人或组，不自动取当前登录者/ownerEmail。Entra ID → Users或Groups → 指定对象 → Object ID，类型对应User或Group；用户可按0-A1查询，组用`az ad group show --group "REPLACE_APPROVED_GROUP_OBJECT_ID" --query '{name:displayName,objectId:id}' --output json`核验。必须与读取身份不同 |
+| `runnerVirtualNetworkId` | 从实际Runner VM → NIC → IP configurations → VNet → JSON View取完整id，方法同0-A2；可复用parameters.runner-connectivity中已核验的值。只支持同订阅VNet，可跨RG或与目标VNet相同，不填子网/VM ID |
+| `createPrivateDnsZone` | 在目标RG的Private DNS zones中查`privatelink.vaultcore.azure.net`。本组件创建/持续管理用true；已有区域由其他Owner管理则false复用。目前只支持目标RG内的区域，跨RG集中DNS须先扩展实现，不新建冲突区域绕过 |
+| `manageTargetDnsLink` / `manageRunnerDnsLink` | 查看该zone的Virtual network links及两个VNet的DNS servers。Azure提供DNS且无既有链接时true；自定义DNS或复用不同名链接时对应false，由DNS Owner验证解析/转发。目标链接固定`<目标VNet>-link`、Runner链接固定`certificate-runner-link`，不启用自动注册；同VNet不重复建链接 |
+
+目标VNet/PE子网和日志工作区直接取`parameters.platform.stage4Network`及`logAnalyticsWorkspaceName`，不用再次填另一套网络。组件不新建Peering、改NSG/路由；沿用Stage0批准路径，DNS链接不等于网络可达。
+
+Vault使用Standard SKU，禁用公网、RBAC模式、90天软删除、清除保护、防删除锁和AuditEvent诊断；只保存证书材料。读取身份获此Vault范围的Key Vault Secrets User，导入人/组获此Vault范围的Key Vault Secrets Officer，后者有写入/删除Secret能力，须明确批准。不会授予LiteLLM Pod身份读取入口私钥的权限，也不撤销客户已有继承授权；已有宽泛角色须单独核验，不能据此宣称身份已经完全隔离。
+
+Stage5复用该DNS区域和链接：配置了certificate-vault时，`parameters.platform.createStage5KeyVaultPrivateDnsZone`必须为false，工具自动禁用Stage5的Vault链接管理，PG/RedisDNS不受影响。不要同时让两个组件管理同一区域；新示例已设false，旧配置在Stage5前核对，改动早期platform字段仍按第3节处理证据。
+
+计划会拒绝未标记为`purpose=ingress-certificates`的既有同名Vault、自定义DNS下的自动链接、同VNet不同名链接及同名链接目标/注册设置冲突。不会自动接管业务Vault、扩大VNet权限或读取/创建Secret值；关闭管理开关不会自动删除已有资源。
+
+#### 4-B. 按顺序运行
+
+旧版手册的S4-03之后编号已顺延，按本表的component/action辨认；不是重跑已经完成的平台部署。S4-03也可先用`Customer staged migration`的stage=4、mode=config-check、component=certificate-vault检查参数。
 
 | 步骤 | workflow显示名称 | stage | component或action | operation | approved_run_id | confirm_environment |
 | --- | --- | --- | --- | --- | --- | --- |
 | S4-01 | Customer infrastructure deployment | 4 | component=platform | plan | 留空 | 留空 |
 | S4-02 | Customer infrastructure deployment | 4 | component=platform | deploy | S4-01的plan ID | test |
-| S4-03 | Customer private runtime operations | 4 | action=cluster-bootstrap | plan | 留空 | 留空 |
-| S4-04 | Customer private runtime operations | 4 | action=cluster-bootstrap | execute | S4-03的plan ID | test |
-| S4-05 | Customer private runtime operations | 4 | action=monitoring-onboard | plan | 留空 | 留空 |
-| S4-06 | Customer private runtime operations | 4 | action=monitoring-onboard | execute | S4-05的plan ID | test |
-| S4-07 | Customer private runtime operations | 4 | action=certificate-renew | plan | 留空；可选自动API签发 | 留空 |
-| S4-08 | Customer private runtime operations | 4 | action=certificate-renew | execute | S4-07的plan ID | test |
-| S4-09 | Customer private runtime operations | 4 | action=private-ingress | plan | 留空 | 留空 |
-| S4-10 | Customer private runtime operations | 4 | action=private-ingress | execute | S4-09的plan ID | test |
+| S4-03 | Customer infrastructure deployment | 4 | component=certificate-vault | plan | 留空 | 留空 |
+| S4-04 | Customer infrastructure deployment | 4 | component=certificate-vault | deploy | S4-03成功且已审核的plan ID | test |
+| S4-05 | Customer private runtime operations | 4 | action=cluster-bootstrap | plan | 留空 | 留空 |
+| S4-06 | Customer private runtime operations | 4 | action=cluster-bootstrap | execute | S4-05的plan ID | test |
+| S4-07 | Customer private runtime operations | 4 | action=monitoring-onboard | plan | 留空 | 留空 |
+| S4-08 | Customer private runtime operations | 4 | action=monitoring-onboard | execute | S4-07的plan ID | test |
+| S4-09 | Customer private runtime operations | 4 | action=certificate-renew | plan | 留空；可选自动API签发 | 留空 |
+| S4-10 | Customer private runtime operations | 4 | action=certificate-renew | execute | S4-09的plan ID | test |
+| S4-11 | Customer private runtime operations | 4 | action=private-ingress | plan | 留空 | 留空 |
+| S4-12 | Customer private runtime operations | 4 | action=private-ingress | execute | S4-11的plan ID | test |
 
-**S4-02之后、S4-03之前：** 由网络Owner完成管理VNet到新AKS/ACR/证书Vault的路由、Private DNS和允许端口。确认ARM读取、Kubernetes用户凭据及命名空间权限；运行`Customer private runner checks`，environment=test、check_target=true。失败先处理连通/权限，不给私有AKS开放公网。
+**S4-04之后、S4-05之前：** 按4-C手动导入证书；由网络Owner核验管理VNet到新AKS/ACR/证书Vault的路由、Private DNS和允许端口。确认ARM读取、Kubernetes用户凭据及命名空间权限；运行`Customer private runner checks`，environment=test、check_target=true。该检查不读取证书Secret，Vault访问和CA信任另按4-C核验；失败不开放私有AKS/Vault公网。
 
-`cluster-bootstrap`实际创建litellm和两个ingress命名空间，不安装完整应用或自动授予所有Kubernetes权限。`private-ingress`会扫描/晋级固定Traefik镜像，创建API/admin两套私有入口并核验TLS、Host和内部LB前端；它不是Entra登录或模型调用测试。certificate-renew只更新Vault，不发布证书到入口，S4-09/10仍需运行。
+`cluster-bootstrap`实际创建litellm和两个ingress命名空间，不安装完整应用或自动授予所有Kubernetes权限。`private-ingress`会扫描/晋级固定Traefik镜像，创建API/admin两套私有入口并核验TLS、Host和内部LB前端；它不是Entra登录或模型调用测试。certificate-renew只更新Vault，不发布证书到入口，S4-11/12仍需运行。
+
+#### 4-C. 部署后手动导入两个Secret
+
+**1. 取得实际输出。** 解密S4-04的`infrastructure-test-4-certificate-vault-<run ID>`附件，在deployment-outputs.json查看`certificateVault.value`；或从目标RG → Deployments → `llmgw-test-s4-certificate-vault` → Outputs取得。输出只有Vault、PE、DNS及两个预定Secret地址；`certificateMaterialsImported=false`表示此部署没有导入材料，不是证书上传失败。管理终端也可只读查询：
+
+```bash
+SUBSCRIPTION_ID="REPLACE_SUBSCRIPTION_ID_FROM_CUSTOMER_JSON"
+TARGET_RG="REPLACE_TARGET_RESOURCE_GROUP_FROM_CUSTOMER_JSON"
+ENVIRONMENT_NAME="test"
+az deployment group show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
+  --name "llmgw-${ENVIRONMENT_NAME}-s4-certificate-vault" \
+  --query '{state:properties.provisioningState,certificateVault:properties.outputs.certificateVault.value}' --output json
+```
+
+确认Succeeded，把输出`name`作为下面的CERT_VAULT，`apiTlsSecretId`/`adminTlsSecretId`分别填入privateIngress.api/admin.tlsSecretId，来源CIDR按真实批准范围填写并同步Secret。地址固定为同一Vault中的`/secrets/api-tls`、`/secrets/admin-tls`，不要填`/certificates/`、相同Secret或业务Vault。支持手工固定版本，但须使用对应Secret的真实版本。
+
+**2. 私网和身份准备。** 导入在获准访问该PE的管理机器进行，可使用已建立私网路径的Runner，但交互终端须由获批导入人本人登录，不会继承Actions OIDC登录。通过批准的传输渠道交付材料，不放GitHub artifact、临时公网链接或聊天。先用`az account show --query '{tenant:tenantId,subscription:id,identity:user.name,type:user.type}' --output json`核对租户/订阅及当前身份；人工身份成功不等于runtime身份已可读。
+
+从Vault → Networking → Private endpoint connection核验Approved及其NIC私有IP。实际执行机用`getent ahostsv4 "${CERT_VAULT}.vault.azure.net"`检查必须解析到此PE，而非任意私有地址；TLS访问使用正常Vault域名，不用裸IP或跳过证书校验。自定义DNS由Owner补条件转发；RBAC传播或网络失败先修复，不打开Vault公网。
+
+**3. 整理并验证文件。** 每个Secret都包含**该域名的叶证书在前、其后中间链、最后对应未加密叶私钥**，不是一个Secret只放证书、另一个只放私钥。API须由未来Front Door信任的公有CA签发；admin可以使用企业私有CA。签发CA的私钥独立保管，绝不合入这两个文件。以下在仓库根目录的受控终端执行，只填写文件路径；已合并的合格PEM可直接使用，不必再次拼接：
+
+```bash
+set -euo pipefail
+umask 077
+mkdir -p temp/certificate-import
+chmod 700 temp/certificate-import
+API_CHAIN_FILE="REPLACE_API_LEAF_AND_CHAIN_FILE"
+API_LEAF_KEY_FILE="REPLACE_API_LEAF_PRIVATE_KEY_FILE"
+ADMIN_CHAIN_FILE="REPLACE_ADMIN_LEAF_AND_CHAIN_FILE"
+ADMIN_LEAF_KEY_FILE="REPLACE_ADMIN_LEAF_PRIVATE_KEY_FILE"
+API_PEM_FILE="temp/certificate-import/api.pem"
+ADMIN_PEM_FILE="temp/certificate-import/admin.pem"
+cat "$API_CHAIN_FILE" "$API_LEAF_KEY_FILE" > "$API_PEM_FILE"
+cat "$ADMIN_CHAIN_FILE" "$ADMIN_LEAF_KEY_FILE" > "$ADMIN_PEM_FILE"
+chmod 600 "$API_PEM_FILE" "$ADMIN_PEM_FILE"
+BASE_DOMAIN="REPLACE_BASE_DOMAIN_FROM_CUSTOMER_JSON"
+.venv/bin/python - "$BASE_DOMAIN" "$API_PEM_FILE" "$ADMIN_PEM_FILE" <<'PY'
+from pathlib import Path
+import sys
+from scripts.private_ingress import certificate_material
+
+try:
+    for plane, filename in zip(("api", "admin"), sys.argv[2:], strict=True):
+        raw = Path(filename).read_bytes()
+        if len(raw) > 25 * 1024:
+            raise ValueError("Key Vault Secret size limit")
+        result = certificate_material(raw.decode("utf-8"), f"llm-{plane}.{sys.argv[1]}")
+        print(f"{plane}: sha256={result['sha256']} expiresAt={result['expiresAt']}")
+except Exception:
+    raise SystemExit("Certificate validation failed; no private material printed.") from None
+PY
+```
+
+本机需具备仓库Python依赖。验证覆盖域名/SAN、私钥匹配、有效期至少7天和Secret 25KB限制，不证明CA链已被实际Runner/Front Door信任。由管理员把admin根CA**公钥证书**安装到实际Runner的OpenSSL系统信任和管理浏览器信任；仅在生成证书的开发VM验证通过不算完成。S4-11的plan已经会验证Runner信任，不能等execute再补；API信任链也需符合后续Front Door要求。
+
+**4. 人工上传。** 在已核对私网与导入人登录的终端执行；使用上述受控PEM路径，命令明确过滤输出，不启用`--debug`或shell trace。在另一机器执行时须先安全传输并重新核对这些路径/变量。这一步写入Secret的新版本，已有版本时需先批准轮换，不为测试而删除旧版本：
+
+```bash
+CERT_VAULT="REPLACE_NAME_FROM_CERTIFICATE_VAULT_OUTPUT"
+az keyvault secret set --subscription "$SUBSCRIPTION_ID" --vault-name "$CERT_VAULT" \
+  --name api-tls --file "$API_PEM_FILE" --encoding utf-8 --content-type application/x-pem-file \
+  --query '{id:id,enabled:attributes.enabled}' --output json --only-show-errors
+az keyvault secret set --subscription "$SUBSCRIPTION_ID" --vault-name "$CERT_VAULT" \
+  --name admin-tls --file "$ADMIN_PEM_FILE" --encoding utf-8 --content-type application/x-pem-file \
+  --query '{id:id,enabled:attributes.enabled}' --output json --only-show-errors
+```
+
+Portal替代路径为该Vault → **Secrets → Generate/Import**，不是Certificates；在有私网可达路径的浏览器分别创建api-tls/admin-tls，值粘贴各自完整合并PEM，不上传CA私钥。上传后按客户保管策略处理受控临时文件并保留原始恢复材料，不删除唯一副本。自动API签发路径只需人工导入admin-tls，再于S4-09/10签发API；专用身份的精确TXT/API及ACME状态Secret授权仍须另行批准，不授予它整库Secrets Officer或admin读取权限。
+
+**完成条件：** 两个Secret可用、私钥匹配、实际Runner信任CA、privateIngress指向上述地址及获准CIDR。S4-11由真实runtime身份读取两套材料生成计划，审核后S4-12发布并核验TLS/Host。上传成功不代表入口已发布，也不自动生成Stage4验收。
 
 **Stage4验收前的镜像步骤：** 私有ACR可达后运行`Promote LiteLLM image`，environment=test、acr_name=客户ACR名称、source_image保持仓库固定源digest、target_tag=`litellm-azure:rehearsal-1`（示例，按发布版本命名）、build_azure_runtime=true、build_auth_proxy=false。没有stage/approved_run_id输入。deploy身份需批准的ACR推送权限；Runner需访问源registry、扫描库和Sigstore。记录成功输出的完整`ACR/repository@sha256:...`，下一阶段应用配置使用它；扫描失败时即使已推送也不能作为已批准镜像。
 
