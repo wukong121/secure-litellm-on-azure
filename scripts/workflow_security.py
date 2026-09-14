@@ -80,6 +80,10 @@ def seal_directory(directory, name, filenames):
 def run_private(module, arguments):
     require(module in {"scripts.customer_migration", "scripts.migration_deploy", "scripts.migration_runtime", "scripts.migration_evidence", "scripts.installation_readiness", "scripts.gateway_checks"}, "Unapproved customer workflow module")
     artifact_key()
+    if module == "scripts.installation_readiness":
+        previous_report = ROOT / "temp/runner-readiness/runner-readiness.json"
+        require(not previous_report.is_symlink(), "Refusing readiness report symlinks")
+        previous_report.unlink(missing_ok=True)
     directory = ROOT / "temp/workflow-private"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     directory.chmod(0o700)
@@ -103,9 +107,30 @@ def run_private(module, arguments):
             "Unexpected or missing customer configuration fields": "configuration-fields",
             "Environment mismatch": "environment-mismatch",
             "Cannot authenticate workflow evidence": "evidence-key-or-context-mismatch",
+            "Existing peering uses another name": "connectivity-existing-peering",
+            "Existing peering conflicts": "connectivity-peering-conflict",
+            "Existing DNS link uses another name": "connectivity-existing-dns-link",
+            "Existing DNS link conflicts": "connectivity-dns-link-conflict",
+            "Runner uses custom DNS": "connectivity-custom-dns",
+            "VNet address spaces overlap": "connectivity-address-overlap",
+            "Deploy the backup component before": "backup-resources-not-ready",
+            "Connectivity plan attempts to modify": "connectivity-scope-rejected",
         }
         category = next((label for fragment, label in categories.items() if fragment.lower() in errors.lower()), category)
     message = f"Customer operation {label}. Result category: {category}. Review the encrypted artifact; raw output is retained only in the runner's private temporary directory until cleanup."
+    if module == "scripts.installation_readiness":
+        from scripts.runner_connectivity import BACKUP_PROBES
+        report = ROOT / "temp/runner-readiness/runner-readiness.json"
+        known = {"runner-tools", "runtime-versions", "docker-daemon", "azure-scope", "legacy-cluster-read", "target-cluster-read", *BACKUP_PROBES}
+        try:
+            if report.is_file() and not report.is_symlink() and report.stat().st_size <= 1024 * 1024:
+                checks = json.loads(report.read_text()).get("checks", [])
+                if isinstance(checks, list):
+                    for check in checks:
+                        if isinstance(check, dict) and isinstance(check.get("name"), str) and check["name"] in known and isinstance(check.get("status"), str) and check["status"] in {"passed", "failed", "skipped", "not-selected"}:
+                            message += f"\nRunner check {check['name']}: {check['status']}."
+        except (ValueError, AttributeError, OSError):
+            pass
     print(message)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:

@@ -11,6 +11,10 @@ on:
         description: Also test target AKS read access after it has been deployed
         type: boolean
         default: false
+      check_backup:
+        description: Test approved backup resources, private DNS/TLS and runtime Blob read access after network preparation
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -59,9 +63,11 @@ jobs:
           CUSTOMER_CONFIG_JSON: ${{ secrets.CUSTOMER_CONFIG_JSON }}
           CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
           CHECK_TARGET: ${{ inputs.check_target }}
+          CHECK_BACKUP: ${{ inputs.check_backup }}
         run: |
           arguments=(--environment "$CUSTOMER_ENVIRONMENT")
           if [[ "$CHECK_TARGET" == true ]]; then arguments+=(--check-target); fi
+          if [[ "$CHECK_BACKUP" == true ]]; then arguments+=(--check-backup); fi
           python -m scripts.workflow_security run scripts.installation_readiness "${arguments[@]}"
       - name: Encrypt readiness results
         if: success() || failure()

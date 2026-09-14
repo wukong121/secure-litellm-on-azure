@@ -125,7 +125,7 @@ GitHub中确认Idle后，将输出`runnerLabels`的数组值填入Repository Var
 1. 先创建独立管理网络和Runner，完成GitHub注册；不依赖新集群存在。旧AKS未指定自建VNet时通常仍有自动创建的节点VNet，不将Runner塞入该节点子网。
 2. 旧Kubernetes API是公网模式时，从Runner访问获准API端点并验证身份/RBAC；有来源白名单则批准NAT实际出口。旧PG通过Pod内命令备份，不必给PG新增公网入口。私有API则先具备对应私网连接。
 3. Stage0建立私有备份网络后，即需连接管理VNet和备份网络，配置相应Private DNS Zone关联或公司DNS转发，再运行备份上传；不是等新AKS创建才处理网络。
-4. 目标VNet/Private AKS/PG/ACR等创建后，批准双向VNet Peering或已有Hub路由、NSG与Private DNS访问，再运行私网恢复/发布。跨区域时用Global VNet Peering并核算流量费用；VNet Peering本身不自动传播Private DNS。
+4. Stage0备份资源创建后，可按[主手册0-A2](customer-migration-guide-zh.md#0-a2-由workflow建立runner备份连接)运行`runner-connectivity`组件的plan/deploy，在同订阅内建立双向Peering和Blob Private DNS链接，再运行Runner检查的`check_backup=true`。已有Hub/企业DNS按复用开关保留；目标AKS/PG/ACR等仍需各自获批DNS和端口。跨区域Peering需核算流量费用；Peering本身不自动传播Private DNS。
 5. 使用相同或替换后的合格Runner继续部署维护。它不承载LiteLLM流量，旧集群停用不等于Runner退役；模板输出`targetPrivateConnectivityVerified=false`，只创建网络不能替代逐项连通测试。
 
 ## 2. 机器要求
@@ -307,7 +307,7 @@ done
 - [ ] 镜像晋级、私有入口等所选动作所需工具可用；权限和出站缺口按实际失败补齐。
 - [ ] 备份恢复前核对空间和执行时间，运行结束检查敏感临时文件及凭据缓存。
 
-可运行新增的`Customer private runner checks`：选择environment，首次check_target=false；目标AKS建立后再选true。它实际检查工具、Python/Node版本、Docker、Azure身份范围和所选集群的Deployment只读访问，结果加密上传。**这不是“runner全部权限就绪”证明**，不验证资源写权限、数据平面或模型调用；其余条件继续按上表在相应步骤核对。
+可运行`Customer private runner checks`：选择environment，首次`check_target=false, check_backup=false`；目标AKS建立后再选check_target=true。Stage0备份网络准备后选择`check_backup=true`，额外检查备份资源、Runner到PE的DNS/TLS及同OIDC身份的Blob容器只读列举。公开摘要仅显示固定检查名/状态，详细结果加密上传。**这不是“runner全部权限就绪”证明**，不验证Blob上传/下载、Pod exec/cp、其他资源写权限或模型调用；失败不会自动放宽NSG或授予角色。
 
 相关入口：[运行操作](../.github/workflows/customer-runtime.yml)、[镜像晋级](../.github/workflows/promote-litellm-image.yml)、[入口检查](../.github/workflows/customer-gateway-checks.yml)。基础设施部署和部分授权/配置检查使用GitHub托管runner，不要误以为其中一个绿勾就验证了这台私网机器。
 

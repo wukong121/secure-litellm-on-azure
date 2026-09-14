@@ -29,6 +29,148 @@ class FakeAzure:
 
 
 class MigrationDeploymentTests(unittest.TestCase):
+    def connectivity_config(self):
+        config = customer_config()
+        config["parameters"]["backup"] = {"virtualNetworkName": "backup-vnet"}
+        config["parameters"]["runner-connectivity"] = {
+            "runnerVirtualNetworkId": group_id(config).replace("rg-secure", "rg-runner") + "/providers/Microsoft.Network/virtualNetworks/runner-vnet",
+        }
+        return config
+
+    def test_connectivity_parameters_are_stable_and_reject_arbitrary_scopes(self):
+        from scripts.runner_connectivity import connectivity_settings
+        config = self.connectivity_config()
+        template, document = parameters_for(config, 0, "runner-connectivity")
+        self.assertEqual(template.parent.name, "runner-connectivity")
+        self.assertEqual(document["parameters"]["runnerResourceGroupName"]["value"], "rg-runner")
+        self.assertTrue(document["parameters"]["managePeering"]["value"])
+        settings = connectivity_settings(config)
+        original = copy.deepcopy(config)
+        config["parameters"]["runner-connectivity"]["runnerVirtualNetworkId"] = settings["runnerVirtualNetworkId"].upper()
+        self.assertEqual(settings["connectionName"], connectivity_settings(config)["connectionName"])
+        for identifier in (settings["runnerVirtualNetworkId"] + "/subnets/runner", settings["backupVirtualNetworkId"], settings["runnerVirtualNetworkId"].replace(config["azure"]["subscriptionId"], "33333333-3333-4333-8333-333333333333")):
+            invalid = copy.deepcopy(original)
+            invalid["parameters"]["runner-connectivity"]["runnerVirtualNetworkId"] = identifier
+            with self.subTest(identifier=identifier), self.assertRaises(ValueError):
+                connectivity_settings(invalid)
+        config = copy.deepcopy(original)
+        config["parameters"]["runner-connectivity"]["managePeering"] = "false"
+        with self.assertRaises(ValueError):
+            connectivity_settings(config)
+
+    def test_connectivity_scope_only_allows_exact_children_and_nested_deployment(self):
+        from scripts.runner_connectivity import connectivity_resource_ids, connectivity_settings
+        config = self.connectivity_config()
+        context = {"privateDnsZoneName": "privatelink.blob.core.windows.net"}
+        allowed = connectivity_resource_ids(config, context["privateDnsZoneName"])
+        self.assertEqual(len(allowed), 4)
+        changes = [{"changeType": "Create", "resourceId": identifier} for identifier in allowed]
+        assert_change_scope(config, "runner-connectivity", changes, context)
+        settings = connectivity_settings(config)
+        for resource in (settings["runnerVirtualNetworkId"], settings["backupVirtualNetworkId"], group_id(config) + "/providers/Microsoft.Authorization/roleAssignments/extra", next(iter(allowed)) + "-other"):
+            with self.subTest(resource=resource), self.assertRaises(ValueError):
+                assert_change_scope(config, "runner-connectivity", [{"changeType": "Modify", "resourceId": resource}], context)
+        with self.assertRaises(ValueError):
+            assert_change_scope(config, "runner-connectivity", [{"changeType": "Delete", "resourceId": next(iter(allowed))}], context)
+        config["parameters"]["runner-connectivity"].update(managePeering=False, manageBlobDnsLink=False)
+        self.assertEqual(connectivity_resource_ids(config, context["privateDnsZoneName"]), set())
+
+    def connectivity_azure(self, config):
+        from unittest.mock import Mock
+        from scripts.runner_connectivity import connectivity_settings
+        settings = connectivity_settings(config)
+        prefix = group_id(config) + "/providers/"
+        backup = {"storageAccountName": "syntheticbackup", "containerName": "litellm-postgresql", "virtualNetworkName": "backup-vnet", "privateEndpointName": "backup-pe", "privateEndpointSubnetName": "pe-subnet", "privateDnsZoneName": "privatelink.blob.core.windows.net"}
+        resources = {
+            "deployment": {"state": "Succeeded", "backup": backup},
+            "account": {"id": prefix + "Microsoft.Storage/storageAccounts/syntheticbackup", "publicNetworkAccess": "Disabled", "blob": "https://syntheticbackup.blob.core.windows.net/"},
+            "pe": {"subnet": {"id": settings["backupVirtualNetworkId"] + "/subnets/pe-subnet"}, "networkInterfaces": [{"id": prefix + "Microsoft.Network/networkInterfaces/backup-nic"}], "privateLinkServiceConnections": [{"privateLinkServiceId": prefix + "Microsoft.Storage/storageAccounts/syntheticbackup", "groupIds": ["blob"], "privateLinkServiceConnectionState": {"status": "Approved"}}]},
+            "ips": ["10.30.8.4"], "links": [],
+            "runner": {"id": settings["runnerVirtualNetworkId"], "addressSpace": {"addressPrefixes": ["10.50.0.0/24"]}},
+            "backup": {"id": settings["backupVirtualNetworkId"], "addressSpace": {"addressPrefixes": ["10.30.0.0/16"]}},
+        }
+        azure = Mock()
+        azure.run.side_effect = lambda command: "core.windows.net" if command[0] == "cloud" else {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}
+        def scoped(command):
+            if command[:3] == ["deployment", "group", "show"]:
+                return resources["deployment"]
+            if command[:3] == ["storage", "account", "show"]:
+                return resources["account"]
+            if command[:3] == ["network", "private-endpoint", "show"]:
+                return resources["pe"]
+            if command[:3] == ["network", "nic", "show"]:
+                return resources["ips"]
+            if command[:3] == ["network", "vnet", "show"]:
+                return resources["runner" if settings["runnerVirtualNetworkId"] in command else "backup"]
+            if command[:4] == ["network", "private-dns", "link", "vnet"]:
+                return resources["links"]
+            if "what-if" in command:
+                from scripts.runner_connectivity import connectivity_resource_ids
+                return {"status": "Succeeded", "changes": [{"resourceId": identifier, "changeType": "Create"} for identifier in sorted(connectivity_resource_ids(config, backup["privateDnsZoneName"]))]}
+            if command[:3] == ["deployment", "group", "create"]:
+                return {"properties": {"provisioningState": "Succeeded"}}
+            raise AssertionError(command)
+        azure.scoped.side_effect = scoped
+        return azure, resources
+
+    def test_connectivity_uses_existing_backup_and_requires_plan_approval(self):
+        from scripts.runner_connectivity import inspect_connectivity
+        config = self.connectivity_config()
+        azure, _ = self.connectivity_azure(config)
+        result = inspect_connectivity(config, azure)
+        self.assertEqual(result["privateEndpointIps"], ["10.30.8.4"])
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_deploy.subprocess.run", side_effect=self.compile):
+            plan = deploy_component(config, 0, "runner-connectivity", "a" * 40, "plan", [], directory, azure=azure)
+            self.assertFalse(any("create" in call.args[0] for call in azure.scoped.call_args_list))
+            with self.assertRaisesRegex(ValueError, "Plan changed"):
+                deploy_component(config, 0, "runner-connectivity", "a" * 40, "deploy", [], directory, "f" * 64, azure)
+            deploy_component(config, 0, "runner-connectivity", "a" * 40, "deploy", [], directory, plan["planSha256"], azure)
+            creates = [call.args[0] for call in azure.scoped.call_args_list if call.args[0][:3] == ["deployment", "group", "create"]]
+            self.assertEqual(len(creates), 1)
+            self.assertIn("Incremental", creates[0])
+
+    def test_connectivity_blocks_overlap_foreign_endpoints_and_existing_conflicts(self):
+        from scripts.runner_connectivity import connectivity_settings, inspect_connectivity
+        config = self.connectivity_config()
+        settings = connectivity_settings(config)
+        mutations = (
+            lambda resources: resources["deployment"].update(state="Failed"),
+            lambda resources: resources["account"].update(publicNetworkAccess="Enabled"),
+            lambda resources: resources["account"].update(blob="https://other.invalid/"),
+            lambda resources: resources["pe"]["networkInterfaces"][0].update(id="/unapproved/nic"),
+            lambda resources: resources["runner"].update(addressSpace={"addressPrefixes": ["10.30.0.0/24"]}),
+            lambda resources: resources["runner"].update(dhcpOptions={"dnsServers": ["10.50.0.10"]}),
+            lambda resources: resources["runner"].update(virtualNetworkPeerings=[{"name": "existing", "remoteVirtualNetwork": {"id": settings["backupVirtualNetworkId"]}}]),
+            lambda resources: resources["links"].append({"name": "existing", "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}}),
+        )
+        for mutate in mutations:
+            azure, resources = self.connectivity_azure(config)
+            mutate(resources)
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                inspect_connectivity(config, azure)
+        config["parameters"]["runner-connectivity"].update(managePeering=False, manageBlobDnsLink=False)
+        azure, resources = self.connectivity_azure(config)
+        resources["runner"].update(dhcpOptions={"dnsServers": ["10.50.0.10"]})
+        self.assertEqual(inspect_connectivity(config, azure)["allowedResourceIds"], [])
+
+    def test_connectivity_reuses_own_connections_but_preserves_foreign_settings(self):
+        from scripts.runner_connectivity import connectivity_settings, inspect_connectivity
+        config = self.connectivity_config()
+        settings = connectivity_settings(config)
+        azure, resources = self.connectivity_azure(config)
+        for network, remote in (("runner", "backupVirtualNetworkId"), ("backup", "runnerVirtualNetworkId")):
+            resources[network]["virtualNetworkPeerings"] = [{"name": settings["connectionName"], "remoteVirtualNetwork": {"id": settings[remote]}, "allowForwardedTraffic": False, "allowGatewayTransit": False, "useRemoteGateways": False}]
+        resources["links"] = [{"name": settings["connectionName"], "registrationEnabled": False, "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}}]
+        expected = inspect_connectivity(config, azure)
+        self.assertEqual(inspect_connectivity(config, azure), expected)
+        resources["runner"]["virtualNetworkPeerings"][0]["allowForwardedTraffic"] = True
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            inspect_connectivity(config, azure)
+        resources["runner"]["virtualNetworkPeerings"][0]["allowForwardedTraffic"] = False
+        resources["links"][0]["registrationEnabled"] = True
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            inspect_connectivity(config, azure)
+
     def test_managed_release_requires_matching_api_edge_binding_receipt(self):
         from unittest.mock import Mock
         from scripts.customer_migration import stage_fingerprint

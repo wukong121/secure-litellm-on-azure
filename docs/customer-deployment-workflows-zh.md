@@ -122,7 +122,7 @@ Stage4建立私网连接后，才验收`target_image_signature_sbom`，继续使
 | Customer infrastructure deployment | plan / deploy | 对选定阶段和组件预览，批准后真正执行 ARM 部署 |
 | Customer private runtime operations | plan / execute | 私网 runner 上备份恢复、旧环境探针加固、监控接入、目标库恢复、客户应用清单发布 |
 | Customer stage acceptance | draft / confirm / record | 生成清单；单人按实际检查人工确认；保留原外部报告兼容入口 |
-| Customer private runner checks | check_target=false/true | 私网runner工具、身份范围和所选AKS只读检查，不创建资源 |
+| Customer private runner checks | check_target=false/true、check_backup=false/true | 工具/AKS只读检查；check_backup另验证Blob私网与OIDC只读列举，不创建资源 |
 
 `plan` 不要求前序证据，便于前期评审，但有实际资源依赖的模板必须等依赖就绪；计划成功不是进入该阶段的批准。`deploy` / `execute` 要求前序阶段已验收。阶段0没有前序证据，当前Actions自动读取账本，不要求初始化MIGRATION_EVIDENCE_JSON；仅旧本地兼容入口用`[]`。阶段2是决策和验收，没有资源部署。
 
@@ -198,7 +198,7 @@ Runner工程状态补记（2026-09-13）：[注册生命周期模块](../scripts
 
 | 阶段 | 具体入口与顺序 | 仍需人工准备/验证 |
 | --- | --- | --- |
-| 0 | infrastructure: bootstrap → backup；runtime: backup-restore / execute；acceptance: draft/confirm（record兼容） | POSTGRES_RESTORE_IMAGE、备份Owner、runtime身份Object ID、私网runner到备份网络/DNS；业务协议、密文读取、关键行数及角色权限复核 |
+| 0 | infrastructure: bootstrap → backup → runner-connectivity；runner checks: check_backup=true；runtime: backup-restore / execute；acceptance: draft/confirm | POSTGRES_RESTORE_IMAGE、两类备份身份、Runner VNet资源ID及网络授权；已有Hub/DNS可复用，业务与数据权限仍须复核 |
 | 1 | 旧日志/monitoring-onboard/monitoring；legacy-hardening；可选legacy-access-restrict，恢复用legacy-access-restore | 来源限制只覆盖批准入口，必须实测原客户可用和未批准来源拒绝；不自动实现管理面私网隔离 |
 | 2 | acceptance: draft → 客户架构决策 → confirm | 网络、成本、身份Owner、PG认证/HA、实际协议与原生留痕决策；native检查为content_audit_policy，L3增强另行选择 |
 | 3 | Check public source image；infrastructure: platform | 公共源SBOM/扫描先行；目标签名/拉取在Stage4私网就绪后验收，不打开ACR公网 |
@@ -212,6 +212,8 @@ Runner工程状态补记（2026-09-13）：[注册生命周期模块](../scripts
 ### 阶段0从零启动
 
 **逐次点击顺序及前置变量见[主手册Stage0](customer-migration-guide-zh.md#阶段0盘点与可恢复备份)。** bootstrap/backup各自先plan再deploy；backup-restore使用另一项Customer private runtime operations，stage=0、execute、confirm_environment与所选环境一致，批准ID留空。执行前必须准备POSTGRES_RESTORE_IMAGE、Runner到Blob PE的路由/DNS及运行身份的Blob数据权限。
+
+Runner到备份的连接可由同一infrastructure workflow的`runner-connectivity`组件建立，先plan再deploy，随后用`check_backup=true`实测。配置来源、同订阅限制、已有连接复用和最小权限见[主手册0-A2](customer-migration-guide-zh.md#0-a2-由workflow建立runner备份连接)；Runner建机与backup本身不会隐式创建这组连接。
 
 `bootstrap` 是订阅级部署，会真正创建目标 RG 和 Log Analytics Workspace，不要求先手工创建。`parameters.bootstrap` 可省略或设置 `{"workspaceMode":"create","logRetentionDays":30}`。它使用 backup 的 `logAnalyticsWorkspaceName`（无 backup 时使用 platform）；应把新环境各组件的 Workspace 名统一。已有同RG日志库用 `workspaceMode=existing`，先核实资源存在；当前仍不支持跨RG共享 Workspace。
 
