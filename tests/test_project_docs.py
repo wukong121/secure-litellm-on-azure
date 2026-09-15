@@ -86,7 +86,7 @@ class ProjectDocumentationTests(unittest.TestCase):
             self.assertIn("runner-target-connectivity", workflow["on"]["workflow_dispatch"]["inputs"]["component"]["options"])
         self.assertIn("connectivity-review.json", (ROOT / ".github/workflows/customer-deploy.yml").read_text())
         self.assertNotIn("runner-target-connectivity", (ROOT / ".github/workflows/customer-runner-checks.yml").read_text())
-        for value in ("AZURE_CLIENT_ID", "节点RG", "join/action", "manageDnsLink", "privateFqdn", "nodeResourceGroup", "S4-04A", "S4-04B", "关闭自动注册", "不用重跑platform或certificate-vault", "single-operator", "旧SHA Stage0–3账本", "当前SHA的匹配plan", "配置指纹匹配", "双人模式", "源镜像", "7天", "实际结论变化时仍须实测重验", "旧platform回执SHA", "不自动覆盖A记录", "只允许", "reused", "external"):
+        for value in ("AZURE_CLIENT_ID", "节点RG", "join/action", "manageDnsLink", "privateFqdn", "nodeResourceGroup", "privatelink.azurecr.io", "acrPrivateEndpointIps", "acrManagement", "S4-04A", "S4-04B", "关闭自动注册", "不用重跑platform或certificate-vault", "无需增加字段", "ACR登录端点解析到公网并返回403", "single-operator", "旧SHA Stage0–3账本", "当前SHA的匹配plan", "配置指纹匹配", "双人模式", "源镜像", "7天", "实际结论变化时仍须实测重验", "旧platform回执SHA", "不自动覆盖A记录", "只允许", "reused", "external"):
             self.assertIn(value, section)
         self.assertLess(guide.index("| S4-04B |"), guide.index("| S4-05 |"))
         settings = json.loads("{" + re.search(r"```json\n(.*?)\n```", section, re.S)[1] + "}")

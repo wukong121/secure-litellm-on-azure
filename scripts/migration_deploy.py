@@ -211,7 +211,7 @@ def deploy_component(config, stage, component, revision, operation, previous, di
     template, path = prepare(resolved, stage, component, directory)
     if component == "runner-target-connectivity":
         document = json.loads(path.read_text())
-        for key in ("createDnsLink", "dnsResourceGroupName", "privateDnsZoneName", "linkName", "aksResourceId", "apiHostname"):
+        for key in ("createDnsLink", "dnsResourceGroupName", "privateDnsZoneName", "linkName", "aksResourceId", "apiHostname", "createAcrDnsLink", "acrDnsResourceGroupName", "acrPrivateDnsZoneName", "acrLinkName", "acrResourceId", "acrLoginServer"):
             document["parameters"][key] = {"value": connectivity[key]}
         private_write(path, json.dumps(document, indent=2) + "\n")
         private_write(directory / "connectivity-review.json", json.dumps(connectivity, indent=2) + "\n")
