@@ -6,10 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.customer_migration import ROOT, stage_fingerprint
+from scripts.customer_migration import ROOT, MigrationError, stage_fingerprint
 from scripts.migration_deploy import group_id, resolve_origin
 from scripts.migration_runtime import validate_action
-from scripts.private_ingress_runtime import deploy_private_ingress, read_certificate
+from scripts.private_ingress_runtime import deploy_private_ingress, read_certificate, scan_image
 from tests.test_customer_migration import customer_config
 
 
@@ -153,3 +153,33 @@ class CertificateReadTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "TLS PEM failed") as caught:
                 read_certificate(config, secret_id, "llm-api.customer.invalid")
             self.assertNotIn(secret["value"], str(caught.exception))
+
+
+class IngressImageScanTests(unittest.TestCase):
+    def test_critical_findings_report_versions_without_raw_scanner_output(self):
+        report = {"Results": [{"Target": "usr/local/bin/traefik", "Vulnerabilities": [{"VulnerabilityID": "CVE-2026-88007", "PkgName": "github.com/traefik/traefik/v3", "InstalledVersion": "v3.7.12", "FixedVersion": "3.7.13", "Severity": "CRITICAL"}]}]}
+        result = SimpleNamespace(returncode=1, stdout=json.dumps(report), stderr="PRIVATE_SCANNER_PROGRESS")
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory:
+            path = Path(directory)
+            with self.assertRaisesRegex(MigrationError, r"vulnerability=CVE-2026-88007 package=github.com/traefik/traefik/v3 installed=v3.7.12 fixed=3.7.13") as raised:
+                scan_image("docker.io/library/traefik@sha256:" + "a" * 64, path, Mock(return_value=result))
+            self.assertNotIn("PRIVATE_SCANNER_PROGRESS", str(raised.exception))
+            self.assertEqual(json.loads((path / "ingress-image-scan.json").read_text()), report)
+
+    def test_secret_finding_is_not_ignored_or_exposed(self):
+        report = {"Results": [{"Target": "image", "Secrets": [{"RuleID": "aws-access-key-id", "Category": "AWS", "Match": "PRIVATE_SECRET_VALUE"}]}]}
+        result = SimpleNamespace(returncode=1, stdout=json.dumps(report), stderr="")
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory:
+            with self.assertRaisesRegex(MigrationError, r"secret=aws-access-key-id category=AWS") as raised:
+                scan_image("docker.io/library/traefik@sha256:" + "a" * 64, Path(directory), Mock(return_value=result))
+            self.assertNotIn("PRIVATE_SECRET_VALUE", str(raised.exception))
+
+    def test_clean_scan_uses_quiet_json_policy(self):
+        command = Mock(return_value=SimpleNamespace(returncode=0, stdout=json.dumps({"Results": []}), stderr=""))
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory:
+            scan_image("docker.io/library/traefik@sha256:" + "a" * 64, Path(directory), command)
+        arguments = command.call_args.args[0]
+        self.assertIn("--quiet", arguments)
+        self.assertEqual(arguments[arguments.index("--exit-code") + 1], "1")
+        self.assertEqual(arguments[arguments.index("--severity") + 1], "CRITICAL")
+        self.assertEqual(arguments[arguments.index("--format") + 1], "json")

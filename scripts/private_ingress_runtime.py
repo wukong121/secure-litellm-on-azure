@@ -18,6 +18,7 @@ from scripts.migration_deploy import AzureCommands, deployment_name, group_id
 from scripts.migration_runtime import connect_cluster, run_command
 from scripts.private_ingress import certificate_material, ingress_image, ingress_settings, render_ingress
 from scripts.render_stage7_domain import domain_hosts
+from scripts.workflow_diagnostics import command_failure_summary
 
 
 def read_certificate(config, secret_id, host):
@@ -39,11 +40,54 @@ def read_certificate(config, secret_id, host):
     return material
 
 
+def scan_image(source, directory, run=subprocess.run):
+    result = run(["trivy", "image", "--quiet", "--exit-code", "1", "--severity", "CRITICAL", "--platform", "linux/amd64", "--format", "json", source], capture_output=True, text=True, check=False, timeout=1200)
+    private_write(directory / "ingress-image-scan.stderr.txt", result.stderr)
+    require(len(result.stdout) <= 8 * 1024 * 1024, "Ingress image scan report exceeded its size limit")
+    try:
+        report = json.loads(result.stdout)
+    except ValueError:
+        if result.returncode:
+            raise MigrationError("Ingress image scan failed: " + command_failure_summary(result.stdout, result.stderr, result.returncode)) from None
+        raise MigrationError("Ingress image scan returned invalid JSON") from None
+    require(isinstance(report, dict) and isinstance(report.get("Results"), list), "Ingress image scan returned an unexpected report")
+    private_write(directory / "ingress-image-scan.json", json.dumps(report, sort_keys=True))
+    findings = []
+    def safe(value):
+        return isinstance(value, str) and 1 <= len(value) <= 200 and "\n" not in value and "\r" not in value
+    for target in report["Results"]:
+        require(isinstance(target, dict), "Ingress image scan returned an unexpected result")
+        vulnerabilities = target.get("Vulnerabilities") or []
+        require(isinstance(vulnerabilities, list), "Ingress image scan returned invalid vulnerabilities")
+        for vulnerability in vulnerabilities:
+            require(isinstance(vulnerability, dict), "Ingress image scan returned an invalid vulnerability")
+            identifier = vulnerability.get("VulnerabilityID", "unknown")
+            package = vulnerability.get("PkgName", "unknown")
+            installed = vulnerability.get("InstalledVersion", "unknown")
+            fixed = vulnerability.get("FixedVersion") or "unavailable"
+            values = (identifier, package, installed, fixed)
+            require(all(safe(value) for value in values), "Ingress image scan returned unsafe vulnerability metadata")
+            findings.append(f"vulnerability={identifier} package={package} installed={installed} fixed={fixed}")
+        for field, kind, keys in (("Secrets", "secret", ("RuleID", "Category")), ("Misconfigurations", "misconfiguration", ("ID", "Type"))):
+            entries = target.get(field) or []
+            require(isinstance(entries, list), f"Ingress image scan returned invalid {field.lower()}")
+            for entry in entries:
+                require(isinstance(entry, dict), f"Ingress image scan returned an invalid {kind}")
+                values = [entry.get(key) or "unknown" for key in keys]
+                require(all(safe(value) for value in values), f"Ingress image scan returned unsafe {kind} metadata")
+                findings.append(kind + "=" + values[0] + " category=" + values[1])
+    if findings:
+        suffix = f"; and {len(findings) - 20} more" if len(findings) > 20 else ""
+        raise MigrationError("Ingress image scan found CRITICAL findings: " + "; ".join(findings[:20]) + suffix)
+    if result.returncode:
+        raise MigrationError("Ingress image scan failed: " + command_failure_summary(result.stdout, result.stderr, result.returncode))
+
+
 def promote_image(config, directory, azure, lock):
     source = f"{lock['source']}@{lock['digest']}"
     registry = config["parameters"]["platform"]["containerRegistryName"]
     target = f"{registry}.azurecr.io/{lock['repository']}"
-    run_command(["trivy", "image", "--exit-code", "1", "--severity", "CRITICAL", "--platform", "linux/amd64", source], directory, "ingress-image-scan")
+    scan_image(source, directory)
     run_command(["syft", source, "--platform", "linux/amd64", "--output", f"spdx-json={directory / 'ingress-sbom.spdx.json'}"], directory, "ingress-image-sbom")
     token = subprocess.run(["az", "acr", "login", "--name", registry, "--expose-token", "--subscription", config["azure"]["subscriptionId"], "--only-show-errors", "--output", "json"], capture_output=True, text=True, check=False, timeout=120)
     require(token.returncode == 0, "Unable to obtain scoped ACR login token")
