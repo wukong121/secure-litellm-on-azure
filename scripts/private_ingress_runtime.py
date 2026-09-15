@@ -141,6 +141,49 @@ def frontend_for(config, azure, node_group, address):
     return matches[0]
 
 
+def ingress_observation(scoped, namespace, service, directory):
+    slices = json.loads(run_command([*scoped, "get", "endpointslices.discovery.k8s.io", "--selector", "kubernetes.io/service-name=" + namespace, "-o", "json"], directory, "endpoint-slices-" + namespace))
+    events = json.loads(run_command([*scoped, "get", "events", "--field-selector", "involvedObject.kind=Service,involvedObject.name=" + namespace, "-o", "json"], directory, "service-events-" + namespace))
+    require(isinstance(slices, dict) and isinstance(slices.get("items"), list), "EndpointSlice observation returned an unexpected response")
+    require(isinstance(events, dict) and isinstance(events.get("items"), list), "Service event observation returned an unexpected response")
+    endpoint_slices = []
+    ready_endpoint_count = 0
+    for item in slices["items"][:20]:
+        endpoints = item.get("endpoints", [])
+        require(isinstance(endpoints, list), "EndpointSlice observation returned invalid endpoints")
+        observed_endpoints = []
+        for endpoint in endpoints[:50]:
+            conditions = endpoint.get("conditions", {})
+            if conditions.get("ready") is not False:
+                ready_endpoint_count += 1
+            observed_endpoints.append({"nodeName": endpoint.get("nodeName"), "conditions": conditions})
+        endpoint_slices.append({"name": item.get("metadata", {}).get("name"), "addressType": item.get("addressType"), "ports": item.get("ports", []), "endpoints": observed_endpoints})
+    observed_events = []
+    for item in events["items"][-20:]:
+        message = item.get("message")
+        observed_events.append({
+            "type": item.get("type"),
+            "reason": item.get("reason"),
+            "count": item.get("count"),
+            "firstTimestamp": item.get("firstTimestamp"),
+            "lastTimestamp": item.get("lastTimestamp"),
+            "eventTime": item.get("eventTime"),
+            "sourceComponent": item.get("source", {}).get("component"),
+            "message": message[:2000] if isinstance(message, str) else None,
+        })
+    ingress = (service or {}).get("status", {}).get("loadBalancer", {}).get("ingress", [])
+    return {
+        "serviceExists": service is not None,
+        "serviceUid": (service or {}).get("metadata", {}).get("uid"),
+        "serviceResourceVersion": (service or {}).get("metadata", {}).get("resourceVersion"),
+        "loadBalancerStatus": (service or {}).get("status", {}).get("loadBalancer", {}),
+        "loadBalancerIngressCount": len(ingress) if isinstance(ingress, list) else 0,
+        "readyEndpointCount": ready_endpoint_count,
+        "endpointSlices": endpoint_slices,
+        "events": observed_events,
+    }
+
+
 def deploy_private_ingress(config, operation, revision, directory, approved):
     require(operation in {"plan", "execute"}, "Invalid private ingress operation")
     settings = ingress_settings(config)
@@ -154,7 +197,7 @@ def deploy_private_ingress(config, operation, revision, directory, approved):
     subnet = azure.scoped(["network", "vnet", "subnet", "show", "--resource-group", config["target"]["resourceGroup"], "--vnet-name", network["virtualNetworkName"], "--name", network["ingressSubnetName"], "--query", "{prefix:addressPrefix,plsPolicy:privateLinkServiceNetworkPolicies}"])
     require(subnet.get("plsPolicy") == "Disabled", "Ingress subnet must permit Private Link Service before deployment")
     require(subnet["prefix"] == network["ingressSubnetPrefix"], "Deployed ingress subnet differs from configuration")
-    materials, manifests, live = {}, {}, []
+    materials, manifests, live, observations = {}, {}, [], {}
     for plane in ("api", "admin"):
         namespace = f"llm-{plane}-ingress"
         scoped = [*kube, "--namespace", namespace]
@@ -165,12 +208,15 @@ def deploy_private_ingress(config, operation, revision, directory, approved):
         private_write(certificate_path, material["certificate"])
         run_command(["openssl", "verify", "-purpose", "sslserver", "-verify_hostname", hosts[plane], "-untrusted", str(certificate_path), str(certificate_path)], directory, "certificate-trust-" + plane)
         documents = [document for document in render_ingress(config, plane, image, settings[plane]["allowedCidrs"]) if document["kind"] != "Namespace"]
+        current_service = None
         for document in documents:
             if document["kind"] == "Deployment":
                 pod = document["spec"]["template"]
                 pod["metadata"]["annotations"] = {"llmgw/certificate-sha256": material["sha256"]}
                 pod["spec"]["volumes"][1]["secret"]["secretName"] = namespace + "-tls-" + material["sha256"][:16]
             current = json.loads(run_command([*scoped, "get", document["kind"], document["metadata"]["name"], "--ignore-not-found", "-o", "json"], directory, f"before-{plane}-{document['kind']}") or "null")
+            if document["kind"] == "Service":
+                current_service = current
             if current:
                 require(current["metadata"].get("labels", {}).get("app.kubernetes.io/managed-by") == "llmgw-workflow", "Refusing to adopt an existing unmanaged ingress object")
                 live.append({"uid": current["metadata"]["uid"], "spec": current.get("spec"), "data": current.get("data"), "labels": current["metadata"].get("labels"), "annotations": current["metadata"].get("annotations")})
@@ -180,12 +226,14 @@ def deploy_private_ingress(config, operation, revision, directory, approved):
         path = directory / f"ingress-{plane}.yaml"
         private_write(path, yaml.safe_dump_all(documents, sort_keys=False))
         run_command([*scoped, "apply", "--server-side", "--field-manager=llmgw-ingress", "--dry-run=server", "-f", str(path)], directory, "dry-run-" + plane)
+        observations[plane] = ingress_observation(scoped, namespace, current_service, directory)
     public_certificates = {plane: {key: material[key] for key in ("sha256", "expiresAt", "secretId")} for plane, material in materials.items()}
     plan = {"stage": 4, "action": "private-ingress", "revision": revision, "configSha256": stage_fingerprint(config, 4), "cluster": cluster, "subnet": subnet, "documents": manifests, "certificates": public_certificates, "before": live}
     plan_hash = fingerprint(plan)
-    summary = {"stage": 4, "action": "private-ingress", "planSha256": plan_hash, "stageAccepted": False}
+    public_observations = {plane: {"serviceExists": observation["serviceExists"], "loadBalancerIngressCount": observation["loadBalancerIngressCount"], "readyEndpointCount": observation["readyEndpointCount"], "eventReasons": sorted({event["reason"] for event in observation["events"] if isinstance(event.get("reason"), str)})} for plane, observation in observations.items()}
+    summary = {"stage": 4, "action": "private-ingress", "planSha256": plan_hash, "stageAccepted": False, "ingressObservation": public_observations}
     private_write(directory / "runtime-summary.json", json.dumps(summary, indent=2) + "\n")
-    private_write(directory / "runtime-review.json", json.dumps({"planSha256": plan_hash, **plan}, indent=2) + "\n")
+    private_write(directory / "runtime-review.json", json.dumps({"planSha256": plan_hash, **plan, "currentIngressObservationNotPlanBound": observations}, indent=2) + "\n")
     print(json.dumps(summary))
     if operation == "plan":
         return summary

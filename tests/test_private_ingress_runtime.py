@@ -36,6 +36,7 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
         self.cert = self.stack.enter_context(patch("scripts.private_ingress_runtime.read_certificate", side_effect=self.certificate))
         self.promote = self.stack.enter_context(patch("scripts.private_ingress_runtime.promote_image"))
         self.verify = self.stack.enter_context(patch("scripts.private_ingress_runtime.verify_endpoint"))
+        self.event_reason = "SyncLoadBalancerFailed"
 
     def certificate(self, config, secret_id, host):
         return {"certificate": "synthetic-public-chain", "key": "synthetic-private-material", "sha256": ("a" if "api" in host else "b") * 64, "expiresAt": "2099-01-01T00:00:00Z", "secretId": secret_id + "/" + "c" * 32}
@@ -43,6 +44,10 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
     def commands(self, arguments, directory, label, **kwargs):
         if label.startswith("before-"):
             return ""
+        if label.startswith("endpoint-slices-"):
+            return json.dumps({"items": [{"metadata": {"name": "synthetic-endpoints"}, "addressType": "IPv4", "ports": [{"port": 8443}], "endpoints": [{"nodeName": "synthetic-node", "conditions": {"ready": True}}]}]})
+        if label.startswith("service-events-"):
+            return json.dumps({"items": [{"type": "Warning", "reason": self.event_reason, "count": 1, "message": "synthetic bounded diagnostic"}]})
         if label.startswith("service-"):
             return json.dumps({"status": {"loadBalancer": {"ingress": [{"ip": "10.30.4.10" if label.endswith("api") else "10.30.4.11"}]}}})
         return "verified"
@@ -63,7 +68,10 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
     def test_plan_contains_no_private_key_and_never_promotes_or_applies(self):
         result = self.plan()
         self.assertFalse(result["stageAccepted"])
+        self.assertEqual(result["ingressObservation"]["api"]["readyEndpointCount"], 1)
+        self.assertEqual(result["ingressObservation"]["api"]["eventReasons"], ["SyncLoadBalancerFailed"])
         review = (self.path / "runtime-review.json").read_text()
+        self.assertIn("currentIngressObservationNotPlanBound", review)
         self.assertNotIn("synthetic-private-material", review)
         self.assertNotIn("synthetic-public-chain", review)
         self.promote.assert_not_called()
@@ -72,6 +80,13 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
             if "apply" in call.args[0]:
                 self.assertIn("--dry-run=server", call.args[0])
         self.assertFalse(any("create" in call.args[0] for call in self.azure.scoped.call_args_list))
+
+    def test_dynamic_observations_do_not_change_the_approved_plan_hash(self):
+        first = self.plan()
+        self.event_reason = "EnsuredLoadBalancer"
+        second = self.plan()
+        self.assertEqual(first["planSha256"], second["planSha256"])
+        self.assertNotEqual(first["ingressObservation"], second["ingressObservation"])
 
     def test_unapproved_or_changed_certificate_never_deploys(self):
         result = self.plan()
