@@ -106,7 +106,7 @@ class ProjectDocumentationTests(unittest.TestCase):
         for value in (
             "identity.principalId", "不是kubelet身份", "CUSTOMER_CONFIG_JSON`不新增字段",
             "component=aks-ingress-role", "Microsoft.Authorization/roleAssignments", "Network Contributor",
-            "只有入口子网下的一条", "不能为通过What-if扩大", "新建S4-11", "当前部分落地状态",
+            "专用目标VNet下的一条", "不能为通过What-if扩大", "新建S4-11", "当前部分落地状态",
             "不能复用旧S4-11", "无需重跑S4-01/02 platform", "Service仍Pending",
         ):
             self.assertIn(value, section)

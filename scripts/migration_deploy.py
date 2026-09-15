@@ -56,10 +56,9 @@ def assert_change_scope(config, component, changes, connectivity=None):
             network = config["parameters"]["platform"]["stage4Network"]
             prefix = (
                 allowed_group + "/providers/microsoft.network/virtualnetworks/" + network["virtualNetworkName"].lower()
-                + "/subnets/" + network["ingressSubnetName"].lower()
                 + "/providers/microsoft.authorization/roleassignments/"
             )
-            require(resource.startswith(prefix) and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", resource.removeprefix(prefix)), "AKS ingress role plan attempts to modify an unapproved resource")
+            require(resource.startswith(prefix) and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", resource.removeprefix(prefix)), "AKS network role plan attempts to modify an unapproved resource")
             continue
         local = resource.startswith(allowed_group + "/") or (component == "bootstrap" and resource == allowed_group)
         external_role = component == "platform" and any(
