@@ -50,6 +50,7 @@ class MigrationDeploymentTests(unittest.TestCase):
 
     def target_connectivity_config(self):
         config = customer_config()
+        config["parameters"]["platform"]["stage4Network"]["privateEndpointSubnetName"] = "snet-pe"
         config["parameters"]["runner-target-connectivity"] = {
             "runnerVirtualNetworkId": group_id(config).replace("rg-secure", "rg-runner") + "/providers/Microsoft.Network/virtualNetworks/runner-vnet",
         }
@@ -63,6 +64,7 @@ class MigrationDeploymentTests(unittest.TestCase):
         self.assertEqual(template.parent.name, "runner-target-connectivity")
         self.assertTrue(document["parameters"]["manageDnsLink"]["value"])
         original = customer_config()
+        original["parameters"]["platform"]["stage4Network"]["privateEndpointSubnetName"] = "snet-pe"
         for stage in range(4):
             self.assertEqual(stage_fingerprint(config, stage), stage_fingerprint(original, stage))
         self.assertNotEqual(stage_fingerprint(config, 4), stage_fingerprint(original, 4))
@@ -96,7 +98,9 @@ class MigrationDeploymentTests(unittest.TestCase):
         from scripts.runner_target_connectivity import target_connectivity_settings, target_connectivity_resource_ids
         settings = target_connectivity_settings(config)
         node_prefix = group_id(config).replace("rg-secure", "rg-nodes") + "/providers/"
+        target_prefix = group_id(config) + "/providers/"
         zone_name = "synthetic.privatelink.westus.azmk8s.io"
+        acr_zone_name = "privatelink.azurecr.io"
         resources = {
             "deployment": "Succeeded",
             "cluster": {"id": settings["aksResourceId"], "provisioningState": "Succeeded", "powerState": {"code": "Running"}, "nodeResourceGroup": "rg-nodes", "privateFqdn": "new-aks." + zone_name, "apiServerAccessProfile": {"enablePrivateCluster": True, "privateDnsZone": "system"}, "agentPoolProfiles": [{"vnetSubnetId": settings["targetVirtualNetworkId"] + "/subnets/system"}]},
@@ -104,6 +108,12 @@ class MigrationDeploymentTests(unittest.TestCase):
             "endpoints": [{"provisioningState": "Succeeded", "subnet": {"id": settings["targetVirtualNetworkId"] + "/subnets/system"}, "privateLinkServiceConnections": [{"privateLinkServiceId": settings["aksResourceId"], "privateLinkServiceConnectionState": {"status": "Approved"}}], "networkInterfaces": [{"id": node_prefix + "Microsoft.Network/networkInterfaces/api-nic"}]}],
             "ips": ["10.30.1.4"], "record": {"aRecords": [{"ipv4Address": "10.30.1.4"}]},
             "runner": {"id": settings["runnerVirtualNetworkId"]}, "links": [],
+            "acr": {"id": settings["acrResourceId"], "provisioningState": "Succeeded", "loginServer": settings["acrName"] + ".azurecr.io", "publicNetworkAccess": "Disabled"},
+            "acrZone": {"id": target_prefix + "Microsoft.Network/privateDnsZones/" + acr_zone_name},
+            "acrEndpoints": [{"provisioningState": "Succeeded", "subnet": {"id": settings["targetVirtualNetworkId"] + "/subnets/" + settings["privateEndpointSubnetName"]}, "privateLinkServiceConnections": [{"privateLinkServiceId": settings["acrResourceId"], "privateLinkServiceConnectionState": {"status": "Approved"}}], "networkInterfaces": [{"id": target_prefix + "Microsoft.Network/networkInterfaces/acr-nic"}]}],
+            "acrIps": ["10.30.8.8", "10.30.8.9"],
+            "acrRecords": [{"name": settings["acrName"], "aRecords": [{"ipv4Address": "10.30.8.9"}]}, {"name": settings["acrName"] + ".westus.data", "aRecords": [{"ipv4Address": "10.30.8.8"}]}],
+            "acrLinks": [],
         }
         azure = Mock()
         azure.run.return_value = {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}
@@ -112,14 +122,29 @@ class MigrationDeploymentTests(unittest.TestCase):
                 return resources["deployment"]
             if command[:2] == ["aks", "show"]:
                 return resources["cluster"]
-            for prefix, key in ((["network", "private-dns", "zone", "show"], "zone"), (["network", "private-endpoint", "list"], "endpoints"), (["network", "nic", "show"], "ips"), (["network", "private-dns", "record-set", "a", "show"], "record"), (["network", "vnet", "show"], "runner"), (["network", "private-dns", "link", "vnet", "list"], "links")):
+            if command[:2] == ["acr", "show"]:
+                return resources["acr"]
+            if command[:4] == ["network", "private-dns", "zone", "show"]:
+                return resources["acrZone"] if command[command.index("--name") + 1] == acr_zone_name else resources["zone"]
+            if command[:3] == ["network", "private-endpoint", "list"]:
+                return resources["acrEndpoints"] if command[command.index("--resource-group") + 1] == config["target"]["resourceGroup"] else resources["endpoints"]
+            if command[:3] == ["network", "nic", "show"]:
+                return resources["acrIps"] if command[command.index("--ids") + 1].endswith("/acr-nic") else resources["ips"]
+            if command[:5] == ["network", "private-dns", "record-set", "a", "list"]:
+                return resources["acrRecords"]
+            if command[:5] == ["network", "private-dns", "record-set", "a", "show"]:
+                return resources["record"]
+            if command[:4] == ["network", "private-dns", "link", "vnet"]:
+                return resources["acrLinks"] if command[command.index("--zone-name") + 1] == acr_zone_name else resources["links"]
+            for prefix, key in ((["network", "vnet", "show"], "runner"),):
                 if command[:len(prefix)] == prefix:
                     return resources[key]
             if "what-if" in command:
-                context = {"createDnsLink": True, "privateDnsZoneId": resources["zone"]["id"], "dnsResourceGroupName": "rg-nodes", "linkName": settings["linkName"]}
+                context = {"createDnsLink": True, "privateDnsZoneId": resources["zone"]["id"], "dnsResourceGroupName": "rg-nodes", "linkName": settings["linkName"], "createAcrDnsLink": True, "acrPrivateDnsZoneId": resources["acrZone"]["id"], "acrDnsResourceGroupName": config["target"]["resourceGroup"], "acrLinkName": settings["acrLinkName"]}
                 return {"status": "Succeeded", "changes": [{"resourceId": identifier, "changeType": "Create"} for identifier in sorted(target_connectivity_resource_ids(config, context))]}
             if command[:3] == ["deployment", "group", "create"]:
                 resources["links"] = [{"name": settings["linkName"], "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}, "registrationEnabled": False, "provisioningState": "Succeeded", "virtualNetworkLinkState": "Completed"}]
+                resources["acrLinks"] = [{"name": settings["acrLinkName"], "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}, "registrationEnabled": False, "provisioningState": "Succeeded", "virtualNetworkLinkState": "Completed"}]
                 return {"properties": {"provisioningState": "Succeeded"}}
             raise AssertionError(command)
         azure.scoped.side_effect = scoped
@@ -132,10 +157,12 @@ class MigrationDeploymentTests(unittest.TestCase):
         context = inspect_target_connectivity(config, azure)
         self.assertEqual(context["privateEndpointIps"], ["10.30.1.4"])
         self.assertEqual(context["privateDnsZoneId"], resources["zone"]["id"])
+        self.assertEqual(context["acrPrivateEndpointIps"], ["10.30.8.8", "10.30.8.9"])
+        self.assertEqual(context["acrPrivateDnsZoneId"], resources["acrZone"]["id"])
         allowed = target_connectivity_resource_ids(config, context)
-        self.assertEqual(len(allowed), 2)
+        self.assertEqual(len(allowed), 4)
         assert_change_scope(config, "runner-target-connectivity", [{"resourceId": identifier, "changeType": "Create"} for identifier in allowed], context)
-        for identifier in (resources["zone"]["id"], resources["zone"]["id"] + "/A/new-aks", context["aksResourceId"], context["runnerVirtualNetworkId"], next(iter(allowed)) + "-other"):
+        for identifier in (resources["zone"]["id"], resources["zone"]["id"] + "/A/new-aks", resources["acrZone"]["id"], resources["acrZone"]["id"] + "/A/customerregistry", context["aksResourceId"], context["acrResourceId"], context["runnerVirtualNetworkId"], next(iter(allowed)) + "-other"):
             with self.subTest(identifier=identifier), self.assertRaises(ValueError):
                 assert_change_scope(config, "runner-target-connectivity", [{"resourceId": identifier, "changeType": "Modify"}], context)
         for change_type in ("Delete", "Unsupported"):
@@ -167,12 +194,33 @@ class MigrationDeploymentTests(unittest.TestCase):
             with self.subTest(mutation=mutate), self.assertRaises(ValueError):
                 inspect_target_connectivity(config, azure)
 
+    def test_target_connectivity_rejects_acr_private_endpoint_and_dns_drift(self):
+        from scripts.runner_target_connectivity import inspect_target_connectivity
+        config = self.target_connectivity_config()
+        mutations = (
+            lambda resources: resources["acr"].update(provisioningState="Failed"),
+            lambda resources: resources["acr"].update(publicNetworkAccess="Enabled"),
+            lambda resources: resources["acr"].update(loginServer="other.azurecr.io"),
+            lambda resources: resources["acrZone"].update(id="/other/zone"),
+            lambda resources: resources["acrEndpoints"][0]["privateLinkServiceConnections"][0]["privateLinkServiceConnectionState"].update(status="Pending"),
+            lambda resources: resources["acrEndpoints"][0]["subnet"].update(id="/other/subnet"),
+            lambda resources: resources["acrEndpoints"][0]["networkInterfaces"][0].update(id="/other/nic"),
+            lambda resources: resources.update(acrIps=["8.8.8.8"]),
+            lambda resources: resources["acrRecords"][0].update(aRecords=[{"ipv4Address": "10.30.8.10"}]),
+        )
+        for mutate in mutations:
+            azure, resources = self.target_connectivity_azure(config)
+            mutate(resources)
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                inspect_target_connectivity(config, azure)
+
     def test_target_connectivity_reuses_existing_links_and_supports_external_dns(self):
         from scripts.runner_target_connectivity import inspect_target_connectivity, target_connectivity_resource_ids, target_connectivity_settings
         config = self.target_connectivity_config()
         azure, resources = self.target_connectivity_azure(config)
         settings = target_connectivity_settings(config)
         resources["links"] = [{"name": "network-owner-link", "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}, "registrationEnabled": False, "provisioningState": "Succeeded", "virtualNetworkLinkState": "Completed"}]
+        resources["acrLinks"] = [{"name": "acr-network-owner-link", "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}, "registrationEnabled": False, "provisioningState": "Succeeded", "virtualNetworkLinkState": "Completed"}]
         context = inspect_target_connectivity(config, azure)
         self.assertEqual(context["management"], "reused")
         self.assertEqual(target_connectivity_resource_ids(config, context), set())
@@ -190,7 +238,10 @@ class MigrationDeploymentTests(unittest.TestCase):
         resources["runner"]["dhcpOptions"] = {"dnsServers": ["10.50.0.10"]}
         context = inspect_target_connectivity(config, azure)
         self.assertEqual(context["management"], "external")
+        self.assertEqual(context["acrManagement"], "external")
         self.assertFalse(context["createDnsLink"])
+        self.assertFalse(context["createAcrDnsLink"])
+        self.assertEqual(target_connectivity_resource_ids(config, context), set())
 
     def test_target_connectivity_deployment_reuses_platform_but_requires_new_sha_evidence(self):
         config = self.target_connectivity_config()
@@ -204,6 +255,9 @@ class MigrationDeploymentTests(unittest.TestCase):
             parameters = json.loads((Path(directory) / "parameters.json").read_text())["parameters"]
             self.assertEqual(parameters["dnsResourceGroupName"]["value"], "rg-nodes")
             self.assertTrue(parameters["createDnsLink"]["value"])
+            self.assertEqual(parameters["acrDnsResourceGroupName"]["value"], config["target"]["resourceGroup"])
+            self.assertEqual(parameters["acrPrivateDnsZoneName"]["value"], "privatelink.azurecr.io")
+            self.assertTrue(parameters["createAcrDnsLink"]["value"])
             with self.assertRaisesRegex(ValueError, "Prior stage evidence"):
                 deploy_component(config, 4, "runner-target-connectivity", self.revision, "deploy", [], directory, plan["planSha256"], azure)
             old_records = [{**record, "revision": "c" * 40} for record in records]
@@ -226,10 +280,14 @@ class MigrationDeploymentTests(unittest.TestCase):
 
     def test_target_connectivity_postdeploy_requires_link_and_legacy_preview_is_blocked(self):
         from scripts.customer_migration import preview
-        from scripts.runner_target_connectivity import inspect_target_connectivity
+        from scripts.runner_target_connectivity import inspect_target_connectivity, target_connectivity_settings
         config = self.target_connectivity_config()
-        azure, _ = self.target_connectivity_azure(config)
+        azure, resources = self.target_connectivity_azure(config)
         with self.assertRaisesRegex(ValueError, "missing after deployment"):
+            inspect_target_connectivity(config, azure, require_link=True)
+        settings = target_connectivity_settings(config)
+        resources["links"] = [{"name": settings["linkName"], "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}, "registrationEnabled": False, "provisioningState": "Succeeded", "virtualNetworkLinkState": "Completed"}]
+        with self.assertRaisesRegex(ValueError, "Runner ACR DNS link is missing"):
             inspect_target_connectivity(config, azure, require_link=True)
         template, _ = parameters_for(config, 4, "runner-target-connectivity")
         with patch("scripts.customer_migration.subprocess.run") as command, self.assertRaisesRegex(ValueError, "infrastructure deployment plan"):

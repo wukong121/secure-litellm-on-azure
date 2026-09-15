@@ -122,7 +122,7 @@
 | deploy，backup/platform等 | 批准目标RG内的资源部署；涉及角色分配需相应受控RBAC管理权限；旧监控另外限定旧RG | Contributor不含角色分配；跨订阅模型角色须在对应账号范围另行授权 |
 | deploy，Stage0/runner-connectivity | 两个指定VNet的读取及Peering写入/peer权限、目标Blob DNS zone的链接管理、Runner VNet的join权限；两侧RG内所需ARM部署/What-if权限 | 不修改整个VNet、NSG或路由；此组件不自行授予网络权限，详见0-A2 |
 | deploy，Stage4/certificate-vault | 目标RG的Vault/PE/DNS/诊断部署、`Microsoft.Authorization/locks/read`及`Microsoft.Authorization/locks/write`、Vault范围角色分配；读取两个VNet及DNS链接，获准链接的VNet join权限 | Contributor加RBAC Administrator不包含锁写权限，按[4-A1](#4-a1-证书vault防删除锁权限)补齐；不导入证书，不自动授予部署身份Secret读取权 |
-| deploy，Stage4/runner-target-connectivity | 读取原platform部署、AKS/节点池、节点RG内API PE/NIC、实际DNS区域/记录/链接及Runner VNet；目标RG及DNS所在RG的ARM部署/What-if权限、该zone的链接写入及Runner VNet join权限 | AKS系统DNS通常在节点RG，只有目标RG Contributor未必够；管理员按[4-B1](#4-b1-runner到新aks的dns连接)预授权，不由workflow自行提权，也不授予Kubernetes数据权限 |
+| deploy，Stage4/runner-target-connectivity | 读取原platform部署、AKS与ACR、两者PE/NIC、实际DNS区域/记录/链接及Runner VNet；目标RG及AKS DNS所在RG的ARM部署/What-if权限、两个zone的链接写入及Runner VNet join权限 | AKS系统DNS通常在节点RG，ACR DNS在目标RG；只有其中一处权限或链接仍不够。管理员按[4-B1](#4-b1-runner到新aks的dns连接)预授权，不由workflow自行提权，也不授予Kubernetes数据权限 |
 | runtime，Runner检查/备份 | 旧AKS读取、Cluster User凭据获取及Kubernetes Deployment/Pod读取；备份另需postgres exec/cp、目标部署输出读取、Blob容器数据读写 | ARM权限不等于Kubernetes RBAC或Storage数据权限 |
 | runtime，新环境发布 | 按[4-B2](#4-b2-runtime身份的kubernetes预授权)准备目标AKS用户凭据、Namespace初始化和命名空间内读写权限；指定Vault、镜像及目标RG回执另行授权 | 不给日常应用身份DDL或管理权限；Azure Contributor不能代替Kubernetes数据权限 |
 | database，Stage5/database-roles | 配置为PG Entra管理员服务主体或其获准管理员组成员，能建立新库角色及授权 | 个人User管理员不能通过服务主体OIDC模拟；不能直接填个人UPN |
@@ -147,7 +147,7 @@
 | Stage1 | parameters.monitoring、可选parameters.legacy-logging、legacyAccess | 旧日志工作区及真实批准来源；旧/新工作区不同不代表重复 |
 | Stage2 | contentAudit | 本文采用native；此后正文决策绑定证据 |
 | Stage3 | parameters.platform的ACR/日志名及stage4Network、stage4Aks | 这些网络/集群字段Stage3已要求提供，不能等Stage4才填写；stage5Data和模型连接可稍后补齐 |
-| Stage4 | azureOpenAIConnections、parameters.certificate-vault、parameters.runner-target-connectivity；入口发布前补privateIngress；可选certificates | workflow创建证书Vault和Runner到新AKS的DNS链接；手动导入证书，自动签发才需专项身份，见4-A至4-C |
+| Stage4 | azureOpenAIConnections、parameters.certificate-vault、parameters.runner-target-connectivity；入口发布前补privateIngress；可选certificates | workflow创建证书Vault及Runner到新AKS API/ACR的DNS链接；手动导入证书，自动签发才需专项身份，见4-A至4-C |
 | Stage5 | stage5Data、databaseAccess、DNS归属开关 | 批准数据库SKU/HA/Entra管理员，runtime服务主体Object ID；不能用用户ID代替运行身份 |
 | Stage6 | application | 派生后台镜像digest和模型组/真实deployment映射，见Stage6 |
 | Stage7 | entra、proxy | 分离初始化/准入身份，代理镜像digest，用户或服务主体绑定，见Stage7 |
@@ -882,7 +882,7 @@ az role assignment list --subscription "$TARGET_SUBSCRIPTION_ID" \
 
 #### 4-B1. Runner到新AKS的DNS连接
 
-**标准交付由IaC管理链接，管理员负责预授权，检查workflow保持只读。** `runner-target-connectivity`复用现有Customer infrastructure deployment，不新增独立workflow。它在Stage4 platform成功后，从真实AKS发现私有API域名、DNS区域、节点RG和API Private Endpoint；只创建或维护到获批Runner VNet的一条链接，不让客户手填系统DNS区域中的随机GUID。
+**标准交付由IaC管理链接，管理员负责预授权，检查workflow保持只读。** `runner-target-connectivity`复用现有Customer infrastructure deployment，不新增独立workflow。它在Stage4 platform成功后，分别从真实AKS和ACR发现私有API/registry域名、DNS区域、Private Endpoint、NIC及A记录；只创建或维护两个zone到获批Runner VNet的链接，不让客户手填系统DNS区域中的随机GUID，也不把ACR公网403误判为镜像权限问题。
 
 在客户JSON的`parameters`中加入下面的块，并同步完整Environment Secret `CUSTOMER_CONFIG_JSON`；不是放到`parameters.platform`内，也不是新增GitHub Variable：
 
@@ -896,11 +896,12 @@ az role assignment list --subscription "$TARGET_SUBSCRIPTION_ID" \
 | 值 | 来源与边界 |
 | --- | --- |
 | `runnerVirtualNetworkId` | 实际执行Actions的Runner VM → NIC → IP configurations → VNet → JSON View的完整id；可复用0-A2或4-A已核验的同名值，组件间须一致。不是开发机VNet、Bastion子网、VM或NIC ID。目前支持同订阅，可跨RG/区域或与目标VNet相同 |
-| `manageDnsLink` | Runner VNet → DNS servers为Azure提供DNS时用true（省略也为true）；企业DNS/Private Resolver由网络Owner管理时显式false，并另行核验转发。false不自动删除已有链接，也不证明外部DNS已可用 |
+| `manageDnsLink` | Runner VNet → DNS servers为Azure提供DNS时用true（省略也为true），同时管理AKS API和`privatelink.azurecr.io`链接；企业DNS/Private Resolver由网络Owner管理时显式false，并另行核验两类转发。false不自动删除已有链接，也不证明外部DNS已可用 |
 | 目标AKS及VNet | 从既有`target.resourceGroup`、`parameters.platform.stage4Aks.name`和`stage4Network.virtualNetworkName`取得，组件再与云上AKS身份、节点池子网核对，不新填第二套集群信息 |
-| 实际Private DNS区域 | AKS的`apiServerAccessProfile.privateDnsZone=system`时，从实际privateFqdn和nodeResourceGroup发现；自定义zone模式使用AKS返回的完整zone ID。支持Azure公有云、同订阅zone；`none`或其他云配置当前停止，不猜测区域或关闭校验 |
+| 目标ACR | 从`parameters.platform.containerRegistryName`取得；组件核对ACR状态、公网关闭、批准的registry PE/NIC、`privatelink.azurecr.io`中登录端点和区域data端点A记录，不新填资源ID或IP |
+| 实际Private DNS区域 | AKS的`apiServerAccessProfile.privateDnsZone=system`时，从实际privateFqdn和nodeResourceGroup发现；自定义zone模式使用AKS返回的完整zone ID。ACR区域固定从目标RG内实际`privatelink.azurecr.io`发现。支持Azure公有云、同订阅zone；缺失或其他云配置停止，不猜测区域或关闭校验 |
 
-**1. 预授权和只读核验。** 授权对象是所选Environment的`AZURE_CLIENT_ID`对应部署服务主体，不是人工导入人或`AZURE_RUNTIME_CLIENT_ID`对应的日常运行身份。需要第2.2节列出的管理面操作：`Microsoft.Network/privateDnsZones/virtualNetworkLinks/write`在实际zone范围、`Microsoft.Network/virtualNetworks/join/action`在精确Runner VNet范围；DNS所在RG还需嵌套ARM部署/What-if权限。AKS系统区域通常位于**节点RG**，不能只给目标RG权限就认为已覆盖；不为方便扩大到订阅Owner，不给runtime身份DNS写权限。
+**1. 预授权和只读核验。** 授权对象是所选Environment的`AZURE_CLIENT_ID`对应部署服务主体，不是人工导入人或`AZURE_RUNTIME_CLIENT_ID`对应的日常运行身份。需要第2.2节列出的管理面操作：`Microsoft.Network/privateDnsZones/virtualNetworkLinks/write`在AKS和ACR两个实际zone范围、`Microsoft.Network/virtualNetworks/join/action`在精确Runner VNet范围；两个DNS所在RG还需嵌套ARM部署/What-if权限。AKS系统区域通常位于**节点RG**，ACR区域位于目标RG，不能只给其中一个RG权限就认为已覆盖；不为方便扩大到订阅Owner，不给runtime身份DNS写权限。
 
 管理员可从AKS → Properties/JSON View取得nodeResourceGroup、privateFqdn和apiServerAccessProfile，或在管理终端用客户JSON提供的订阅/RG/AKS名只读查询：
 
@@ -914,21 +915,23 @@ az aks show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
   --output json --only-show-errors
 ```
 
-再从实际DNS所在RG → Private DNS zones → 对应区域 → Virtual network links，核对目标VNet链接和已有Runner链接。已有不同名但正确的Runner链接时组件只读复用，不接管其他Owner资源；同VNet场景复用AKS原有链接。自动管理名称由AKS和Runner VNet资源ID稳定计算。关闭自动注册（registrationEnabled=false），已有链接须Succeeded/Completed；名称冲突、重复链接、自动注册开启或未完成时停止，不能删除重建来掩盖问题。
+再分别检查AKS DNS所在RG和目标RG → Private DNS zones → AKS区域及`privatelink.azurecr.io` → Virtual network links，核对目标VNet链接和已有Runner链接。ACR区域还应有registry登录记录和区域data记录，地址集合与ACR PE NIC一致。已有不同名但正确的Runner链接时组件只读复用，不接管其他Owner资源；同VNet场景复用原有链接。自动管理名称分别由AKS/ACR和Runner VNet资源ID稳定计算。关闭自动注册（registrationEnabled=false），已有链接须Succeeded/Completed；名称冲突、重复链接、自动注册开启或未完成时停止，不能删除重建来掩盖问题。
 
 **2. 按S4-04A/04B执行。** 可先用Customer staged migration的main、test、stage=4、mode=config-check、component=runner-target-connectivity验证离线配置。真实计划使用Customer infrastructure deployment：main、test、stage=4、component=runner-target-connectivity、operation=plan，release不勾选、两个approved字段和confirm_environment留空。旧Customer staged migration的what-if入口不支持本组件的云端发现，不能代替这个plan。
 
-plan会检查原`llmgw-<environment>-s4-platform`部署Succeeded、AKS Running/Succeeded、批准的API PE/NIC及DNS记录与实际私有IP一致；AKS stop/start后若记录与PE不一致会阻断并要求排查，不自动覆盖A记录。自动模式只允许实际zone下的固定Runner链接和DNS所在RG中的固定嵌套部署记录，继续禁止Delete、Unsupported和越界变更。不修改AKS、托管PE、DNS区域/A记录、Peering、NSG、路由或任何RBAC；此组件不替代既有私网路由准备。
+plan会检查原`llmgw-<environment>-s4-platform`部署Succeeded、AKS Running/Succeeded、ACR Succeeded且公网关闭，并核对两套批准PE/NIC及DNS记录与实际私有IP一致；记录与PE不一致会阻断并要求排查，不自动覆盖A记录。自动模式只允许两个实际zone下的固定Runner链接和DNS所在RG中的固定嵌套部署记录，继续禁止Delete、Unsupported和越界变更。不修改AKS、ACR、托管PE、DNS区域/A记录、Peering、NSG、路由或任何RBAC；此组件不替代既有私网路由准备。
 
-解密S4-04A的`infrastructure-test-4-runner-target-connectivity-<run ID>`，审核`plan-summary.json`、`reviewed-plan.json`和`connectivity-review.json`。后者列出实际`aksResourceId`、`apiHostname`、`privateDnsZoneId`、`privateEndpointIps`、`runnerVirtualNetworkId`及`management`：managed表示本组件管理，reused表示复用外部既有链接，external表示客户管理DNS。不得把reused/external当作运行探针已通过。
+解密S4-04A的`infrastructure-test-4-runner-target-connectivity-<run ID>`，审核`plan-summary.json`、`reviewed-plan.json`和`connectivity-review.json`。后者同时列出AKS的`aksResourceId/apiHostname/privateDnsZoneId/privateEndpointIps/management`和ACR的`acrResourceId/acrLoginServer/acrPrivateDnsZoneId/acrPrivateEndpointIps/acrManagement`，以及`runnerVirtualNetworkId`。managed表示本组件管理，reused表示复用外部既有链接，external表示客户管理DNS。不得把reused/external当作运行探针已通过。
 
-审核后新Run workflow，operation=deploy、approved_run_id填S4-04A的成功plan ID、confirm_environment=test，其余按第3节。deploy会重新发现实际资源并执行What-if；代码、配置、zone、PE地址、链接管理状态或变更内容变化时必须重新plan。成功后管理模式再次核对Runner链接已Completed；输出`runnerTargetConnectivity`仍不是DNS/TLS/Kubernetes已实测或Stage4验收。
+审核后新Run workflow，operation=deploy、approved_run_id填S4-04A的成功plan ID、confirm_environment=test，其余按第3节。deploy会重新发现实际资源并执行What-if；代码、配置、zone、PE地址、链接管理状态或变更内容变化时必须重新plan。成功后管理模式再次核对AKS和ACR两个Runner链接均已Completed；输出`runnerTargetConnectivity`仍不是DNS/TLS/Kubernetes已实测或Stage4验收。
 
 **3. 真实Runner检查与权限。** 管理员按[4-B2](#4-b2-runtime身份的kubernetes预授权)授予runtime身份获批的Kubernetes数据权限，再运行Customer private runner checks：main、test、check_target=true、check_backup=false。Contributor/RBAC Administrator不等于Kubernetes数据角色；该检查需要`litellm`命名空间的Deployment读取，后续cluster-bootstrap创建命名空间另需集群级相应权限，不能把Reader当作全部后续权限。组件不获取kubeconfig、不代替OIDC身份执行kubectl、不自动发起验收。
 
 **已经部署过platform的升级路径：** 本次只增加连接组件、既有platform/certificate-vault仍成功且实际资源与批准配置一致时，**不用重跑platform或certificate-vault部署，也不用重新上传证书**。代码合并到受保护main后，再补新配置并同步Secret；旧代码不认识新字段。single-operator可直接复用仍在7天内且配置指纹匹配的Stage0–3账本，无需仅因新SHA依次draft/confirm；源镜像或供应链检查逻辑受影响、记录过期或实际结论变化时仍须实测重验。新块只从Stage4进入配置指纹，不改变Stage0–3的stage-config指纹；旧full-config记录只有完整配置哈希仍匹配时才能复用。双人模式继续按第3节在新SHA重验。
 
 随后直接从S4-04A新plan、审核、S4-04B deploy开始，再做Runner检查、S4-05及后续操作。组件读取旧platform的成功部署和当前AKS，不要求旧platform回执SHA等于新SHA；本次deploy在single-operator下接受有效的旧SHA Stage0–3账本，但仍要求本组件当前SHA的匹配plan。若platform失败、有漂移或确实改变了平台参数/模板，另行评估重跑，不能用本段跳过受影响资源的部署。不要回放Stage0网络模板。
+
+**ACR登录端点解析到公网并返回403的升级恢复：** 修复代码合并后，现有`runner-target-connectivity`配置无需增加字段，重新执行S4-04A/04B即可补ACR DNS Runner链接；不得直接重跑旧SHA的S4-12。部署后在实际Runner确认ACR登录端点及区域data端点解析到`acrPrivateEndpointIps`，再新建S4-11并用其run ID执行S4-12。无需重跑S4-01/02 platform、证书Vault、证书导入、cluster-bootstrap或monitoring-onboard。
 
 #### 4-B2. runtime身份的Kubernetes预授权
 

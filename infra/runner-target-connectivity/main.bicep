@@ -10,6 +10,12 @@ param privateDnsZoneName string = ''
 param linkName string = ''
 param aksResourceId string = ''
 param apiHostname string = ''
+param createAcrDnsLink bool = false
+param acrDnsResourceGroupName string = resourceGroup().name
+param acrPrivateDnsZoneName string = ''
+param acrLinkName string = ''
+param acrResourceId string = ''
+param acrLoginServer string = ''
 
 module runnerLink 'dns-link.bicep' = if (manageDnsLink && createDnsLink) {
   name: linkName
@@ -22,6 +28,17 @@ module runnerLink 'dns-link.bicep' = if (manageDnsLink && createDnsLink) {
   }
 }
 
+module acrRunnerLink 'dns-link.bicep' = if (manageDnsLink && createAcrDnsLink) {
+  name: acrLinkName
+  scope: resourceGroup(acrDnsResourceGroupName)
+  params: {
+    privateDnsZoneName: acrPrivateDnsZoneName
+    runnerVirtualNetworkId: runnerVirtualNetworkId
+    linkName: acrLinkName
+    tags: tags
+  }
+}
+
 output runnerTargetConnectivity object = {
   aksResourceId: aksResourceId
   apiHostname: apiHostname
@@ -30,5 +47,10 @@ output runnerTargetConnectivity object = {
   linkName: linkName
   manageDnsLink: manageDnsLink
   linkManagedByDeployment: manageDnsLink && createDnsLink
+  acrResourceId: acrResourceId
+  acrLoginServer: acrLoginServer
+  acrPrivateDnsZoneId: resourceId(acrDnsResourceGroupName, 'Microsoft.Network/privateDnsZones', acrPrivateDnsZoneName)
+  acrLinkName: acrLinkName
+  acrLinkManagedByDeployment: manageDnsLink && createAcrDnsLink
   location: location
 }

@@ -251,7 +251,7 @@ Runner到备份的连接可由同一infrastructure workflow的`runner-connectivi
 
 ### Stage4自动私有入口
 
-Runner到新AKS的DNS链接由同一基础设施workflow的`stage=4, component=runner-target-connectivity`在platform成功后管理，先plan再deploy；从实际AKS发现DNS区域，只管理获批Runner链接，不改AKS维护的PE或A记录。已有正确链接复用，自定义DNS使用显式外部管理；配置取值、权限和已部署platform的升级重跑边界见[迁移手册4-B1](customer-migration-guide-zh.md#4-b1-runner到新aks的dns连接)。管理员预授权与只读Runner checks保持分离，不由检查workflow自动提权或改网络。
+Runner到新AKS API和ACR的DNS链接由同一基础设施workflow的`stage=4, component=runner-target-connectivity`在platform成功后管理，先plan再deploy；从实际AKS/ACR、PE/NIC和A记录发现两套DNS区域，只管理获批Runner链接，不改服务维护的PE、区域或A记录。已有正确链接复用，自定义DNS使用显式外部管理；配置取值、权限和已部署platform的升级重跑边界见[迁移手册4-B1](customer-migration-guide-zh.md#4-b1-runner到新aks的dns连接)。管理员预授权与只读Runner checks保持分离，不由检查workflow自动提权或改网络。
 
 证书存储现在由现有`Customer infrastructure deployment`的`stage=4, component=certificate-vault`提供，先plan再deploy；创建两套证书共用的独立私有Vault、PE/DNS和批准的读写授权，不创建Secret内容，不复用后台业务Vault。客户字段获取、DNS归属、输出地址和部署后人工导入的完整步骤见[迁移手册4-A至4-C](customer-migration-guide-zh.md#4-a-共用证书vault的配置与取值)。配置该组件后Stage5不重复管理Vault DNS；原有独立证书Vault客户可不配置该组件，继续自行负责授权与私网。
 
@@ -268,7 +268,7 @@ Runner到新AKS的DNS链接由同一基础设施workflow的`stage=4, component=r
 
 Secret值必须是对应llm-api/llm-admin域名的PEM证书链加未加密私钥；可指定版本，未指定时读取版本并绑定计划。runner与Front Door必须信任签发链，至少还有效7天。当前入口不自动向任意PKI申请证书；证书续期后重新plan/execute会滚动发布，不能仅更新Vault就假定集群已经轮换。
 
-操作顺序：先完成Stage4 platform、certificate-vault和人工导入，执行runner-target-connectivity plan/deploy并通过目标Runner检查，再完成cluster-bootstrap，最后运行private-ingress plan、审查runtime-review、execute。runtime身份需读取指定证书Secret、向目标ACR推送/读取镜像、管理两个入口namespace内对象及TLS Secret、读取AKS/LB/子网，并在目标RG写入部署回执；不授予读取litellm应用Secret的权限。runner另需openssl、skopeo、Trivy、Syft及批准的镜像/扫描库出站。
+操作顺序：先完成Stage4 platform、certificate-vault和人工导入，执行runner-target-connectivity plan/deploy并确认Runner将AKS API、ACR登录端点和区域data端点解析到各自私网IP，再完成cluster-bootstrap，最后运行private-ingress plan、审查runtime-review、execute。runtime身份需读取指定证书Secret、向目标ACR推送/读取镜像、管理两个入口namespace内对象及TLS Secret、读取AKS/LB/子网，并在目标RG写入部署回执；不授予读取litellm应用Secret的权限。runner另需openssl、skopeo、Trivy、Syft及批准的镜像/扫描库出站。
 
 workflow扫描并晋级[固定Traefik镜像](../deploy/private-ingress-image.json)，生成两套2副本、只读非root、无Kubernetes API凭据的文件路由网关。仅暴露私有443，分别转发到API/admin代理；不监听应用namespace、不启用访问正文日志。TLS Secret使用不可变的证书指纹名称，旧证书不自动清理。与之配套的应用发布不要额外创建未受管Ingress。
 

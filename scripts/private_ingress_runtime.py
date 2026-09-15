@@ -83,14 +83,26 @@ def scan_image(source, directory, run=subprocess.run):
         raise MigrationError("Ingress image scan failed: " + command_failure_summary(result.stdout, result.stderr, result.returncode))
 
 
+def require_private_registry_dns(registry, resolve=socket.getaddrinfo):
+    host = registry + ".azurecr.io"
+    try:
+        addresses = {item[4][0] for item in resolve(host, 443, type=socket.SOCK_STREAM)}
+    except OSError:
+        raise MigrationError("Unable to resolve the ACR login server from the private runner") from None
+    private_ranges = [ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+    require(addresses and all(any(ipaddress.ip_address(address) in network for network in private_ranges) for address in addresses), "ACR login server must resolve only to private endpoint addresses; deploy runner-target-connectivity before private-ingress")
+
+
 def promote_image(config, directory, azure, lock):
     source = f"{lock['source']}@{lock['digest']}"
     registry = config["parameters"]["platform"]["containerRegistryName"]
     target = f"{registry}.azurecr.io/{lock['repository']}"
+    require_private_registry_dns(registry)
     scan_image(source, directory)
     run_command(["syft", source, "--platform", "linux/amd64", "--output", f"spdx-json={directory / 'ingress-sbom.spdx.json'}"], directory, "ingress-image-sbom")
     token = subprocess.run(["az", "acr", "login", "--name", registry, "--expose-token", "--subscription", config["azure"]["subscriptionId"], "--only-show-errors", "--output", "json"], capture_output=True, text=True, check=False, timeout=120)
-    require(token.returncode == 0, "Unable to obtain scoped ACR login token")
+    if token.returncode:
+        raise MigrationError("Unable to obtain scoped ACR login token: " + command_failure_summary("", token.stderr, token.returncode))
     credentials = json.loads(token.stdout)
     require(credentials["loginServer"].lower() == f"{registry}.azurecr.io".lower(), "Unexpected ACR login server")
     authfile = directory / "registry-auth.json"

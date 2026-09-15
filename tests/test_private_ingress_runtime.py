@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from scripts.customer_migration import ROOT, MigrationError, stage_fingerprint
 from scripts.migration_deploy import group_id, resolve_origin
 from scripts.migration_runtime import validate_action
-from scripts.private_ingress_runtime import deploy_private_ingress, read_certificate, scan_image
+from scripts.private_ingress_runtime import deploy_private_ingress, read_certificate, require_private_registry_dns, scan_image
 from tests.test_customer_migration import customer_config
 
 
@@ -156,6 +156,14 @@ class CertificateReadTests(unittest.TestCase):
 
 
 class IngressImageScanTests(unittest.TestCase):
+    def test_registry_dns_requires_only_rfc1918_addresses(self):
+        def resolve(address):
+            return lambda *_args, **_kwargs: [(2, 1, 6, "", (address, 443))]
+
+        require_private_registry_dns("syntheticregistry", resolve("10.30.8.9"))
+        with self.assertRaisesRegex(MigrationError, "deploy runner-target-connectivity"):
+            require_private_registry_dns("syntheticregistry", resolve("20.168.162.130"))
+
     def test_critical_findings_report_versions_without_raw_scanner_output(self):
         report = {"Results": [{"Target": "usr/local/bin/traefik", "Vulnerabilities": [{"VulnerabilityID": "CVE-2026-88007", "PkgName": "github.com/traefik/traefik/v3", "InstalledVersion": "v3.7.12", "FixedVersion": "3.7.13", "Severity": "CRITICAL"}]}]}
         result = SimpleNamespace(returncode=1, stdout=json.dumps(report), stderr="PRIVATE_SCANNER_PROGRESS")
