@@ -94,6 +94,25 @@ class ProjectDocumentationTests(unittest.TestCase):
         for source in re.findall(r"```bash\n(.*?)\n```", section, re.S):
             self.assertEqual(subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True).returncode, 0)
 
+    def test_aks_ingress_role_recovery_is_narrow_and_requires_a_new_runtime_plan(self):
+        from scripts.customer_migration import COMPONENTS
+
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        section = guide.split("**入口Service一直Pending、`lb-ready-api`超时的升级恢复：**", 1)[1].split("#### 4-B2.", 1)[0]
+        self.assertEqual(COMPONENTS["aks-ingress-role"][:2], (4, "aks-ingress-role"))
+        for filename in ("customer-deploy.yml", "customer-migration.yml"):
+            workflow = yaml.load((ROOT / ".github/workflows" / filename).read_text(), Loader=yaml.BaseLoader)
+            self.assertIn("aks-ingress-role", workflow["on"]["workflow_dispatch"]["inputs"]["component"]["options"])
+        for value in (
+            "identity.principalId", "不是kubelet身份", "CUSTOMER_CONFIG_JSON`不新增字段",
+            "component=aks-ingress-role", "Microsoft.Authorization/roleAssignments", "Network Contributor",
+            "只有入口子网下的一条", "不能为通过What-if扩大", "新建S4-11", "当前部分落地状态",
+            "不能复用旧S4-11", "无需重跑S4-01/02 platform", "Service仍Pending",
+        ):
+            self.assertIn(value, section)
+        self.assertLess(section.index("operation=plan"), section.index("operation=deploy"))
+        self.assertLess(section.index("operation=deploy"), section.index("新建S4-11"))
+
     def test_certificate_lock_permissions_are_explicit_and_target_scoped(self):
         import subprocess
 

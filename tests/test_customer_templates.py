@@ -70,6 +70,21 @@ class CustomerTemplateTests(unittest.TestCase):
                 self.assertEqual(properties["privateEndpointNetworkPolicies"], "Enabled")
                 self.assertEqual(properties["privateLinkServiceNetworkPolicies"], "Disabled" if parameter == "ingressSubnetName" else "Enabled")
 
+    def test_aks_ingress_role_parameters_are_derived_from_stage4_platform(self):
+        config = example_customer()
+        template, document = parameters_for(config, 4, "aks-ingress-role")
+        self.assertEqual(template, ROOT / "infra/aks-ingress-role/main.bicep")
+        parameters = {name: item["value"] for name, item in document["parameters"].items()}
+        platform = config["parameters"]["platform"]
+        self.assertEqual(parameters, {
+            "aksClusterName": platform["stage4Aks"]["name"],
+            "virtualNetworkName": platform["stage4Network"]["virtualNetworkName"],
+            "ingressSubnetName": platform["stage4Network"]["ingressSubnetName"],
+        })
+        for stage in (0, 3, 5):
+            with self.subTest(stage=stage), self.assertRaises(ValueError):
+                parameters_for(config, stage, "aks-ingress-role")
+
     def test_generated_parameters_match_compiled_bicep_contracts(self):
         config = example_customer()
         config["databaseAccess"] = {"migrationPrincipalId": "33333333-3333-4333-8333-333333333333"}
@@ -104,6 +119,25 @@ class CustomerTemplateTests(unittest.TestCase):
         mode = compiled["parameters"]["stage4RoleAssignmentNaming"]
         self.assertEqual(mode["defaultValue"], "principal-id")
         self.assertEqual(set(mode["allowedValues"]), {"principal-id", "resource-id"})
+
+        ingress_module = compiled["resources"]["aksIngressSubnetRole"]
+        self.assertEqual(ingress_module["properties"]["parameters"]["aksClusterName"]["value"], "[parameters('stage4Aks').name]")
+        ingress_principal = ingress_module["properties"]["parameters"]["controlPlanePrincipalId"]["value"]
+        self.assertIn("reference('privateAks')", ingress_principal)
+        self.assertIn("controlPlanePrincipalId", ingress_principal)
+        ingress_template = ingress_module["properties"]["template"]
+        ingress_roles = [resource for resource in ingress_template["resources"] if resource["type"] == "Microsoft.Authorization/roleAssignments"]
+        self.assertEqual(len(ingress_roles), 1)
+        ingress_assignment = ingress_roles[0]
+        ingress_scope = "resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('virtualNetworkName'), parameters('ingressSubnetName'))"
+        self.assertEqual(ingress_assignment["scope"], f"[{ingress_scope}]")
+        self.assertEqual(ingress_assignment["name"], f"[guid({ingress_scope}, resourceId('Microsoft.ContainerService/managedClusters', parameters('aksClusterName')), variables('networkContributorRoleId'))]")
+        ingress_role_principal = ingress_assignment["properties"]["principalId"]
+        self.assertIn("reference(resourceId('Microsoft.ContainerService/managedClusters'", ingress_role_principal)
+        self.assertIn("parameters('controlPlanePrincipalId')", ingress_role_principal)
+        self.assertEqual(ingress_assignment["properties"]["principalType"], "ServicePrincipal")
+        self.assertIn("4d97b98b-1d4f-4787-a291-c67834d212e7", ingress_template["variables"]["networkContributorRoleId"])
+
         contracts = (
             ("acrPullRole", "Microsoft.ContainerService/managedClusters", "kubeletPrincipalId", "kubeletObjectId", "Microsoft.ContainerRegistry/registries", "registryName", "acrPullRoleId", "7f951dda-4ed3-4680-a7ca-43fe172d538d"),
             ("azureOpenAIDataPlaneRoles", "Microsoft.ManagedIdentity/userAssignedIdentities", "principalId", "principalId", "Microsoft.CognitiveServices/accounts", "accountName", "cognitiveServicesOpenAIUserRoleId", "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"),
