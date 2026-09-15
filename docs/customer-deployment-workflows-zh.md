@@ -35,7 +35,7 @@
 
 **仍会公开的非秘密信息：** 仓库、分支、作业名、操作者、运行时间、workflow输入，以及作为Variable配置的非秘密ID/镜像引用等；Cosign签名还使用公开透明度服务。`evidence_notes`等输入只写非秘密简短结论和安全引用，不能写Token、客户正文或敏感配置。加密artifact不会隐藏GitHub本身的运行元数据。
 
-客户模块的原始stdout/stderr和详细Summary仅落到runner私有临时目录，结束时清理，不上传。失败摘要不包含完整诊断；必要时在受控runner上排查并重新计划，不能开启公开调试输出来打印所有环境变量。加密防止公开读者看到附件内容，不替代保护分支、Environment权限或runner隔离。
+客户模块的原始stdout/stderr和详细Summary仅落到runner私有临时目录，结束时清理，不上传。失败时公开日志给出受控结构化诊断：`Context`标明模块及action/operation/stage，`Result category`用于归类，`Error`保留经过脱敏的校验消息、命令类别及Azure错误码，`Source`标明该次Git SHA中仓库文件、行号、函数和异常类型。URL、资源ID、GUID、IP、邮箱、长哈希、配置值及凭据模式会遮蔽；不能把脱敏摘要当作原始云响应。部署、runtime、验收、runner及入口检查还把同一安全诊断写入加密`operation-status.json`。必要时结合该文件和Azure资源Operation details排查，不能开启shell trace或打印环境变量。加密防止公开读者看到附件内容，不替代保护分支、Environment权限或runner隔离。
 
 可选增强L3的`Customer audit governance`仍保留原私有仓库和双审批要求，不属于本次基础迁移公开fork路径。不要为了运行它直接删除治理保护。
 
@@ -148,7 +148,7 @@ Stage4建立私网连接后，才验收`target_image_signature_sbom`，继续使
 1. 运行`Customer stage acceptance`，选择environment、stage、operation=draft；Summary列出本阶段check ID，下载并在本机解密待检查报告。
 2. 运行对应操作，人工核对真实结果，包括需要实际客户端或外部网络验证的项目。
 3. 全部检查完成后再次运行同一workflow，operation=confirm；`reviewed_run_id`填成功的draft run ID，`checked_items`填写Summary列出的全部ID且不重复，`evidence_notes`填简短非秘密结果，`confirm_environment`再次填写环境名。
-4. 只有配置的GitHub login本人可以确认和重跑；代码/环境/配置必须匹配，草稿须在7天内。workflow自动从已配置的单人策略取得Entra批准人ID，生成加密账本，下一阶段自动读取。
+4. 只有配置的GitHub login本人可以确认和重跑；本Stage的draft与confirm必须使用同一代码、环境和配置，草稿须在7天内。workflow自动从已配置的单人策略取得Entra批准人ID并生成加密账本；后续Stage可在配置和策略未变且记录仍有效时跨Git SHA读取该账本。
 
 这是**人工确认记录**，`independentlyVerified=false`，不是自动证明技术事实。任何未验证或失败项都不能确认。此模式不需要`MIGRATION_REPORT_JSON`、`MIGRATION_REPORT_URL`和`MIGRATION_APPROVERS_JSON`；原`record`入口继续支持已审核外部报告及双人策略。重新确认一个阶段会使后续旧记录失效。
 
@@ -498,9 +498,9 @@ restore-target 从成功的 Stage5平台部署获取新服务器名称，读取�
 1. `Customer stage acceptance` 选择本阶段 `draft`，下载 pending报告；阶段0backup-restore还会附带机器观察结果。
 2. 在客户受控环境补完真实测试，填写每个check的status/evidence、实际observedAt，保存最终JSON报告到私有文档服务。不在evidence中放密码、token、Prompt正文或备份内容。
 3. 把最终JSON、受控URL、批准人数组分别放入 `MIGRATION_REPORT_JSON`、`MIGRATION_REPORT_URL`、`MIGRATION_APPROVERS_JSON`，运行 `record`。
-4. 成功record运行上传acceptance-record artifact；preflight、runtime和deploy自动读取同仓库/分支/修订的最新记录，校验环境、配置和有效期。无需更新MIGRATION_EVIDENCE_JSON或申请PAT。重录阶段只保留前置阶段并使其后证据失效。当前报告和批准人提交接口仍是过渡方案，完整技术探针/自动报告尚未完成。
+4. 成功record运行上传acceptance-record artifact；preflight、runtime和deploy自动读取同仓库/受保护分支的最新记录，校验环境、配置和有效期。双人模式仍要求当前Git SHA；single-operator显式接受风险后可读取先前SHA的记录。无需更新MIGRATION_EVIDENCE_JSON或申请PAT。重录阶段只保留前置阶段并使其后证据失效。当前报告和批准人提交接口仍是过渡方案，完整技术探针/自动报告尚未完成。
 
-新记录使用 `binding=stage-config`：只绑定当阶段及之前的配置，补后续PLS/身份输出不会使阶段0全部失效；修改已验收范围、governance或代码仍要重新审核。stage3排除stage4模型连接与stage5数据设置。报告的 `reportSha256` 采用与脚本一致的规范JSON序列化SHA256，不是带缩进文件字节的哈希；手工报告账本旧格式仍支持原校验。所有记录仍限最近7天，禁止仅更新时间或哈希假装验收。
+新记录使用 `binding=stage-config`：只绑定当阶段及之前的配置，补后续PLS/身份输出不会使阶段0全部失效；修改已验收范围或governance仍要重新审核。single-operator下仅代码SHA变化不会自动废止前序记录，但若代码改变了已验收行为、检查实现或证据结论，操作者仍须重验；双人模式继续要求同SHA。stage3排除stage4模型连接与stage5数据设置。报告的 `reportSha256` 采用与脚本一致的规范JSON序列化SHA256，不是带缩进文件字节的哈希；手工报告账本旧格式仍支持原校验。所有记录仍限最近7天，禁止仅更新时间或哈希假装验收。
 
 重新record阶段N会保留0到N-1并替换本阶段记录，同时移除所有后续记录，要求后续阶段重新审核；例如旧阶段0过期时，先复核并record阶段0，再逐阶段重新确认。不要把过期记录当作可自动延长的凭据。
 

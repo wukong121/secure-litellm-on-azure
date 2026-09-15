@@ -33,6 +33,8 @@ class InstallationReadinessTests(unittest.TestCase):
                 report = check_backup_access(config, None, execute)
                 self.assertEqual([item["name"] for item in report if item["status"] == "failed"], [failed] if failed else [])
                 self.assertNotIn("PRIVATE_ERROR", json.dumps(report))
+                if failed:
+                    self.assertIn("diagnostic", next(item for item in report if item["name"] == failed))
                 if failed in {"backup-private-dns", "backup-private-tls"}:
                     self.assertFalse(any(command[0] == "az" for command in commands))
                 if failed is None:

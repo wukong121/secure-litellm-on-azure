@@ -312,8 +312,20 @@ class RuntimeSafetyTests(unittest.TestCase):
         config = customer_config()
         azure = Mock()
         azure.run.return_value = {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}
-        azure.scoped.side_effect = ["/approved/workspace", {"enabled": True, "config": {"logAnalyticsWorkspaceResourceID": "/other/workspace"}}]
+        azure.scoped.side_effect = ["/approved/workspace", {"profile": {"enabled": True, "config": {"logAnalyticsWorkspaceResourceID": "/other/workspace"}}}]
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.AzureCommands", return_value=azure):
             with self.assertRaisesRegex(ValueError, "differs"):
                 monitoring_onboard(config, 1, "execute", "a" * 40, Path(directory), "approved")
+            self.assertFalse(any("enable-addons" in call.args[0] for call in azure.scoped.call_args_list))
+
+    def test_monitoring_plan_handles_cluster_without_omsagent_profile(self):
+        config = customer_config()
+        azure = Mock()
+        azure.run.return_value = {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}
+        azure.scoped.side_effect = ["/approved/workspace", {"profile": None}]
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.AzureCommands", return_value=azure):
+            path = Path(directory)
+            monitoring_onboard(config, 4, "plan", "a" * 40, path, "")
+            review = json.loads((path / "runtime-review.json").read_text())
+            self.assertEqual(review["before"], {})
             self.assertFalse(any("enable-addons" in call.args[0] for call in azure.scoped.call_args_list))

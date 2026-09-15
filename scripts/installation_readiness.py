@@ -9,7 +9,8 @@ import shutil
 import subprocess
 import sys
 
-from scripts.customer_migration import ROOT, deployment_mode, fingerprint, private_write, require, validate_config
+from scripts.customer_migration import ROOT, MigrationError, deployment_mode, fingerprint, private_write, require, validate_config
+from scripts.workflow_diagnostics import command_failure_summary, command_name, diagnostic_exit, exception_diagnostic
 
 INSTALLATION_CHECKS = (
     "repository_admin", "protected_default_branch", "protected_environments",
@@ -40,7 +41,7 @@ def inspect_runner(config, directory, check_target=False, run=subprocess.run, ch
     results = []
     def execute(arguments):
         result = run(arguments, capture_output=True, text=True, check=False, timeout=120)
-        require(result.returncode == 0, "Read-only probe failed")
+        require(result.returncode == 0, f"Read-only {command_name(arguments)} probe failed: {command_failure_summary(result.stdout, result.stderr, result.returncode)}")
         return result.stdout
 
     def probe(name, operation):
@@ -48,8 +49,8 @@ def inspect_runner(config, directory, check_target=False, run=subprocess.run, ch
             details = operation()
             results.append({"name": name, "status": "passed", "details": details})
             return True
-        except (ValueError, KeyError, OSError, subprocess.SubprocessError):
-            results.append({"name": name, "status": "failed", "details": "Check tool installation, private connectivity and the selected workflow identity permissions; raw diagnostics are not published"})
+        except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+            results.append({"name": name, "status": "failed", "details": "Check tool installation, private connectivity and the selected workflow identity permissions; raw diagnostics are not published", "diagnostic": exception_diagnostic(error, "runner-readiness")})
             return False
 
     missing = [tool for tool in TOOLS if shutil.which(tool) is None]
@@ -120,11 +121,22 @@ def main():
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
             stream.write("\n".join(lines))
     print(json.dumps({"status": report["status"], "stageAccepted": False}))
-    return 0 if report["status"] == "passed" else 1
+    if report["status"] == "failed":
+        failed = []
+        for check in report["checks"]:
+            if check["status"] != "failed":
+                continue
+            diagnostic = check.get("diagnostic", {})
+            detail = diagnostic.get("message") if isinstance(diagnostic, dict) and isinstance(diagnostic.get("message"), str) else "failed; inspect the encrypted readiness report"
+            failed.append(f"{check['name']}: {detail}")
+        raise MigrationError("Runner checks failed: " + "; ".join(failed))
+    return 0
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (ValueError, KeyError, OSError, subprocess.SubprocessError):
-        raise SystemExit("Runner readiness failed before completion; check configuration and the preceding login step. No resource changes were performed.") from None
+    except MigrationError as error:
+        raise SystemExit(diagnostic_exit(error, "runner-readiness")) from None
+    except Exception as error:
+        raise SystemExit(diagnostic_exit(error, "runner-readiness", "Runner readiness failed before completion")) from None

@@ -208,9 +208,12 @@ class CustomerMigrationTests(unittest.TestCase):
         validate_config(self.config, "test")
         record = {**self.record, "binding": "stage-config", "configSha256": stage_fingerprint(self.config, 0), "approvalMode": "single-operator", "approvedBy": [operator]}
         self.assertEqual(validate_evidence([record], 1, self.config, self.revision, self.now), {0})
+        self.assertEqual(validate_evidence([{**record, "revision": "d" * 40}], 1, self.config, self.revision, self.now), {0})
         for updates in ({"approvedBy": [self.record["approvedBy"][1]]}, {"approvalMode": "dual"}, {"status": "pending"}, {"checks": []}):
             with self.subTest(updates=updates), self.assertRaises(ValueError):
                 validate_evidence([{**record, **updates}], 1, self.config, self.revision, self.now)
+        with self.assertRaisesRegex(ValueError, "configuration or revision mismatch"):
+            validate_evidence([{**record, "revision": "invalid"}], 1, self.config, self.revision, self.now)
         self.config["governance"]["singleOperatorRiskAccepted"] = False
         with self.assertRaises(ValueError):
             validate_config(self.config, "test")

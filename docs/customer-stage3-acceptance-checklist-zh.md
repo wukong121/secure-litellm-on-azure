@@ -276,7 +276,7 @@ az aks show --subscription "$SUBSCRIPTION_ID" --resource-group "$LEGACY_RG" --na
 
 Actions → Customer stage acceptance → Run workflow，选择main、environment=test、stage=3、operation=draft，reviewed_run_id、checked_items、evidence_notes、confirm_environment留空。待成功后查看Summary中的三个check IDs并记录DRAFT_RUN_ID。
 
-draft生成pending清单，不会下载并替你审核源扫描附件，也不会自动检查ACR配置。确认前复核Stage0至2账本及本Stage draft仍有效、同环境/完整Git SHA及适用配置、处于7天时效内。文档合并引起SHA变化也要按主手册处理证据适用性，不能盲目复用旧SHA批准。
+draft生成pending清单，不会下载并替你审核源扫描附件，也不会自动检查ACR配置。确认前复核Stage0至2账本仍在7天内且环境、阶段配置、策略和操作者匹配；single-operator允许这些前序记录来自先前Git SHA。本Stage draft与confirm仍须同环境、完整Git SHA及适用配置。若代码改动影响前序验收或源扫描结论则先重验；双人模式仍要求前序账本同SHA。
 
 ### 5.3 按页面标签填写confirm
 

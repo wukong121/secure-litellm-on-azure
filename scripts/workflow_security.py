@@ -13,6 +13,7 @@ import zlib
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from scripts.customer_migration import ROOT, private_write, require
+from scripts.workflow_diagnostics import exception_diagnostic, parse_diagnostic
 
 SEALED_FILE = "sealed-artifact.json"
 MAX_PLAINTEXT = 32 * 1024 * 1024
@@ -95,8 +96,12 @@ def run_private(module, arguments):
         completed = subprocess.run([sys.executable, "-m", module, *arguments], env=environment, stdout=output, stderr=errors, check=False)
     label = "completed" if completed.returncode == 0 else "failed"
     category = "none" if completed.returncode == 0 else "execution-failed"
+    diagnostic = None
     if completed.returncode:
         errors = stderr.read_text(errors="replace")[-8192:]
+        diagnostic = parse_diagnostic(errors)
+        if diagnostic is None:
+            diagnostic = {"version": 1, "context": module.removeprefix("scripts."), "code": "process-exit-without-diagnostic", "errorType": "ProcessExit", "message": f"The module exited with code {completed.returncode} without a structured diagnostic; check runner termination and preceding setup steps.", "location": module.removeprefix("scripts.")}
         categories = {
             "Prior stage evidence is missing": "prior-stage-not-confirmed",
             "configuration or revision mismatch": "stale-configuration-or-revision",
@@ -105,6 +110,7 @@ def run_private(module, arguments):
             "Replace customer configuration placeholders": "configuration-placeholders",
             "Component configuration is missing or contains placeholders": "component-configuration-incomplete",
             "Unexpected or missing customer configuration fields": "configuration-fields",
+            "Unsupported customer configuration": "configuration-fields",
             "Environment mismatch": "environment-mismatch",
             "Cannot authenticate workflow evidence": "evidence-key-or-context-mismatch",
             "Existing peering uses another name": "connectivity-existing-peering",
@@ -117,7 +123,18 @@ def run_private(module, arguments):
             "Connectivity plan attempts to modify": "connectivity-scope-rejected",
         }
         category = next((label for fragment, label in categories.items() if fragment.lower() in errors.lower()), category)
-    message = f"Customer operation {label}. Result category: {category}. Review the encrypted artifact; raw output is retained only in the runner's private temporary directory until cleanup."
+        if category == "execution-failed" and diagnostic:
+            category = diagnostic["code"]
+    context = module.removeprefix("scripts.")
+    fields = []
+    for index, argument in enumerate(arguments[:-1]):
+        if argument in {"--action", "--operation", "--stage", "--environment", "--component", "--mode"} and re.fullmatch(r"[A-Za-z0-9-]{1,64}", arguments[index + 1]):
+            fields.append(f"{argument.removeprefix('--')}={arguments[index + 1]}")
+    fields.extend(f"{argument.removeprefix('--')}=true" for argument in arguments if argument in {"--check-target", "--check-backup"})
+    message = f"Customer operation {label}. Context: {context}" + (", " + ", ".join(fields) if fields else "") + f". Result category: {category}."
+    if diagnostic:
+        message += f"\nError: {diagnostic['message']}\nSource: {diagnostic['location']} ({diagnostic['errorType']})."
+    message += "\nRaw stdout/stderr remains private and is removed during workflow cleanup."
     if module == "scripts.installation_readiness":
         from scripts.runner_connectivity import BACKUP_PROBES
         report = ROOT / "temp/runner-readiness/runner-readiness.json"
@@ -144,7 +161,10 @@ def run_private(module, arguments):
     if module in destinations:
         path = ROOT / "temp" / destinations[module]
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        private_write(path / "operation-status.json", json.dumps({"module": module, "exitCode": completed.returncode, "status": label, "category": category}))
+        status = {"module": module, "exitCode": completed.returncode, "status": label, "category": category}
+        if diagnostic:
+            status["diagnostic"] = diagnostic
+        private_write(path / "operation-status.json", json.dumps(status))
     return completed.returncode
 
 
@@ -189,5 +209,6 @@ def main():
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (ValueError, KeyError, OSError):
-        raise SystemExit("Workflow evidence protection failed; check the Environment Secret and local evidence files. No payload was printed.") from None
+    except Exception as error:
+        diagnostic = exception_diagnostic(error, "workflow-security", "Workflow evidence protection failed")
+        raise SystemExit(f"Workflow security failed. Error [{diagnostic['code']}]: {diagnostic['message']}\nSource: {diagnostic['location']} ({diagnostic['errorType']}).") from None

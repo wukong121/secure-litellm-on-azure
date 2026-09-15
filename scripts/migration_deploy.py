@@ -13,6 +13,7 @@ from scripts.customer_migration import (
     COMPONENTS, ROOT, MigrationError, active_stages, approval_policy, configured, fingerprint, prepare,
     private_write, require, stage_fingerprint, validate_config, validate_evidence,
 )
+from scripts.workflow_diagnostics import command_failure_summary, command_name, diagnostic_exit
 
 
 def deployment_name(config, stage, component):
@@ -73,14 +74,15 @@ class AzureCommands:
         result = subprocess.run(["az", *arguments, "--only-show-errors", "--output", "json"], capture_output=True, text=True, check=False)
         private_write(self.directory / f"command-{self.counter}.stdout.json", result.stdout)
         private_write(self.directory / f"command-{self.counter}.stderr.txt", result.stderr)
+        operation = command_name(["az", *arguments])
         if result.returncode:
-            known = ("ResourceGroupNotFound", "ResourceNotFound", "AuthorizationFailed", "LinkedAuthorizationFailed", "RequestDisallowedByPolicy", "InvalidTemplateDeployment", "InvalidTemplate", "MissingSubscriptionRegistration")
-            codes = [code for code in known if code in result.stderr or code in result.stdout]
-            raise MigrationError("Azure command failed: " + (", ".join(codes) or "see private runner diagnostics"))
+            raise MigrationError(f"Azure command failed ({operation}): {command_failure_summary(result.stdout, result.stderr, result.returncode)}")
+        if not result.stdout.strip():
+            raise MigrationError(f"{operation} returned no JSON output")
         try:
             return json.loads(result.stdout)
         except ValueError:
-            raise MigrationError("Azure returned invalid JSON; see private runner diagnostics") from None
+            raise MigrationError(f"{operation} returned invalid JSON") from None
 
     def scoped(self, arguments):
         return self.run([*arguments, "--subscription", self.config["azure"]["subscriptionId"]])
@@ -240,7 +242,8 @@ def deploy_component(config, stage, component, revision, operation, previous, di
     compiled = directory / "template.json"
     result = subprocess.run(["az", "bicep", "build", "--file", str(template), "--outfile", str(compiled)], capture_output=True, text=True, check=False)
     private_write(directory / "bicep-diagnostics.txt", result.stderr)
-    require(result.returncode == 0, "Bicep compilation failed; see private diagnostics")
+    if result.returncode:
+        raise MigrationError(f"Bicep compilation failed: {command_failure_summary(result.stdout, result.stderr, result.returncode)}")
     template_hash = hashlib.sha256(compiled.read_bytes()).hexdigest()
     scope = "sub" if component == "bootstrap" else "group"
     scope_args = ["--location", config["location"]] if scope == "sub" else ["--resource-group", config["legacy" if component in {"monitoring", "legacy-logging"} else "target"]["resourceGroup"]]
@@ -305,6 +308,6 @@ if __name__ == "__main__":
     try:
         main()
     except MigrationError as error:
-        raise SystemExit(str(error)) from None
-    except (ValueError, KeyError, TypeError, AttributeError, OSError):
-        raise SystemExit("Deployment controller failed; inspect private runner diagnostics. Input values are not logged.") from None
+        raise SystemExit(diagnostic_exit(error, "migration-deploy")) from None
+    except Exception as error:
+        raise SystemExit(diagnostic_exit(error, "migration-deploy", "Deployment controller failed")) from None

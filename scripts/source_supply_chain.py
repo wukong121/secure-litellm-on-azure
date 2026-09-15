@@ -8,7 +8,8 @@ import re
 import subprocess
 from datetime import datetime, timezone
 
-from scripts.customer_migration import ROOT, private_write, require
+from scripts.customer_migration import ROOT, MigrationError, private_write, require
+from scripts.workflow_diagnostics import exception_diagnostic, format_diagnostic
 
 
 def source_image():
@@ -49,8 +50,11 @@ def check_source(directory, revision, run=subprocess.run):
             private_write(path, content)
             entry.update(status="passed" if result.returncode == 0 else "failed", exitCode=result.returncode,
                          artifact=filename, sha256=hashlib.sha256(content.encode()).hexdigest())
-        except (ValueError, OSError, subprocess.SubprocessError):
+            if result.returncode:
+                entry["reason"] = "Fixable CRITICAL vulnerabilities matched policy" if name == "scan" else "SBOM command returned a nonzero exit code"
+        except (ValueError, OSError, subprocess.SubprocessError) as error:
             entry["reason"] = "Tool unavailable, timed out, or returned invalid evidence"
+            entry["diagnostic"] = exception_diagnostic(error, "source-supply-chain")
         report["results"].append(entry)
     if all(item["status"] == "passed" for item in report["results"]):
         report["status"] = "passed"
@@ -64,9 +68,22 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=ROOT / "temp/source-supply-chain")
     args = parser.parse_args()
     report = check_source(args.output_dir, args.revision)
-    print(json.dumps(report))
-    return 0 if report["status"] == "passed" else 1
+    print(json.dumps({"check": report["check"], "status": report["status"], "results": {item["name"]: item["status"] for item in report["results"]}, "stageAccepted": False}))
+    if report["status"] == "failed":
+        failures = []
+        for result in report["results"]:
+            if result["status"] != "failed":
+                continue
+            diagnostic = result.get("diagnostic", {})
+            detail = diagnostic.get("message") if isinstance(diagnostic, dict) and isinstance(diagnostic.get("message"), str) else result.get("reason", "failed")
+            failures.append(f"{result['name']}: {detail}")
+        raise MigrationError("Source supply-chain checks failed: " + "; ".join(failures))
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as error:
+        diagnostic = exception_diagnostic(error, "source-supply-chain", "Source supply-chain checks failed")
+        raise SystemExit(format_diagnostic(diagnostic)) from None

@@ -293,7 +293,7 @@ Stage4验证网络/TLS和镜像，Stage5验证数据恢复/密文，Stage6验证
 
 ### 7.3 confirm字段逐项填写
 
-沿用已批准single-operator路径，双人策略继续使用主手册record流程。确认Stage0/1账本和Stage2 draft有效、同环境/完整Git SHA和适用配置；draft与证据仍在7天时效内，原artifact key可用。文档编辑后合并产生新SHA，也不能假定旧SHA账本自动适用。
+沿用已批准single-operator路径，双人策略继续使用主手册record流程。确认Stage0/1账本仍在7天内且环境、阶段配置、策略和操作者匹配；single-operator允许这些前序记录来自先前Git SHA。Stage2的draft与confirm仍须同环境、完整Git SHA和适用配置，并使用原artifact key。若代码改动影响前序验收结论则先重验；双人模式仍按主手册要求前序账本同SHA。
 
 | 页面字段/说明 | confirm时填写 |
 | --- | --- |

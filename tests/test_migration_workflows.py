@@ -15,6 +15,10 @@ class MigrationWorkflowTests(unittest.TestCase):
         inputs = acceptance["on"]["workflow_dispatch"]["inputs"]
         self.assertIn("confirm", inputs["operation"]["options"])
         self.assertTrue({"reviewed_run_id", "checked_items", "evidence_notes", "confirm_environment"}.issubset(inputs))
+        acceptance_steps = {step.get("name"): step for step in acceptance["jobs"]["acceptance"]["steps"]}
+        self.assertEqual(acceptance_steps["Encrypt draft or generated ledger"]["if"], "success() || failure()")
+        self.assertIn("operation-status.json", acceptance_steps["Encrypt draft or generated ledger"]["run"])
+        self.assertEqual(acceptance_steps["Save encrypted acceptance evidence"]["if"], "success() || failure()")
         runner_text = (ROOT / ".github/workflows/customer-runner-checks.yml").read_text()
         runner = yaml.load(runner_text, Loader=yaml.BaseLoader)
         self.assertEqual(runner["jobs"]["check"]["runs-on"], "${{ fromJSON(vars.MIGRATION_PRIVATE_RUNNER_LABELS) }}")
@@ -60,6 +64,8 @@ class MigrationWorkflowTests(unittest.TestCase):
                 self.assertEqual(len(report["results"]), 2)
                 self.assertNotIn("not-for-artifact", (Path(folder) / "source-summary.json").read_text())
                 self.assertTrue(all("sha256" in item for item in report["results"]))
+                if scan_code:
+                    self.assertEqual(report["results"][1]["reason"], "Fixable CRITICAL vulnerabilities matched policy")
 
     def test_missing_source_tool_is_a_failed_check(self):
         def unavailable(*args, **kwargs):
@@ -68,6 +74,7 @@ class MigrationWorkflowTests(unittest.TestCase):
             report = check_source(Path(folder), "a" * 40, unavailable)
             self.assertEqual(report["status"], "failed")
             self.assertNotIn("private environment details", json.dumps(report))
+            self.assertTrue(all(item["diagnostic"]["code"] == "operating-system-error" for item in report["results"]))
 
     def test_workflow_components_match_controller_including_network(self):
         for name, extra in (("customer-deploy.yml", set()), ("customer-migration.yml", {"none"})):

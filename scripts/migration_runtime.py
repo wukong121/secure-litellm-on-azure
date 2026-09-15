@@ -17,6 +17,7 @@ import yaml
 from scripts.customer_migration import ROOT, MigrationError, active_stages, configured, deployment_mode, fingerprint, private_write, require, stage_fingerprint, validate_config, validate_evidence
 from scripts.migration_deploy import AzureCommands, deployment_name, group_id
 from scripts.migration_evidence import draft_report
+from scripts.workflow_diagnostics import command_failure_summary, diagnostic_exit
 
 
 def file_sha256(path):
@@ -31,7 +32,7 @@ def run_command(arguments, directory, label, allowed=(0,), environment=None):
     result = subprocess.run(arguments, capture_output=True, text=True, check=False, env=environment)
     private_write(directory / f"{label}.stdout.txt", result.stdout)
     private_write(directory / f"{label}.stderr.txt", result.stderr)
-    require(result.returncode in allowed, f"{label} failed; inspect private runner diagnostics")
+    require(result.returncode in allowed, f"{label} failed: {command_failure_summary(result.stdout, result.stderr, result.returncode)}")
     return result.stdout
 
 
@@ -233,7 +234,8 @@ def monitoring_onboard(config, stage, operation, revision, directory, approved):
     cluster = config["legacy"]["aksClusterName"] if legacy else config["parameters"]["platform"]["stage4Aks"]["name"]
     workspace = config["parameters"]["monitoring" if legacy else "platform"]["logAnalyticsWorkspaceName"]
     workspace_id = azure.scoped(["monitor", "log-analytics", "workspace", "show", "--resource-group", group, "--workspace-name", workspace, "--query", "id"])
-    profile = azure.scoped(["aks", "show", "--resource-group", group, "--name", cluster, "--query", "addonProfiles.omsagent"]) or {}
+    profile_result = azure.scoped(["aks", "show", "--resource-group", group, "--name", cluster, "--query", "{profile:addonProfiles.omsagent}"])
+    profile = profile_result.get("profile") or {}
     existing = profile.get("config", {}).get("logAnalyticsWorkspaceResourceID", "")
     require(not existing or existing.lower() == workspace_id.lower(), "Existing Container Insights destination differs; do not silently redirect telemetry")
     plan = {"action": "monitoring-onboard", "stage": stage, "revision": revision, "configSha256": stage_fingerprint(config, stage), "workspaceId": workspace_id, "before": profile}
@@ -467,6 +469,6 @@ if __name__ == "__main__":
     try:
         main()
     except MigrationError as error:
-        raise SystemExit(str(error)) from None
-    except (ValueError, KeyError, TypeError, AttributeError, OSError, subprocess.SubprocessError, yaml.YAMLError):
-        raise SystemExit("Runtime operation failed; see private runner diagnostics. No stage acceptance was issued.") from None
+        raise SystemExit(diagnostic_exit(error, "migration-runtime")) from None
+    except Exception as error:
+        raise SystemExit(diagnostic_exit(error, "migration-runtime", "Runtime operation failed")) from None
