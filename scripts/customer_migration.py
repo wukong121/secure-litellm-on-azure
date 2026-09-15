@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from scripts.render_stage7_domain import domain_hosts, render
+from scripts.workflow_diagnostics import command_failure_summary, diagnostic_exit
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGES = (
@@ -285,7 +286,9 @@ def validate_evidence(evidence, stage, config, revision, now=None):
         binding = item.get("binding", "full-config")
         require(binding in {"full-config", "stage-config"}, "Invalid evidence binding")
         expected_hash = stage_fingerprint(config, previous) if binding == "stage-config" else fingerprint(config)
-        require(item.get("environment") == config["environment"] and item.get("configSha256") == expected_hash and item.get("revision") == revision, "Evidence configuration or revision mismatch")
+        evidence_revision = item.get("revision", "")
+        revision_matches = re.fullmatch(r"[0-9a-f]{40}", evidence_revision) is not None and (mode == "single-operator" or evidence_revision == revision)
+        require(item.get("environment") == config["environment"] and item.get("configSha256") == expected_hash and revision_matches, "Evidence configuration or revision mismatch")
         require(item.get("approvalMode", "dual") == mode, "Evidence approval policy mismatch")
         require(item.get("status") == "passed" and set(item.get("checks", [])) == set(stage_checks(previous, config)), "Stage checks are incomplete")
         approvers = item.get("approvedBy", [])
@@ -413,7 +416,7 @@ def preview(config, template, path, component):
     result = subprocess.run(["az", "deployment", *scope, "--subscription", config["azure"]["subscriptionId"], "--template-file", str(template), "--parameters", f"@{path}", "--result-format", "FullResourcePayloads", "--no-pretty-print", "--output", "json"], capture_output=True, text=True, check=False)
     private_write(path.parent / "what-if.json", result.stdout)
     private_write(path.parent / "diagnostics.txt", result.stderr)
-    require(result.returncode == 0, "What-if failed; detailed diagnostics are private local output")
+    require(result.returncode == 0, f"Azure what-if failed: {command_failure_summary(result.stdout, result.stderr, result.returncode)}")
     result = json.loads(result.stdout)
     require(result.get("status") == "Succeeded" and isinstance(result.get("changes"), list), "Unrecognized What-if response")
     counts = {}
@@ -474,6 +477,6 @@ if __name__ == "__main__":
     try:
         main()
     except MigrationError as error:
-        raise SystemExit(str(error)) from None
-    except (ValueError, KeyError, TypeError, AttributeError, OSError):
-        raise SystemExit("Migration check failed. Verify configuration, stage evidence and private local diagnostics; input values are not logged.") from None
+        raise SystemExit(diagnostic_exit(error, "customer-migration")) from None
+    except Exception as error:
+        raise SystemExit(diagnostic_exit(error, "customer-migration", "Migration check failed")) from None

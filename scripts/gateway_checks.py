@@ -9,7 +9,8 @@ import os
 import socket
 import ssl
 
-from scripts.customer_migration import ROOT, private_write, require, stage_fingerprint, validate_config
+from scripts.customer_migration import ROOT, MigrationError, private_write, require, stage_fingerprint, validate_config
+from scripts.workflow_diagnostics import diagnostic_exit, exception_diagnostic
 
 
 def resolve_addresses(host):
@@ -55,8 +56,8 @@ def gateway_checks(config, revision, resolve=resolve_addresses, request=probe):
             observed = [request(host, address, path, host_header, "GET" if private else "POST") for address in addresses]
             require(all(item["status"] in statuses for item in observed), "Request was not denied as expected")
             results[name] = {"status": "passed", "observations": observed, "addressCount": len(addresses)}
-        except Exception:
-            results[name] = {"status": "failed", "reason": "DNS, TLS or expected denial check failed; no response body retained"}
+        except Exception as error:
+            results[name] = {"status": "failed", "reason": "DNS, TLS or expected denial check failed; no response body retained", "diagnostic": exception_diagnostic(error, "gateway-checks")}
     return {"revision": revision, "environment": config["environment"], "configSha256": stage_fingerprint(config, 7), "observedAt": datetime.now(timezone.utc).isoformat(), "checkGroup": "gateway-isolation", "checks": results, "stageAccepted": False,
             "notCovered": ["authenticated_client_compatibility", "object_ownership", "database_and_redis", "audit_delivery", "load_and_recovery", "conditional_access"]}
 
@@ -68,11 +69,14 @@ def main():
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     private_write(directory / "gateway-isolation.json", json.dumps(result, indent=2))
     print(json.dumps({"checkGroup": result["checkGroup"], "checks": {name: check["status"] for name, check in result["checks"].items()}, "stageAccepted": False}))
-    require(all(check["status"] == "passed" for check in result["checks"].values()), "Gateway isolation checks failed")
+    failures = [f"{name}: {check['diagnostic']['message']}" for name, check in result["checks"].items() if check["status"] == "failed"]
+    require(not failures, "Gateway isolation checks failed: " + "; ".join(failures))
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, KeyError, TypeError, OSError):
-        raise SystemExit("Gateway checks failed. No stage acceptance issued; no response bodies or credentials logged.") from None
+    except MigrationError as error:
+        raise SystemExit(diagnostic_exit(error, "gateway-checks")) from None
+    except Exception as error:
+        raise SystemExit(diagnostic_exit(error, "gateway-checks", "Gateway checks failed")) from None

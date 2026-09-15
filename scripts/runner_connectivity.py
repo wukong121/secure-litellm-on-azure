@@ -7,6 +7,7 @@ import subprocess
 from urllib.parse import urlsplit
 
 from scripts.customer_migration import configured, require
+from scripts.workflow_diagnostics import exception_diagnostic
 
 
 def connectivity_settings(config):
@@ -161,6 +162,6 @@ def check_backup_access(config, azure, execute):
                 require(output.strip() in {"0", "1"}, "Unexpected Blob listing result")
                 details = "Runtime identity can list the backup container; upload and download are not verified"
             results.append({"name": name, "status": "passed", "details": details})
-        except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError):
-            results.append({"name": name, "status": "failed", "details": "Check this prerequisite's configuration, routing or runtime identity permissions; no raw response is published"})
+        except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
+            results.append({"name": name, "status": "failed", "details": "Check this prerequisite's configuration, routing or runtime identity permissions; no raw response is published", "diagnostic": exception_diagnostic(error, "runner-readiness")})
     return results

@@ -12,6 +12,7 @@ from scripts.audit_runtime import AuditCluster
 from scripts.customer_migration import ROOT, fingerprint, private_write, require, stage_fingerprint, validate_config
 from scripts.migration_runtime import connect_cluster
 from scripts.workflow_artifacts import github_api, read_artifact
+from scripts.workflow_diagnostics import exception_diagnostic, format_diagnostic
 
 
 def governance_settings(config):
@@ -146,5 +147,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, KeyError, TypeError, OSError):
-        raise SystemExit("Audit governance failed; keep maintenance paused. No values or raw contents are logged.") from None
+    except Exception as error:
+        diagnostic = exception_diagnostic(error, "audit-governance", "Audit governance failed; keep maintenance paused")
+        raise SystemExit(format_diagnostic(diagnostic)) from None

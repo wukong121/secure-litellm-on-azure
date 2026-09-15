@@ -4,12 +4,17 @@ import json
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+import yaml
 
+from scripts.migration_evidence import draft_report, record_evidence
 from scripts.workflow_artifacts import approved_operation, load_evidence, read_artifact, write_operation_receipt
 from tests.test_customer_migration import customer_config
 from scripts.workflow_security import SEALED_FILE, open_values, run_private, seal_directory, seal_values
+from scripts.workflow_diagnostics import diagnostic_exit, exception_diagnostic
+from scripts.customer_migration import MigrationError
 
 
 class WorkflowArtifactTests(unittest.TestCase):
@@ -101,6 +106,52 @@ class WorkflowArtifactTests(unittest.TestCase):
                 self.assertEqual(run_private("scripts.migration_runtime", []), 1)
             self.assertNotIn("PRIVATE_", output.getvalue() + summary.read_text())
             self.assertIn("prior-stage-not-confirmed", output.getvalue())
+            self.assertIn("exited with code 1 without a structured diagnostic", output.getvalue())
+
+    @patch.dict("os.environ", {"WORKFLOW_ARTIFACT_KEY": base64.b64encode(b"k" * 32).decode()}, clear=True)
+    def test_structured_failure_exposes_safe_detail_and_source_but_not_raw_stderr(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder, patch("scripts.workflow_security.ROOT", Path(folder)), patch("sys.stdout", new_callable=io.StringIO) as output:
+            def execute(arguments, **kwargs):
+                error = MigrationError("Azure command failed (az aks show): AuthorizationFailed for 11111111-1111-4111-8111-111111111111 at https://private.example.invalid/path")
+                kwargs["stderr"].write("PRIVATE_RAW_STDERR\n" + diagnostic_exit(error, "migration-runtime"))
+                return SimpleNamespace(returncode=1)
+            with patch("scripts.workflow_security.subprocess.run", side_effect=execute):
+                self.assertEqual(run_private("scripts.migration_runtime", ["--action", "monitoring-onboard", "--stage", "4"]), 1)
+            published = output.getvalue()
+            self.assertIn("action=monitoring-onboard", published)
+            self.assertIn("Result category: azure-command-failed", published)
+            self.assertIn("Azure command failed (az aks show): AuthorizationFailed", published)
+            self.assertIn("Source: migration-runtime", published)
+            self.assertNotIn("PRIVATE_RAW_STDERR", published)
+            self.assertNotIn("11111111-1111-4111-8111-111111111111", published)
+            self.assertNotIn("private.example.invalid", published)
+
+    @patch.dict("os.environ", {"WORKFLOW_ARTIFACT_KEY": base64.b64encode(b"k" * 32).decode(), "CUSTOMER_CONFIG_JSON": "{}"}, clear=True)
+    def test_real_failed_module_reports_validation_and_repository_source(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            code = run_private("scripts.customer_migration", ["--stage", "0", "--mode", "config-check", "--component", "none", "--environment", "test"])
+        published = output.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("Context: customer_migration, stage=0, mode=config-check, component=none, environment=test", published)
+        self.assertIn("Result category: configuration-fields", published)
+        self.assertIn("Unsupported customer configuration", published)
+        self.assertRegex(published, r"Source: scripts/customer_migration\.py:[0-9]+:validate_config \(MigrationError\)")
+
+    def test_yaml_diagnostic_reports_location_without_source_content(self):
+        try:
+            yaml.safe_load("credential: PRIVATE_YAML_VALUE\nbroken: [")
+        except yaml.YAMLError as error:
+            diagnostic = exception_diagnostic(error, "migration-runtime")
+        self.assertEqual(diagnostic["code"], "invalid-yaml")
+        self.assertRegex(diagnostic["message"], r"Invalid YAML at line [0-9]+, column [0-9]+")
+        self.assertNotIn("PRIVATE_YAML_VALUE", json.dumps(diagnostic))
+
+    @patch.dict("os.environ", {"CUSTOMER_CONFIG_JSON": '{"resourceGroup":"privateResourceName"}'}, clear=True)
+    def test_diagnostic_redacts_customer_values_case_insensitively(self):
+        diagnostic = exception_diagnostic(MigrationError("Resource group PRIVATERESOURCENAME was not found"), "migration-deploy")
+        self.assertIn("Resource group <redacted> was not found", diagnostic["message"])
+        self.assertNotIn("privateresourcename", diagnostic["message"].lower())
 
     @patch.dict("os.environ", {"WORKFLOW_ARTIFACT_KEY": base64.b64encode(b"k" * 32).decode()})
     def test_artifacts_hide_payload_and_authenticate_repository_run_and_name(self):
@@ -151,10 +202,36 @@ class WorkflowArtifactTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"GITHUB_REPOSITORY": "synthetic/gateway", "GITHUB_REF": "refs/heads/main"})
     def test_missing_evidence_only_allowed_for_initial_stage(self):
-        api = lambda route: b'{"workflow_runs":[]}'
+        routes = []
+        def api(route):
+            routes.append(route)
+            return b'{"workflow_runs":[]}'
         self.assertEqual(load_evidence(customer_config(), 0, "a" * 40, api=api), [])
+        self.assertIn("head_sha=" + "a" * 40, routes[0])
         with self.assertRaisesRegex(ValueError, "Prior stage"):
             load_evidence(customer_config(), 5, "a" * 40, api=api)
+
+    @patch.dict("os.environ", {"GITHUB_REPOSITORY": "synthetic/gateway", "GITHUB_REF": "refs/heads/main"})
+    def test_single_operator_loads_acceptance_from_previous_revision(self):
+        config = customer_config()
+        config["governance"] = {"approvalMode": "single-operator", "approverObjectIds": ["11111111-1111-4111-8111-111111111111"], "singleOperatorRiskAccepted": True}
+        previous_revision = "b" * 40
+        now = datetime.now(timezone.utc)
+        report = draft_report(config, 0, previous_revision)
+        report["observedAt"] = now.isoformat()
+        for result in report["checks"].values():
+            result.update(status="passed", evidence="Synthetic historical acceptance for artifact loading test")
+        ledger = record_evidence(config, 0, previous_revision, [], report, "https://evidence.synthetic.invalid/stage0", config["governance"]["approverObjectIds"], now)
+        routes = []
+        def api(route):
+            routes.append(route)
+            if "/workflows/" in route:
+                return json.dumps({"workflow_runs": [{"id": 123, "head_sha": previous_revision}]}).encode()
+            return b'{"total_count":1,"artifacts":[{"name":"acceptance-record-test-0-123"}]}'
+        with patch("scripts.workflow_artifacts.read_artifact", return_value={"migration-evidence.json": ledger}) as read:
+            self.assertEqual(load_evidence(config, 1, "a" * 40, api=api), ledger)
+        self.assertNotIn("head_sha=", next(route for route in routes if "/workflows/" in route))
+        read.assert_called_once_with(previous_revision, "123", "customer-acceptance.yml", "acceptance-record-test-0-123", ("migration-evidence.json",), api)
 
     @patch.dict("os.environ", {"GITHUB_REPOSITORY": "synthetic/gateway", "GITHUB_REF": "refs/heads/main"})
     def test_rerecord_initial_stage_drops_obsolete_later_entries_only_for_recording(self):

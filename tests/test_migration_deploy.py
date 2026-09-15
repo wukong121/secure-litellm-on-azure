@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from scripts.customer_migration import ROOT, parameters_for, stage_checks, stage_fingerprint, validate_config
-from scripts.migration_deploy import assert_change_scope, build_plan, deploy_component, group_id, resolve_origin
+from scripts.customer_migration import ROOT, MigrationError, parameters_for, stage_checks, stage_fingerprint, validate_config
+from scripts.migration_deploy import AzureCommands, assert_change_scope, build_plan, deploy_component, group_id, resolve_origin
 from tests.test_customer_migration import certificate_config, customer_config
 
 
@@ -30,6 +30,24 @@ class FakeAzure:
 
 
 class MigrationDeploymentTests(unittest.TestCase):
+    def test_azure_commands_report_operation_and_redact_failure_scope(self):
+        config = customer_config()
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory:
+            azure = AzureCommands(config, Path(directory))
+            with patch("scripts.migration_deploy.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+                with self.assertRaisesRegex(MigrationError, "az aks show returned no JSON output"):
+                    azure.scoped(["aks", "show", "--resource-group", config["target"]["resourceGroup"], "--name", "target-aks"])
+            failure = f"ERROR: (AuthorizationFailed) The client '{config['azure']['tenantId']}' cannot perform Microsoft.ContainerService/managedClusters/read over scope '/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{config['target']['resourceGroup']}'"
+            with patch("scripts.migration_deploy.subprocess.run", return_value=SimpleNamespace(returncode=1, stdout="", stderr=failure)):
+                with self.assertRaises(MigrationError) as raised:
+                    azure.scoped(["aks", "show", "--resource-group", config["target"]["resourceGroup"], "--name", "target-aks"])
+            message = str(raised.exception)
+            self.assertIn("Azure command failed (az aks show)", message)
+            self.assertIn("AuthorizationFailed", message)
+            self.assertIn("Microsoft.ContainerService/managedClusters/read", message)
+            self.assertNotIn(config["azure"]["tenantId"], message)
+            self.assertNotIn(config["azure"]["subscriptionId"], message)
+
     def target_connectivity_config(self):
         config = customer_config()
         config["parameters"]["runner-target-connectivity"] = {

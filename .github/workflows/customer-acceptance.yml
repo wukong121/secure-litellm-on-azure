@@ -82,10 +82,12 @@ jobs:
           python -m scripts.workflow_security run scripts.migration_evidence --operation "$MIGRATION_OPERATION"
           --stage "$MIGRATION_STAGE" --environment "$CUSTOMER_ENVIRONMENT"
       - name: Encrypt draft or generated ledger
+        if: success() || failure()
         env:
           ARTIFACT_NAME: acceptance-${{ inputs.operation == 'confirm' && 'record' || inputs.operation }}-${{ inputs.environment }}-${{ inputs.stage }}-${{ github.run_id }}
-        run: python -m scripts.workflow_security seal --directory temp/migration-evidence --name "$ARTIFACT_NAME" acceptance-report.json migration-evidence.json
+        run: python -m scripts.workflow_security seal --directory temp/migration-evidence --name "$ARTIFACT_NAME" acceptance-report.json migration-evidence.json operation-status.json
       - name: Save encrypted acceptance evidence
+        if: success() || failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: acceptance-${{ inputs.operation == 'confirm' && 'record' || inputs.operation }}-${{ inputs.environment }}-${{ inputs.stage }}-${{ github.run_id }}

@@ -256,11 +256,11 @@ GitHub页面可能把description显示为标签而不是变量名。数字run ID
 
 draft可以在阶段操作前生成，用作检查清单；所有实测完成后才confirm。Stage0备份动作的acceptance-report是观察报告，不能把其runtime run ID直接填进reviewed_run_id。备份报告供核验，confirm引用单独生成的acceptance draft。
 
-阶段N的`preflight`/原`what-if`及实际deploy/execute必须具备0至N-1的通过记录；独立config-check和部署plan不要求验收。记录包含阶段、环境、配置哈希、完整Git SHA、全部checks、与governance匹配的审批者、时间和报告引用。用Customer stage acceptance的draft生成pending报告，实测审核后由已配置的单人操作者confirm生成账本；record保留为外部报告/双人策略兼容入口。后续workflow自动读取同修订的成功加密账本，不需要更新证据Secret，也不需要先伪造passed才能开始阶段0。
+阶段N的`preflight`/原`what-if`及实际deploy/execute必须具备0至N-1的通过记录；独立config-check和部署plan不要求验收。记录包含阶段、环境、配置哈希、验收时Git SHA、全部checks、与governance匹配的审批者、时间和报告引用。用Customer stage acceptance的draft生成pending报告，实测审核后由已配置的单人操作者confirm生成账本；record保留为外部报告/双人策略兼容入口。后续workflow自动读取受保护分支上的成功加密账本：双人模式要求当前SHA，single-operator允许复用先前SHA且仍校验阶段配置、策略、操作者、检查集和7天时效。不需要更新证据Secret，也不需要先伪造passed才能开始阶段0。
 
-新记录使用stage-config绑定，只覆盖当前及前序阶段相关配置，后续PLS/审计身份输出补填不使阶段0失效；旧full-config记录仍可使用。相关配置、审批策略或代码改变后需重新审核，不直接改哈希冒充验收。记录仍限最近7天，长期迁移要复核早期备份和回退有效性。新报告哈希是规范JSON哈希，由工具计算。
+新记录使用stage-config绑定，只覆盖当前及前序阶段相关配置，后续PLS/审计身份输出补填不使阶段0失效；旧full-config记录仍可使用。相关配置或审批策略改变后需重新审核，不直接改哈希冒充验收。single-operator下仅代码提交不会自动使前序记录失效；若代码实际影响已验收行为、检查实现或证据结论，单人操作者负责主动重验。双人模式仍绑定当前SHA。记录仍限最近7天，长期迁移要复核早期备份和回退有效性。新报告哈希是规范JSON哈希，由工具计算。
 
-**合并代码后的重跑边界：** 当前账本和批准plan仍绑定完整Git SHA，新增Stage4证书组件也不例外。已完成Stage0–3时，在新SHA依次draft、复核有效的实际证据、confirm；单人路径共8次验收运行。不必仅因SHA变化重建资源或重做全部备份/恢复，但过期或受影响的检查须重测，源镜像扫描按新SHA重跑。尚未执行的旧plan须重新生成，不能改旧报告的revision或哈希。补parameters.certificate-vault本身不改变Stage0–3的配置指纹；更改早期platform字段则另行复核。
+**合并代码后的重跑边界：** 批准plan仍绑定完整Git SHA，尚未执行的旧plan必须重新生成。single-operator的前序Stage账本不再仅因新提交而失效，无需为无关代码改动依次重跑Stage0–3 draft/confirm；双人模式继续要求当前SHA。两种模式都不能改旧报告的revision或哈希；过期记录、配置指纹变化或实际受代码影响的检查仍须重测。补parameters.certificate-vault本身不改变Stage0–3的配置指纹；更改早期platform字段则另行复核。
 
 **这是人工验收记录，不是自动事实认证**：`independentlyVerified=false`。工具校验清单、代码/配置、时效和已配置操作者，不独立证明技术事实。不要把“workflow绿勾”“resource存在”“本机模拟测试通过”当作所有check均通过；记录实际证据后再确认。阶段N重录会使后续旧账本失效。
 
@@ -851,7 +851,7 @@ az role assignment list --subscription "$TARGET_SUBSCRIPTION_ID" \
 
 确认角色定义只有上述两项Actions且DataActions为空，实际分配指向正确部署Object ID和目标RG；同时核对继承/组授权、条件及有效期。权限传播生效后，从Run workflow新建S4-03（test、stage=4、component=certificate-vault、operation=plan，release=false，两个approved字段及confirm_environment留空）。plan成功并解密审核后，S4-04引用本次成功plan ID执行deploy；这一步不上传证书。
 
-仅补锁权限且代码SHA、阶段配置、artifact key不变时，不需重跑已成功的platform或因此重录验收。文档或代码合并产生新SHA时，deploy前仍按第3节处理证据绑定。个人账号本地plan成功不能替代Actions验证；通用execution-failed不能独立证明锁权限是唯一原因，仍失败时保留新run链接和可用诊断再定位。参考[Azure资源锁权限](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/lock-resources#who-can-create-or-delete-locks)。
+仅补锁权限且代码SHA、阶段配置、artifact key不变时，不需重跑已成功的platform或因此重录验收。文档或代码合并产生新SHA时，deploy前仍按第3节处理证据绑定。个人账号本地plan成功不能替代Actions验证；失败时先读日志中的`Context`、`Result category`、`Error`和`Source`，不能仅凭一个错误类别认定锁权限是唯一原因。仍失败时保留新run链接和加密`operation-status.json`再定位。参考[Azure资源锁权限](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/lock-resources#who-can-create-or-delete-locks)。
 
 #### 4-B. 按顺序运行
 
@@ -874,7 +874,7 @@ az role assignment list --subscription "$TARGET_SUBSCRIPTION_ID" \
 | S4-11 | Customer private runtime operations | 4 | action=private-ingress | plan | 留空 | 留空 |
 | S4-12 | Customer private runtime operations | 4 | action=private-ingress | execute | S4-11的plan ID | test |
 
-**S4-02部分失败时：** 在目标RG → Deployments → `llmgw-<environment>-s4-platform`查看失败子部署及Operation details，不只看GitHub的通用execution-failed。`aksNetwork`若报`AnotherOperationInProgress`，先核对失败子网和错误中指定的网络操作状态；同一VNet的子网并行写入会发生冲突，模板应通过dependsOn依次更新系统、业务、入口子网。即使顶层Failed，Firewall、DNS、Private Endpoint或其他子网也可能已经成功并产生费用，须逐项核对，不能声称自动回滚或删除已成功资源。冲突操作结束、模板修复经审核后，新建S4-01并审核当前状态下的增量变化，再用新的成功plan ID执行S4-02；旧plan和Re-run jobs不能代替重新审批，也不要回放Stage0网络模板或关闭门禁。代码修复合并产生新SHA时，deploy前仍须按第3节复核前序验收；后续AKS/身份资源是否创建以实际状态为准。
+**S4-02部分失败时：** 先读GitHub结构化`Error`和`Source`，再到目标RG → Deployments → `llmgw-<environment>-s4-platform`查看失败子部署及Operation details；公开摘要经过脱敏，不能替代ARM原始详情。`aksNetwork`若报`AnotherOperationInProgress`，先核对失败子网和错误中指定的网络操作状态；同一VNet的子网并行写入会发生冲突，模板应通过dependsOn依次更新系统、业务、入口子网。即使顶层Failed，Firewall、DNS、Private Endpoint或其他子网也可能已经成功并产生费用，须逐项核对，不能声称自动回滚或删除已成功资源。冲突操作结束、模板修复经审核后，新建S4-01并审核当前状态下的增量变化，再用新的成功plan ID执行S4-02；旧plan和Re-run jobs不能代替重新审批，也不要回放Stage0网络模板或关闭门禁。代码修复合并产生新SHA时，deploy前仍须按第3节复核前序验收；后续AKS/身份资源是否创建以实际状态为准。
 
 **S4-04之后、S4-05之前：** 按4-C完成获批证书导入；走临时受限公网路径时随后立即关闭Vault公网，已通过批准私网导入的不重复上传。按4-B1完成S4-04A/04B的Runner到AKS DNS连接；由网络Owner核验管理VNet到新AKS/ACR/证书Vault的路由、Private DNS和允许端口。管理员补齐Kubernetes数据权限后，运行`Customer private runner checks`，environment=test、check_target=true、check_backup=false。该检查不读取证书Secret，Vault访问和CA信任另按4-C核验；私网检查失败不重新开放公网掩盖问题，私有AKS始终不开放公网。
 
@@ -926,9 +926,9 @@ plan会检查原`llmgw-<environment>-s4-platform`部署Succeeded、AKS Running/S
 
 **3. 真实Runner检查与权限。** 管理员按[4-B2](#4-b2-runtime身份的kubernetes预授权)授予runtime身份获批的Kubernetes数据权限，再运行Customer private runner checks：main、test、check_target=true、check_backup=false。Contributor/RBAC Administrator不等于Kubernetes数据角色；该检查需要`litellm`命名空间的Deployment读取，后续cluster-bootstrap创建命名空间另需集群级相应权限，不能把Reader当作全部后续权限。组件不获取kubeconfig、不代替OIDC身份执行kubectl、不自动发起验收。
 
-**已经部署过platform的升级路径：** 本次只增加连接组件、既有platform/certificate-vault仍成功且实际资源与批准配置一致时，**不用重跑platform或certificate-vault部署，也不用重新上传证书**。代码合并到受保护main后，再补新配置并同步Secret；旧代码不认识新字段。按第3节在新完整Git SHA复核Stage0–3实际证据并依次draft/confirm，源镜像扫描按新SHA重跑，过期或受影响项目须实测，不能仅填passed。新块只从Stage4进入配置指纹，不改变Stage0–3的stage-config指纹，但不豁免完整SHA和7天有效期约束；旧full-config账本也不能直接复用。
+**已经部署过platform的升级路径：** 本次只增加连接组件、既有platform/certificate-vault仍成功且实际资源与批准配置一致时，**不用重跑platform或certificate-vault部署，也不用重新上传证书**。代码合并到受保护main后，再补新配置并同步Secret；旧代码不认识新字段。single-operator可直接复用仍在7天内且配置指纹匹配的Stage0–3账本，无需仅因新SHA依次draft/confirm；源镜像或供应链检查逻辑受影响、记录过期或实际结论变化时仍须实测重验。新块只从Stage4进入配置指纹，不改变Stage0–3的stage-config指纹；旧full-config记录只有完整配置哈希仍匹配时才能复用。双人模式继续按第3节在新SHA重验。
 
-随后直接从S4-04A新plan、审核、S4-04B deploy开始，再做Runner检查、S4-05及后续操作。组件读取旧platform的成功部署和当前AKS，不要求旧platform回执SHA等于新SHA；本次deploy仍要求新SHA的Stage0–3验收及本组件匹配plan。若platform失败、有漂移或确实改变了平台参数/模板，另行评估重跑，不能用本段跳过受影响资源的部署。不要回放Stage0网络模板。
+随后直接从S4-04A新plan、审核、S4-04B deploy开始，再做Runner检查、S4-05及后续操作。组件读取旧platform的成功部署和当前AKS，不要求旧platform回执SHA等于新SHA；本次deploy在single-operator下接受有效的旧SHA Stage0–3账本，但仍要求本组件当前SHA的匹配plan。若platform失败、有漂移或确实改变了平台参数/模板，另行评估重跑，不能用本段跳过受影响资源的部署。不要回放Stage0网络模板。
 
 #### 4-B2. runtime身份的Kubernetes预授权
 
@@ -1452,13 +1452,13 @@ DNS回退为同runtime、stage=9、action=dns-rollback，另跑plan/execute并�
 | Azure 403 / Kubernetes Forbidden / PG拒绝 | 本动作实际身份和具体资源范围，ARM/数据平面/Kubernetes/PG分别授权 | 找对应Owner补最小权限；不因为登录成功就授予Owner兜底 |
 | Blob解析公网IP或上传超时 | 管理VNet到备份PE路由、Private DNS、NSG及Blob数据角色 | 不开放Storage公网、不把NAT视为私网接通 |
 | bootstrap plan在旧版本报通用执行错误 | 是否已包含处理What-if delta:null的修复 | 合并修复后新Run workflow，不能重跑旧SHA任务 |
-| 只有execution-failed，无法确定原因 | 保留run链接、输入、SHA和已解密的operation-status/计划状态 | 不能仅凭同一句摘要认定都是配置错；先定位配置、权限或脚本缺陷 |
+| 日志显示失败 | 依次读取`Context`、`Result category`、脱敏`Error`、`Source`，再解密`operation-status.json` | 按具体Azure错误码、命令类别、校验消息及源码位置定位；需要原始云详情时查对应Azure Operation details |
 | Git push main报GH013 | main要求PR | 推工作分支，通过PR合并，不强推或关闭保护 |
 | Bastion命令缺少ssh扩展 | 发起连接机器的Azure CLI扩展 | 同时具备bastion和ssh，不重建Runner |
 
 公开日志中的`***`是遮罩，不表示脚本真的含这些字符；不要照着遮罩日志复制命令。Secrets空白和`***`也不是一回事。不要启用公开shell trace、打印环境变量或上传dump/原始客户配置来定位失败。
 
-当前原始stdout/stderr和命令诊断会被保留在作业私有临时目录，结束时清理，**不在加密artifact中承诺保留完整失败诊断**。作业结束后可能只剩通用状态，应由实施人员在同版本/权限的受控环境做最小复现；本机管理员身份的成功不能代替Actions运行身份。不要为定位错误盲目重跑有副作用的恢复/凭据动作。
+原始stdout/stderr仍只保留在作业私有临时目录并在结束时清理，绝不上传。公开日志和加密`operation-status.json`保留的是同一份有长度限制的脱敏诊断，不是完整失败响应；其中`Source`必须结合该次run的Git SHA阅读。若摘要不足，先查Azure/AKS对应Operation details，或用同版本、同Actions身份在受控环境做只读最小复现；本机管理员身份成功不能代替Actions运行身份。不要为定位错误盲目重跑有副作用的恢复或凭据动作。
 
 ### 6.1 每次运行的记录表
 

@@ -11,6 +11,7 @@ from scripts.customer_migration import (
     ROOT, MigrationError, active_stages, approval_policy, fingerprint, private_write,
     require, stage_checks, stage_fingerprint, stage_title, validate_config, validate_evidence,
 )
+from scripts.workflow_diagnostics import diagnostic_exit
 
 
 def draft_report(config, stage, revision):
@@ -149,6 +150,6 @@ if __name__ == "__main__":
     try:
         main()
     except MigrationError as error:
-        raise SystemExit(str(error)) from None
-    except (ValueError, KeyError, TypeError, OSError):
-        raise SystemExit("Evidence generation failed; check private report and approval inputs. Values are not logged.") from None
+        raise SystemExit(diagnostic_exit(error, "migration-evidence")) from None
+    except Exception as error:
+        raise SystemExit(diagnostic_exit(error, "migration-evidence", "Evidence generation failed")) from None

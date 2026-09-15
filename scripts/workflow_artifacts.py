@@ -1,4 +1,4 @@
-"""Bounded readers for reviewed artifacts from the current protected revision."""
+"""Bounded readers for reviewed artifacts from protected workflow runs."""
 
 import io
 import json
@@ -7,7 +7,7 @@ import re
 import subprocess
 import zipfile
 
-from scripts.customer_migration import fingerprint, private_write, require, stage_fingerprint, validate_evidence
+from scripts.customer_migration import approval_policy, fingerprint, private_write, require, stage_fingerprint, validate_evidence
 
 
 def github_api(path):
@@ -86,11 +86,13 @@ def load_evidence(config, stage, revision, run_id=None, api=github_api, *, prede
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     branch = os.environ.get("GITHUB_REF", "").removeprefix("refs/heads/")
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository), "Evidence loading requires the current private repository")
+    mode, _ = approval_policy(config)
     from urllib.parse import quote
     if run_id:
         candidates = [{"id": run_id}]
     else:
-        response = json.loads(api(f"repos/{repository}/actions/workflows/customer-acceptance.yml/runs?event=workflow_dispatch&status=success&branch={quote(branch, safe='')}&head_sha={revision}&per_page=30"))
+        revision_filter = "" if mode == "single-operator" else f"&head_sha={revision}"
+        response = json.loads(api(f"repos/{repository}/actions/workflows/customer-acceptance.yml/runs?event=workflow_dispatch&status=success&branch={quote(branch, safe='')}{revision_filter}&per_page=30"))
         candidates = response.get("workflow_runs", [])
     for run in candidates[:30]:
         selected = str(run["id"])
@@ -100,7 +102,13 @@ def load_evidence(config, stage, revision, run_id=None, api=github_api, *, prede
         if not names:
             continue
         require(len(names) == 1, "Ambiguous acceptance record artifact")
-        values = read_artifact(revision, selected, "customer-acceptance.yml", names[0], ("migration-evidence.json",), api)
+        artifact_revision = revision
+        if mode == "single-operator":
+            artifact_revision = run.get("head_sha") or ""
+            if re.fullmatch(r"[0-9a-f]{40}", artifact_revision) is None:
+                metadata = json.loads(api(f"repos/{repository}/actions/runs/{selected}"))
+                artifact_revision = metadata.get("head_sha") or ""
+        values = read_artifact(artifact_revision, selected, "customer-acceptance.yml", names[0], ("migration-evidence.json",), api)
         records = values["migration-evidence.json"]
         if predecessors_only:
             require(isinstance(records, list) and all(isinstance(record, dict) and type(record.get("stage")) is int for record in records), "Malformed recorded evidence ledger")
