@@ -6,9 +6,6 @@ param aksClusterName string
 @description('Existing virtual network name.')
 param virtualNetworkName string
 
-@description('Existing private ingress subnet name.')
-param ingressSubnetName string
-
 @description('AKS control-plane managed identity object ID. Leave empty only when deploying this component after the cluster exists.')
 param controlPlanePrincipalId string = ''
 
@@ -25,26 +22,21 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-07-01' existing 
   name: virtualNetworkName
 }
 
-resource ingressSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-07-01' existing = {
-  parent: virtualNetwork
-  name: ingressSubnetName
-}
-
 var resolvedControlPlanePrincipalId = empty(controlPlanePrincipalId) ? cluster.identity.principalId : controlPlanePrincipalId
 
-resource aksIngressSubnetRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource aksNetworkRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(
-    ingressSubnet.id,
+    virtualNetwork.id,
     cluster.id,
     networkContributorRoleId
   )
-  scope: ingressSubnet
+  scope: virtualNetwork
   properties: {
     principalId: resolvedControlPlanePrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: networkContributorRoleId
-    description: 'Allows only the AKS control plane to provision internal load balancers in the private ingress subnet.'
+    description: 'Allows only the AKS control plane to manage node and internal load balancer networking in the dedicated gateway virtual network.'
   }
 }
 
-output roleAssignmentId string = aksIngressSubnetRole.id
+output roleAssignmentId string = aksNetworkRole.id

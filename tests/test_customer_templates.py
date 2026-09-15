@@ -79,7 +79,6 @@ class CustomerTemplateTests(unittest.TestCase):
         self.assertEqual(parameters, {
             "aksClusterName": platform["stage4Aks"]["name"],
             "virtualNetworkName": platform["stage4Network"]["virtualNetworkName"],
-            "ingressSubnetName": platform["stage4Network"]["ingressSubnetName"],
         })
         for stage in (0, 3, 5):
             with self.subTest(stage=stage), self.assertRaises(ValueError):
@@ -120,23 +119,23 @@ class CustomerTemplateTests(unittest.TestCase):
         self.assertEqual(mode["defaultValue"], "principal-id")
         self.assertEqual(set(mode["allowedValues"]), {"principal-id", "resource-id"})
 
-        ingress_module = compiled["resources"]["aksIngressSubnetRole"]
-        self.assertEqual(ingress_module["properties"]["parameters"]["aksClusterName"]["value"], "[parameters('stage4Aks').name]")
-        ingress_principal = ingress_module["properties"]["parameters"]["controlPlanePrincipalId"]["value"]
-        self.assertIn("reference('privateAks')", ingress_principal)
-        self.assertIn("controlPlanePrincipalId", ingress_principal)
-        ingress_template = ingress_module["properties"]["template"]
-        ingress_roles = [resource for resource in ingress_template["resources"] if resource["type"] == "Microsoft.Authorization/roleAssignments"]
-        self.assertEqual(len(ingress_roles), 1)
-        ingress_assignment = ingress_roles[0]
-        ingress_scope = "resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('virtualNetworkName'), parameters('ingressSubnetName'))"
-        self.assertEqual(ingress_assignment["scope"], f"[{ingress_scope}]")
-        self.assertEqual(ingress_assignment["name"], f"[guid({ingress_scope}, resourceId('Microsoft.ContainerService/managedClusters', parameters('aksClusterName')), variables('networkContributorRoleId'))]")
-        ingress_role_principal = ingress_assignment["properties"]["principalId"]
-        self.assertIn("reference(resourceId('Microsoft.ContainerService/managedClusters'", ingress_role_principal)
-        self.assertIn("parameters('controlPlanePrincipalId')", ingress_role_principal)
-        self.assertEqual(ingress_assignment["properties"]["principalType"], "ServicePrincipal")
-        self.assertIn("4d97b98b-1d4f-4787-a291-c67834d212e7", ingress_template["variables"]["networkContributorRoleId"])
+        network_module = compiled["resources"]["aksNetworkRole"]
+        self.assertEqual(network_module["properties"]["parameters"]["aksClusterName"]["value"], "[parameters('stage4Aks').name]")
+        network_principal = network_module["properties"]["parameters"]["controlPlanePrincipalId"]["value"]
+        self.assertIn("reference('privateAks')", network_principal)
+        self.assertIn("controlPlanePrincipalId", network_principal)
+        network_template = network_module["properties"]["template"]
+        network_roles = [resource for resource in network_template["resources"] if resource["type"] == "Microsoft.Authorization/roleAssignments"]
+        self.assertEqual(len(network_roles), 1)
+        network_assignment = network_roles[0]
+        network_scope = "resourceId('Microsoft.Network/virtualNetworks', parameters('virtualNetworkName'))"
+        self.assertEqual(network_assignment["scope"], f"[{network_scope}]")
+        self.assertEqual(network_assignment["name"], f"[guid({network_scope}, resourceId('Microsoft.ContainerService/managedClusters', parameters('aksClusterName')), variables('networkContributorRoleId'))]")
+        network_role_principal = network_assignment["properties"]["principalId"]
+        self.assertIn("reference(resourceId('Microsoft.ContainerService/managedClusters'", network_role_principal)
+        self.assertIn("parameters('controlPlanePrincipalId')", network_role_principal)
+        self.assertEqual(network_assignment["properties"]["principalType"], "ServicePrincipal")
+        self.assertIn("4d97b98b-1d4f-4787-a291-c67834d212e7", network_template["variables"]["networkContributorRoleId"])
 
         contracts = (
             ("acrPullRole", "Microsoft.ContainerService/managedClusters", "kubeletPrincipalId", "kubeletObjectId", "Microsoft.ContainerRegistry/registries", "registryName", "acrPullRoleId", "7f951dda-4ed3-4680-a7ca-43fe172d538d"),

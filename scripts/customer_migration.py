@@ -352,7 +352,6 @@ def parameters_for(config, stage, component):
         parameters.update(
             aksClusterName=platform["stage4Aks"]["name"],
             virtualNetworkName=network["virtualNetworkName"],
-            ingressSubnetName=network["ingressSubnetName"],
         )
     elif component == "runner-connectivity":
         from scripts.runner_connectivity import connectivity_parameters

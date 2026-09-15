@@ -56,21 +56,20 @@ class MigrationDeploymentTests(unittest.TestCase):
         }
         return config
 
-    def test_aks_ingress_role_change_scope_is_exact(self):
+    def test_aks_network_role_change_scope_is_exact(self):
         config = customer_config()
         network = config["parameters"]["platform"]["stage4Network"]
         network["ingressSubnetName"] = "snet-ingress"
         network["systemSubnetName"] = "snet-system"
         scope = (
             group_id(config) + "/providers/Microsoft.Network/virtualNetworks/" + network["virtualNetworkName"]
-            + "/subnets/" + network["ingressSubnetName"]
         )
         assignment = scope + "/providers/Microsoft.Authorization/roleAssignments/11111111-2222-4333-8444-555555555555"
         change = {"resourceId": assignment, "changeType": "Create"}
         assert_change_scope(config, "aks-ingress-role", [change])
         for identifier in (
             scope,
-            scope.replace(network["ingressSubnetName"], network["systemSubnetName"]) + "/providers/Microsoft.Authorization/roleAssignments/11111111-2222-4333-8444-555555555555",
+            scope + "/subnets/" + network["systemSubnetName"] + "/providers/Microsoft.Authorization/roleAssignments/11111111-2222-4333-8444-555555555555",
             scope + "/providers/Microsoft.Authorization/locks/11111111-2222-4333-8444-555555555555",
             assignment + "-extra",
         ):
