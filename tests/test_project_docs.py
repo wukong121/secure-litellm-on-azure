@@ -34,6 +34,97 @@ READMES = (
 
 
 class ProjectDocumentationTests(unittest.TestCase):
+    def test_runtime_kubernetes_authorization_is_identity_and_scope_specific(self):
+        import subprocess
+
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        section = guide.split("#### 4-B2. runtime身份的Kubernetes预授权", 1)[1].split("#### 4-C.", 1)[0]
+        self.assertIn("#4-b2-runtime身份的kubernetes预授权", guide)
+        for value in ("AZURE_RUNTIME_CLIENT_ID", "RUNTIME_OBJECT_ID", "不是`AZURE_CLIENT_ID`", "aadProfile.enableAzureRbac=true", "roleDefinitions/write", "roleAssignments/write", "所有Namespace", "Pod Security", "ServiceAccount", "SecretProviderClass", "不能创建Namespace", "不会收紧", "个人管理员kubectl成功不能代替", "不要求重部署platform"):
+            self.assertIn(value, section)
+        definition = json.loads(re.search(r"```json\n(.*?)\n```", section, re.S)[1])["properties"]
+        self.assertEqual(definition["roleName"], "LLMGW AKS Namespace Bootstrapper")
+        self.assertEqual(definition["assignableScopes"], ["/subscriptions/REPLACE_TARGET_SUBSCRIPTION_ID/resourceGroups/REPLACE_TARGET_RESOURCE_GROUP"])
+        self.assertEqual(definition["permissions"], [{
+            "actions": [], "notActions": [], "dataActions": [
+                "Microsoft.ContainerService/managedClusters/namespaces/read",
+                "Microsoft.ContainerService/managedClusters/namespaces/write",
+            ], "notDataActions": [],
+        }])
+        snippets = re.findall(r"```bash\n(.*?)\n```", section, re.S)
+        self.assertEqual(len(snippets), 4)
+        for source in snippets:
+            self.assertTrue(source.startswith("set -euo pipefail\n"))
+            self.assertNotIn("|| break", source)
+            result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("--admin", source)
+            self.assertNotIn("get-access-token", source)
+            self.assertNotIn("role assignment delete", source)
+        self.assertIn('--id "$RUNTIME_CLIENT_ID"', snippets[0])
+        self.assertIn('"${AKS_ID}/namespaces/litellm"', snippets[1])
+        self.assertIn('"Azure Kubernetes Service RBAC Reader"', snippets[1])
+        self.assertIn("for NAMESPACE in llm-api-ingress llm-admin-ingress; do", snippets[2])
+        self.assertIn('--scope "${AKS_ID}/namespaces/${NAMESPACE}"', snippets[2])
+        self.assertIn('"Azure Kubernetes Service RBAC Writer"', snippets[2])
+        for source in snippets[1:3]:
+            self.assertIn('--assignee-object-id "$RUNTIME_OBJECT_ID" --assignee-principal-type ServicePrincipal', source)
+        self.assertIn("--include-inherited", snippets[3])
+        self.assertIn("--fill-principal-name false", snippets[3])
+
+    def test_target_connectivity_workflow_and_upgrade_instructions_match(self):
+        import subprocess
+        from scripts.customer_migration import COMPONENTS
+
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        section = guide.split("#### 4-B1. Runner到新AKS的DNS连接", 1)[1].split("#### 4-B2.", 1)[0]
+        example = json.loads((ROOT / "config/customer.example.json").read_text())
+        self.assertEqual(set(example["parameters"]["runner-target-connectivity"]), COMPONENTS["runner-target-connectivity"][2])
+        self.assertEqual(COMPONENTS["runner-target-connectivity"][0], 4)
+        for filename in ("customer-deploy.yml", "customer-migration.yml"):
+            workflow = yaml.load((ROOT / ".github/workflows" / filename).read_text(), Loader=yaml.BaseLoader)
+            self.assertIn("runner-target-connectivity", workflow["on"]["workflow_dispatch"]["inputs"]["component"]["options"])
+        self.assertIn("connectivity-review.json", (ROOT / ".github/workflows/customer-deploy.yml").read_text())
+        self.assertNotIn("runner-target-connectivity", (ROOT / ".github/workflows/customer-runner-checks.yml").read_text())
+        for value in ("AZURE_CLIENT_ID", "节点RG", "join/action", "manageDnsLink", "privateFqdn", "nodeResourceGroup", "S4-04A", "S4-04B", "关闭自动注册", "不用重跑platform或certificate-vault", "新完整Git SHA", "Stage0–3", "源镜像扫描", "7天", "不能仅填passed", "旧platform回执SHA", "不自动覆盖A记录", "只允许", "reused", "external"):
+            self.assertIn(value, section)
+        self.assertLess(guide.index("| S4-04B |"), guide.index("| S4-05 |"))
+        settings = json.loads("{" + re.search(r"```json\n(.*?)\n```", section, re.S)[1] + "}")
+        self.assertEqual(settings["runner-target-connectivity"], example["parameters"]["runner-target-connectivity"])
+        for source in re.findall(r"```bash\n(.*?)\n```", section, re.S):
+            self.assertEqual(subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True).returncode, 0)
+
+    def test_certificate_lock_permissions_are_explicit_and_target_scoped(self):
+        import subprocess
+
+        guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        section = guide.split("#### 4-A1. 证书Vault防删除锁权限", 1)[1].split("#### 4-B.", 1)[0]
+        self.assertIn("#4-a1-证书vault防删除锁权限", guide)
+        self.assertLess(guide.index("#### 4-A1."), guide.index("| S4-03 |"))
+        definition = json.loads(re.search(r"```json\n(.*?)\n```", section, re.S).group(1))["properties"]
+        self.assertEqual(definition["roleName"], "LLMGW Resource Lock Writer")
+        self.assertEqual(definition["assignableScopes"], ["/subscriptions/REPLACE_TARGET_SUBSCRIPTION_ID/resourceGroups/REPLACE_TARGET_RESOURCE_GROUP"])
+        self.assertEqual(definition["permissions"], [{
+            "actions": ["Microsoft.Authorization/locks/read", "Microsoft.Authorization/locks/write"],
+            "notActions": [], "dataActions": [], "notDataActions": [],
+        }])
+        template = (ROOT / "infra/certificate-vault/main.bicep").read_text()
+        self.assertIn("resource deleteLock 'Microsoft.Authorization/locks@", template)
+        for value in ("protect-key-vault-from-deletion", "CanNotDelete"):
+            self.assertIn(value, template)
+            self.assertIn(value, section)
+        for required in ("AZURE_CLIENT_ID", "DEPLOY_OBJECT_ID", "不是Client ID本身", "不是模型所在RG", "roleDefinitions/write", "locks/delete", "不是只允许某一个Vault锁", "权限传播", "新建S4-03", "新SHA", "不需重跑已成功的platform", "唯一原因"):
+            self.assertIn(required, section)
+        snippets = re.findall(r"```bash\n(.*?)\n```", section, re.S)
+        self.assertEqual(len(snippets), 1)
+        source = snippets[0]
+        result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for required in ("--subscription", '--assignee-object-id "$DEPLOY_OBJECT_ID"', '--scope "$TARGET_RG_SCOPE"', "--include-inherited", "--fill-principal-name false"):
+            self.assertIn(required, source)
+        for forbidden in ("role assignment create", "role definition create", "az lock", "get-access-token", "--debug"):
+            self.assertNotIn(forbidden, source)
+
     def test_stage4_partial_network_failure_requires_replanning(self):
         guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
         section = guide.split("**S4-02部分失败时：**", 1)[1].split("**S4-04之后", 1)[0]
@@ -100,18 +191,74 @@ class ProjectDocumentationTests(unittest.TestCase):
         for value in (*settings, "Secrets User", "Secrets Officer", "certificateMaterialsImported=false", "25KB", "S4-03", "S4-04", "S4-11", "S4-12", "Object ID", "不打开Vault公网", "CA的私钥独立保管"):
             self.assertIn(value, section)
         snippets = re.findall(r"```bash\n(.*?)\n```", section.split("#### 4-C.", 1)[1], re.S)
-        self.assertEqual(len(snippets), 3)
+        self.assertEqual(len(snippets), 7)
         for source in snippets:
             result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
-        upload = snippets[-1]
+        for value in ("两个Secret，不是两张新证书", "admin-ca.key", "admin.csr", "没有中间链", "上传不需要登录Runner", "客户本机上传", "公有CA签发", "企业PKI签发", "不是已签发证书", "不返回值", "Secret Identifier"):
+            self.assertIn(value, section)
+        for value in ("specific virtual networks and IP addresses", "实际公网出口IPv4", "/32", "Microsoft.KeyVault/vaults/write", "无论上传成功、失败或中断", "Disable public access", "ipRules=[]", "bypass=None", "网络策略拒绝", "certificates.api/admin.secretId", "applied=true", "verified=true"):
+            self.assertIn(value, section)
+        self.assertLess(section.index("**6. 立即关闭公网"), section.index("**7. 验证上传材料"))
+        commands = "\n".join(snippets)
+        for forbidden in ("az network bastion", "scp -P", "AZURE_CONFIG_DIR", "az keyvault update", "az keyvault secret show"):
+            self.assertNotIn(forbidden, commands)
+        login = snippets[4]
+        self.assertTrue(login.startswith("set -euo pipefail\n"))
+        for value in ("az login --tenant", "az ad signed-in-user show", 'API_PEM_FILE="temp/certificate-import/api.pem"', "az keyvault secret list"):
+            self.assertIn(value, login)
+        upload = snippets[5]
         self.assertEqual(upload.count("az keyvault secret set"), 2)
         self.assertEqual(upload.count("--query '{id:id,enabled:attributes.enabled}'"), 2)
         self.assertNotIn("--value", upload)
         self.assertNotIn("certificate import", upload)
+        self.assertIn("az keyvault show", snippets[6])
+        self.assertIn("publicNetworkAccess:properties.publicNetworkAccess", snippets[6])
         reference = (ROOT / "docs/customer-deployment-workflows-zh.md").read_text()
         self.assertIn("customer-migration-guide-zh.md#4-a-共用证书vault的配置与取值", reference)
+        self.assertIn("customer-migration-guide-zh.md#4-c-部署后手动导入两个secret", reference)
+        self.assertIn("立即关闭公网并清除临时IP规则", reference)
+        template = (ROOT / "infra/certificate-vault/main.bicep").read_text()
+        self.assertIn("publicNetworkAccess: 'Disabled'", template)
+        self.assertIn("bypass: 'None'", template)
         self.assertIn("infra/certificate-vault/main.bicep", (ROOT / "scripts/validate-stage4.sh").read_text())
+
+    def test_documented_certificate_creation_produces_valid_csr_and_admin_leaf(self):
+        import subprocess
+        import tempfile
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+        from scripts.private_ingress import certificate_material
+
+        section = (ROOT / "docs/customer-migration-guide-zh.md").read_text().split("#### 4-C.", 1)[1]
+        snippets = re.findall(r"```bash\n(.*?)\n```", section, re.S)
+        api_source = snippets[1].replace("REPLACE_BASE_DOMAIN_FROM_CUSTOMER_JSON", "customer.invalid")
+        admin_source = snippets[2].replace("REPLACE_BASE_DOMAIN_FROM_CUSTOMER_JSON", "customer.invalid")
+        self.assertIn("openssl req -x509 -newkey", admin_source)
+        admin_source = admin_source.replace("openssl req -x509", "openssl req -passout pass:synthetic-test-only -x509", 1)
+        admin_source = admin_source.replace("openssl x509 -req", "openssl x509 -passin pass:synthetic-test-only -req", 1)
+        with tempfile.TemporaryDirectory() as directory:
+            for source in (api_source, admin_source):
+                result = subprocess.run(["bash"], input=source, cwd=directory, capture_output=True, text=True, timeout=60, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            api_directory = next((Path(directory) / "temp").glob("api-csr.*"))
+            csr = x509.load_pem_x509_csr((api_directory / "api.csr").read_bytes())
+            self.assertTrue(csr.is_signature_valid)
+            self.assertEqual(csr.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName), ["llm-api.customer.invalid"])
+            api_key = serialization.load_pem_private_key((api_directory / "api.key").read_bytes(), password=None)
+            self.assertEqual(api_key.public_key().public_numbers(), csr.public_key().public_numbers())
+            admin_directory = next((Path(directory) / "temp").glob("admin-pki.*"))
+            self.assertEqual(admin_directory.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((admin_directory / "admin.key").stat().st_mode & 0o777, 0o600)
+            self.assertIn(b"BEGIN ENCRYPTED PRIVATE KEY", (admin_directory / "admin-ca.key").read_bytes())
+            certificate = x509.load_pem_x509_certificate((admin_directory / "admin.crt").read_bytes())
+            self.assertFalse(certificate.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
+            self.assertIn(ExtendedKeyUsageOID.SERVER_AUTH, certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value)
+            bundle = (admin_directory / "admin.crt").read_text() + "\n" + (admin_directory / "admin.key").read_text()
+            self.assertLess(len(bundle.encode()), 25 * 1024)
+            material = certificate_material(bundle, "llm-admin.customer.invalid")
+            self.assertRegex(material["sha256"], r"^[0-9a-f]{64}$")
 
     def test_manual_certificate_validation_outputs_metadata_only_and_rejects_oversize(self):
         import io

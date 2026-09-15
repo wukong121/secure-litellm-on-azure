@@ -28,10 +28,27 @@ def example_customer():
     config["parameters"]["platform"]["stage4Aks"]["name"] = "synthetic-new-aks"
     config["parameters"]["certificate-vault"] = certificate_config()["parameters"]["certificate-vault"]
     config["parameters"]["runner-connectivity"]["runnerVirtualNetworkId"] = config["parameters"]["certificate-vault"]["runnerVirtualNetworkId"]
+    config["parameters"]["runner-target-connectivity"]["runnerVirtualNetworkId"] = config["parameters"]["certificate-vault"]["runnerVirtualNetworkId"]
     return validate_config(config, "test")
 
 
 class CustomerTemplateTests(unittest.TestCase):
+    def test_target_connectivity_only_manages_the_resolved_dns_link(self):
+        result = subprocess.run(["az", "bicep", "build", "--file", str(ROOT / "infra/runner-target-connectivity/main.bicep"), "--stdout"], capture_output=True, text=True, check=True)
+        compiled = json.loads(result.stdout)
+        self.assertEqual(len(compiled["resources"]), 1)
+        module = compiled["resources"][0]
+        self.assertEqual(module["type"], "Microsoft.Resources/deployments")
+        self.assertEqual(module["resourceGroup"], "[parameters('dnsResourceGroupName')]")
+        self.assertEqual(module["condition"], "[and(parameters('manageDnsLink'), parameters('createDnsLink'))]")
+        self.assertEqual(module["properties"]["mode"], "Incremental")
+        resources = module["properties"]["template"]["resources"]
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0]["type"], "Microsoft.Network/privateDnsZones/virtualNetworkLinks")
+        self.assertFalse(resources[0]["properties"]["registrationEnabled"])
+        self.assertEqual(resources[0]["properties"]["resolutionPolicy"], "Default")
+        self.assertEqual(resources[0]["properties"]["virtualNetwork"]["id"], "[parameters('runnerVirtualNetworkId')]")
+
     def test_aks_subnet_writes_are_serialized_without_replacing_vnet(self):
         result = subprocess.run(["az", "bicep", "build", "--file", str(ROOT / "infra/modules/aks-network/main.bicep"), "--stdout"], capture_output=True, text=True, check=True)
         compiled = json.loads(result.stdout)
