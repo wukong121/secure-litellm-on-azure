@@ -214,6 +214,7 @@ resource clusterDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-pr
 output aks object = {
   id: cluster.id
   name: cluster.name
+  controlPlanePrincipalId: cluster.identity.principalId
   oidcIssuerUrl: cluster.properties.oidcIssuerProfile.issuerURL
   kubeletObjectId: cluster.properties.identityProfile.kubeletidentity.objectId
   systemSubnetId: systemSubnetId

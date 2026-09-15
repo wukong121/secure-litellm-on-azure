@@ -257,6 +257,15 @@ module privateAks '../modules/private-aks/main.bicep' = if (deployStage4) {
   }
 }
 
+module aksIngressSubnetRole '../aks-ingress-role/main.bicep' = if (deployStage4) {
+  params: {
+    aksClusterName: stage4Aks.name
+    virtualNetworkName: stage4Network.virtualNetworkName
+    ingressSubnetName: stage4Network.ingressSubnetName
+    controlPlanePrincipalId: privateAks!.outputs.aks.controlPlanePrincipalId
+  }
+}
+
 module workloadIdentity '../modules/workload-identity/main.bicep' = if (deployStage4) {
   params: {
     identityName: 'id-litellm-workload-${environmentName}'

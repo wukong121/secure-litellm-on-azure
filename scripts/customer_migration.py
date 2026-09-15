@@ -37,6 +37,7 @@ COMPONENTS = {
     "legacy-logging": (1, "legacy-logging", {"workspaceMode"}),
     "monitoring": (1, "monitoring", {"logAnalyticsWorkspaceName"}),
     "platform": (3, "environments", {"containerRegistryName", "logAnalyticsWorkspaceName", "stage4Network", "stage4Aks", "stage4RoleAssignmentNaming", "stage5Data", "approvedHttpsFqdns", "azureOpenAIConnections", "createStage5KeyVaultPrivateDnsZone", "createStage5PostgresqlPrivateDnsZone", "createStage5ManagedRedisPrivateDnsZone"}),
+    "aks-ingress-role": (4, "aks-ingress-role", set()),
     "certificate-vault": (4, "certificate-vault", {"vaultName", "ingressReaderPrincipalId", "certificateImporterPrincipalId", "certificateImporterPrincipalType", "runnerVirtualNetworkId", "createPrivateDnsZone", "manageRunnerDnsLink", "manageTargetDnsLink"}),
     "runner-target-connectivity": (4, "runner-target-connectivity", {"runnerVirtualNetworkId", "manageDnsLink"}),
     "audit-foundation": (8, "audit-foundation", set()),
@@ -54,6 +55,7 @@ REQUIRED = {
     "runner-connectivity": {"runnerVirtualNetworkId"},
     "monitoring": {"logAnalyticsWorkspaceName"},
     "platform": {"containerRegistryName", "logAnalyticsWorkspaceName", "stage4Network", "stage4Aks"},
+    "aks-ingress-role": set(),
     "certificate-vault": {"vaultName", "ingressReaderPrincipalId", "certificateImporterPrincipalId", "certificateImporterPrincipalType", "runnerVirtualNetworkId", "createPrivateDnsZone", "manageRunnerDnsLink"},
     "runner-target-connectivity": {"runnerVirtualNetworkId"},
     "audit-foundation": set(),
@@ -344,6 +346,14 @@ def parameters_for(config, stage, component):
         parameters.update(environmentName=config["environment"], deployContainerRegistry=True, deployStage4=stage >= 4, deployStage5=stage >= 5, containerRegistryPublicNetworkAccess="Disabled")
     elif component == "backup":
         parameters["backupOwnerUpn"] = config["ownerEmail"]
+    elif component == "aks-ingress-role":
+        platform = config["parameters"]["platform"]
+        network = platform["stage4Network"]
+        parameters.update(
+            aksClusterName=platform["stage4Aks"]["name"],
+            virtualNetworkName=network["virtualNetworkName"],
+            ingressSubnetName=network["ingressSubnetName"],
+        )
     elif component == "runner-connectivity":
         from scripts.runner_connectivity import connectivity_parameters
         parameters = connectivity_parameters(config)
@@ -380,9 +390,10 @@ def parameters_for(config, stage, component):
         parameters["deployPrivateOrigin"] = True
     elif component == "edge":
         parameters.update(deployEdge=True, enableApiTraffic=False, environmentName=config["environment"], baseDomain=config["baseDomain"], wafMode="Detection")
-    if component != "edge":
+    if component not in {"edge", "aks-ingress-role"}:
         parameters["location"] = config["location"]
-    parameters["tags"] = {"owner": config["ownerEmail"], "environment": config["environment"], "workload": "litellm", "managedBy": "bicep"}
+    if component != "aks-ingress-role":
+        parameters["tags"] = {"owner": config["ownerEmail"], "environment": config["environment"], "workload": "litellm", "managedBy": "bicep"}
     return ROOT / f"infra/{template}/main.bicep", {
         "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
         "contentVersion": "1.0.0.0",

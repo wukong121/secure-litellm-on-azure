@@ -27,6 +27,9 @@ def group_id(config, legacy=False):
 def assert_change_scope(config, component, changes, connectivity=None):
     allowed_types = {"Create", "Modify", "NoChange", "Ignore"}
     allowed_group = group_id(config, component in {"monitoring", "legacy-logging"}).lower()
+    if component == "aks-ingress-role":
+        actionable = [change for change in changes if change.get("changeType") not in {"NoChange", "Ignore"}]
+        require(len(actionable) <= 1, "AKS ingress role plan must contain at most one change")
     external_accounts = {
         connection["accountResourceId"].rstrip("/").lower()
         for connection in config["parameters"].get("platform", {}).get("azureOpenAIConnections", [])
@@ -48,6 +51,15 @@ def assert_change_scope(config, component, changes, connectivity=None):
             from scripts.runner_connectivity import connectivity_resource_ids
             require(connectivity is not None, "Connectivity changes require resolved backup resources")
             require(resource in connectivity_resource_ids(config, connectivity["privateDnsZoneName"]), "Connectivity plan attempts to modify an unapproved resource")
+            continue
+        if component == "aks-ingress-role":
+            network = config["parameters"]["platform"]["stage4Network"]
+            prefix = (
+                allowed_group + "/providers/microsoft.network/virtualnetworks/" + network["virtualNetworkName"].lower()
+                + "/subnets/" + network["ingressSubnetName"].lower()
+                + "/providers/microsoft.authorization/roleassignments/"
+            )
+            require(resource.startswith(prefix) and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", resource.removeprefix(prefix)), "AKS ingress role plan attempts to modify an unapproved resource")
             continue
         local = resource.startswith(allowed_group + "/") or (component == "bootstrap" and resource == allowed_group)
         external_role = component == "platform" and any(
