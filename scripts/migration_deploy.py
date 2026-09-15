@@ -35,6 +35,10 @@ def assert_change_scope(config, component, changes, connectivity=None):
         if change["changeType"] in {"NoChange", "Ignore"}:
             continue
         resource = change.get("resourceId", "").lower()
+        if component == "runner-target-connectivity":
+            from scripts.runner_target_connectivity import target_connectivity_resource_ids
+            require(resource in target_connectivity_resource_ids(config, connectivity), "Target connectivity plan attempts to modify an unapproved resource")
+            continue
         if component == "certificate-vault":
             from scripts.certificate_vault import certificate_resource_ids
             require(resource in certificate_resource_ids(config), "Certificate plan attempts to modify an unapproved resource")
@@ -198,8 +202,17 @@ def deploy_component(config, stage, component, revision, operation, previous, di
     if component == "runner-connectivity":
         from scripts.runner_connectivity import inspect_connectivity
         connectivity = inspect_connectivity(config, azure)
+    if component == "runner-target-connectivity":
+        from scripts.runner_target_connectivity import inspect_target_connectivity
+        connectivity = inspect_target_connectivity(config, azure)
     resolved = resolve_origin(config, component, azure)
     template, path = prepare(resolved, stage, component, directory)
+    if component == "runner-target-connectivity":
+        document = json.loads(path.read_text())
+        for key in ("createDnsLink", "dnsResourceGroupName", "privateDnsZoneName", "linkName", "aksResourceId", "apiHostname"):
+            document["parameters"][key] = {"value": connectivity[key]}
+        private_write(path, json.dumps(document, indent=2) + "\n")
+        private_write(directory / "connectivity-review.json", json.dumps(connectivity, indent=2) + "\n")
     if release is not None:
         from scripts.stage9_release import validate_release
         require(stage == 9 and component == "edge", "Release operation only applies to Stage 9 edge")
@@ -249,6 +262,9 @@ def deploy_component(config, stage, component, revision, operation, previous, di
         create_args.extend(["--mode", "Incremental"])
     deployed = azure.scoped(create_args)
     require(deployed.get("properties", {}).get("provisioningState") == "Succeeded", "Deployment did not succeed; no acceptance evidence created")
+    if component == "runner-target-connectivity":
+        verified = inspect_target_connectivity(config, azure, require_link=True)
+        require(verified == connectivity, "AKS DNS context changed during deployment; inspect connectivity before proceeding")
     receipt = {key: plan[key] for key in ("stage", "component", "environment", "revision", "configSha256", "planSha256")}
     receipt.update(deploymentId=deployed.get("id"), provisioningState="Succeeded", stageAccepted=False)
     private_write(directory / "deployment-outputs.json", json.dumps(deployed.get("properties", {}).get("outputs", {}), indent=2) + "\n")

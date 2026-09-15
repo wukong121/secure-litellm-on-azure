@@ -79,6 +79,10 @@
       "manageTargetDnsLink": true,
       "manageRunnerDnsLink": true
     },
+    "runner-target-connectivity": {
+      "runnerVirtualNetworkId": "REPLACE_RUNNER_VNET_RESOURCE_ID",
+      "manageDnsLink": true
+    },
     "audit": {
       "virtualNetworkName": "REPLACE_TARGET_VNET",
       "privateEndpointSubnetName": "snet-private-endpoints",

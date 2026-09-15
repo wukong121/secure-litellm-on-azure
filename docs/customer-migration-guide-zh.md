@@ -1,6 +1,6 @@
 # 客户既有LiteLLM迁移执行手册：架构阶段0与阶段1
 
-> 核对日期：2026-09-14。本文是按当前workflow输入及控制代码核对的主操作手册，不是客户云上全流程已经验收的证明。
+> 核对日期：2026-09-15。本文是按当前workflow输入及控制代码核对的主操作手册，不是客户云上全流程已经验收的证明。
 >
 > 适用：已有LiteLLM on AKS，先加固旧环境，再并行新建、迁移、验证、切流和停旧。示例统一使用GitHub Environment `test`；客户实际用`prod`时须整套一致替换，不混用环境。
 >
@@ -121,9 +121,10 @@
 | deploy，Stage0/bootstrap | 订阅范围的RG创建/嵌套部署及目标日志资源部署；plan的What-if也需相应权限 | Reader不够；不默认授予订阅Owner |
 | deploy，backup/platform等 | 批准目标RG内的资源部署；涉及角色分配需相应受控RBAC管理权限；旧监控另外限定旧RG | Contributor不含角色分配；跨订阅模型角色须在对应账号范围另行授权 |
 | deploy，Stage0/runner-connectivity | 两个指定VNet的读取及Peering写入/peer权限、目标Blob DNS zone的链接管理、Runner VNet的join权限；两侧RG内所需ARM部署/What-if权限 | 不修改整个VNet、NSG或路由；此组件不自行授予网络权限，详见0-A2 |
-| deploy，Stage4/certificate-vault | 目标RG的Vault/PE/DNS/诊断/锁部署和Vault范围角色分配；读取两个VNet及DNS链接，获准链接的VNet join权限 | 不导入证书，不自动授予部署身份Secret读取权；不是订阅Owner授权 |
+| deploy，Stage4/certificate-vault | 目标RG的Vault/PE/DNS/诊断部署、`Microsoft.Authorization/locks/read`及`Microsoft.Authorization/locks/write`、Vault范围角色分配；读取两个VNet及DNS链接，获准链接的VNet join权限 | Contributor加RBAC Administrator不包含锁写权限，按[4-A1](#4-a1-证书vault防删除锁权限)补齐；不导入证书，不自动授予部署身份Secret读取权 |
+| deploy，Stage4/runner-target-connectivity | 读取原platform部署、AKS/节点池、节点RG内API PE/NIC、实际DNS区域/记录/链接及Runner VNet；目标RG及DNS所在RG的ARM部署/What-if权限、该zone的链接写入及Runner VNet join权限 | AKS系统DNS通常在节点RG，只有目标RG Contributor未必够；管理员按[4-B1](#4-b1-runner到新aks的dns连接)预授权，不由workflow自行提权，也不授予Kubernetes数据权限 |
 | runtime，Runner检查/备份 | 旧AKS读取、Cluster User凭据获取及Kubernetes Deployment/Pod读取；备份另需postgres exec/cp、目标部署输出读取、Blob容器数据读写 | ARM权限不等于Kubernetes RBAC或Storage数据权限 |
-| runtime，新环境发布 | 目标AKS/命名空间发布、指定Vault访问、镜像读写及目标RG操作回执权限，随动作授权 | 不给日常应用身份DDL或管理权限 |
+| runtime，新环境发布 | 按[4-B2](#4-b2-runtime身份的kubernetes预授权)准备目标AKS用户凭据、Namespace初始化和命名空间内读写权限；指定Vault、镜像及目标RG回执另行授权 | 不给日常应用身份DDL或管理权限；Azure Contributor不能代替Kubernetes数据权限 |
 | database，Stage5/database-roles | 配置为PG Entra管理员服务主体或其获准管理员组成员，能建立新库角色及授权 | 个人User管理员不能通过服务主体OIDC模拟；不能直接填个人UPN |
 | Entra bootstrap / access，Stage7 | 前者获批应用创建/凭据管理，后者获批角色分配/委托同意；具体Graph权限见Stage7参考 | Azure RG RBAC不能约束或代替租户级Graph授权 |
 | certificate，选择自动签发时 | 批准DNS TXT及API证书/ACME状态Secret权限 | 不授予admin证书或后台Master/Salt读取权限 |
@@ -146,7 +147,7 @@
 | Stage1 | parameters.monitoring、可选parameters.legacy-logging、legacyAccess | 旧日志工作区及真实批准来源；旧/新工作区不同不代表重复 |
 | Stage2 | contentAudit | 本文采用native；此后正文决策绑定证据 |
 | Stage3 | parameters.platform的ACR/日志名及stage4Network、stage4Aks | 这些网络/集群字段Stage3已要求提供，不能等Stage4才填写；stage5Data和模型连接可稍后补齐 |
-| Stage4 | azureOpenAIConnections、parameters.certificate-vault；入口发布前补privateIngress；可选certificates | workflow先创建两套证书共用的独立Vault，再手动导入证书；自动签发才需专项证书身份，见4-A至4-C |
+| Stage4 | azureOpenAIConnections、parameters.certificate-vault、parameters.runner-target-connectivity；入口发布前补privateIngress；可选certificates | workflow创建证书Vault和Runner到新AKS的DNS链接；手动导入证书，自动签发才需专项身份，见4-A至4-C |
 | Stage5 | stage5Data、databaseAccess、DNS归属开关 | 批准数据库SKU/HA/Entra管理员，runtime服务主体Object ID；不能用用户ID代替运行身份 |
 | Stage6 | application | 派生后台镜像digest和模型组/真实deployment映射，见Stage6 |
 | Stage7 | entra、proxy | 分离初始化/准入身份，代理镜像digest，用户或服务主体绑定，见Stage7 |
@@ -799,9 +800,62 @@ Stage5复用该DNS区域和链接：配置了certificate-vault时，`parameters.
 
 计划会拒绝未标记为`purpose=ingress-certificates`的既有同名Vault、自定义DNS下的自动链接、同VNet不同名链接及同名链接目标/注册设置冲突。不会自动接管业务Vault、扩大VNet权限或读取/创建Secret值；关闭管理开关不会自动删除已有资源。
 
+#### 4-A1. 证书Vault防删除锁权限
+
+**S4-03首次plan前核对，不等deploy失败再补。** [证书Vault模板](../infra/certificate-vault/main.bicep)会在Vault上创建`protect-key-vault-from-deletion`，级别为`CanNotDelete`。Azure What-if也需要相应部署权限。Contributor的NotActions排除了`Microsoft.Authorization/*/Write`，而Role Based Access Control Administrator只补充角色分配写入/删除能力，两者相加仍不包含`Microsoft.Authorization/locks/write`。Key Vault Secrets User/Officer的数据权限也不能替代锁管理权限。platform成功不证明新证书组件的权限已齐全。
+
+**1. 确定授权对象和范围。** 按4-0第1步，由所选GitHub Environment的`AZURE_CLIENT_ID`查询部署UAMI的Principal ID或企业应用服务主体Object ID，作为`DEPLOY_OBJECT_ID`；不是Client ID本身、人工证书导入人、`ingressReaderPrincipalId`或Pod身份。演练中deploy/runtime复用身份不改变客户侧的识别方法。目标订阅/RG从客户JSON的`azure.subscriptionId`、`target.resourceGroup`取得，再与Portal目标RG的JSON View `id`交叉核验；**不是模型所在RG，也不是Runner RG**。
+
+**2. 由有权管理员创建或复用最小锁角色。** 在目标RG → Access control (IAM) → Add → Add custom role，从JSON页Edit填入下列通用定义；替换scope占位符后Save → Review + create。这是Portal角色定义，不写入CUSTOMER_CONFIG_JSON，不需要修改workflow或证书配置。创建者须在Assignable scopes上具备`Microsoft.Authorization/roleDefinitions/write`；只有RBAC Administrator时不能创建自定义角色，可请管理员预建，不能自行扩大为订阅Owner。已有同名角色先核对内容，符合则复用，不覆盖其他团队的定义。
+
+```json
+{
+  "properties": {
+    "roleName": "LLMGW Resource Lock Writer",
+    "description": "Read, create and update resource locks in the approved gateway resource group; no lock deletion or secret access.",
+    "assignableScopes": [
+      "/subscriptions/REPLACE_TARGET_SUBSCRIPTION_ID/resourceGroups/REPLACE_TARGET_RESOURCE_GROUP"
+    ],
+    "permissions": [{
+      "actions": [
+        "Microsoft.Authorization/locks/read",
+        "Microsoft.Authorization/locks/write"
+      ],
+      "notActions": [],
+      "dataActions": [],
+      "notDataActions": []
+    }]
+  }
+}
+```
+
+然后在**目标RG → IAM → Add role assignment**中选择`LLMGW Resource Lock Writer`，Members选择上述部署身份并Review + assign；角色定义存在不等于已分配。UAMI从其实际所在订阅选择Managed identity，企业应用按已核对的服务主体选择。此时Vault可能尚不存在，因此首次按目标RG授权，不为创建它预先授予整个订阅权限。
+
+该角色本身不授予`Microsoft.Authorization/locks/delete`、角色分配或Secret访问权限；`locks/write`仍允许创建/更新所授RG范围内的锁及锁级别，不是只允许某一个Vault锁，也不是只能设置CanNotDelete，须由客户批准。其他既有角色仍可能提供更宽权限，不能把本角色未包含delete视为全局拒绝。保留模板的防删除锁、软删除及清除保护，不通过删锁资源、关闭保护或放宽What-if门禁解决权限缺口。
+
+**3. 回读并重跑证书plan。** 下面只读核验角色定义和实际分配；变量来源同第1步，不从当前登录人推断部署身份，确认无REPLACE后执行：
+
+```bash
+TARGET_SUBSCRIPTION_ID="REPLACE_AZURE_SUBSCRIPTION_ID_FROM_CUSTOMER_JSON"
+TARGET_RG="REPLACE_TARGET_RESOURCE_GROUP_FROM_CUSTOMER_JSON"
+DEPLOY_OBJECT_ID="REPLACE_VERIFIED_DEPLOY_SERVICE_PRINCIPAL_OBJECT_ID"
+TARGET_RG_SCOPE="/subscriptions/${TARGET_SUBSCRIPTION_ID}/resourceGroups/${TARGET_RG}"
+az role definition list --subscription "$TARGET_SUBSCRIPTION_ID" \
+  --name "LLMGW Resource Lock Writer" \
+  --query '[].{id:id,role:roleName,assignableScopes:assignableScopes,permissions:permissions}' --output json
+az role assignment list --subscription "$TARGET_SUBSCRIPTION_ID" \
+  --assignee-object-id "$DEPLOY_OBJECT_ID" --scope "$TARGET_RG_SCOPE" \
+  --include-inherited --fill-principal-name false \
+  --query '[].{role:roleDefinitionName,roleDefinitionId:roleDefinitionId,scope:scope,principalId:principalId,condition:condition}' --output json
+```
+
+确认角色定义只有上述两项Actions且DataActions为空，实际分配指向正确部署Object ID和目标RG；同时核对继承/组授权、条件及有效期。权限传播生效后，从Run workflow新建S4-03（test、stage=4、component=certificate-vault、operation=plan，release=false，两个approved字段及confirm_environment留空）。plan成功并解密审核后，S4-04引用本次成功plan ID执行deploy；这一步不上传证书。
+
+仅补锁权限且代码SHA、阶段配置、artifact key不变时，不需重跑已成功的platform或因此重录验收。文档或代码合并产生新SHA时，deploy前仍按第3节处理证据绑定。个人账号本地plan成功不能替代Actions验证；通用execution-failed不能独立证明锁权限是唯一原因，仍失败时保留新run链接和可用诊断再定位。参考[Azure资源锁权限](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/lock-resources#who-can-create-or-delete-locks)。
+
 #### 4-B. 按顺序运行
 
-旧版手册的S4-03之后编号已顺延，按本表的component/action辨认；不是重跑已经完成的平台部署。S4-03也可先用`Customer staged migration`的stage=4、mode=config-check、component=certificate-vault检查参数。
+旧版手册的S4-03之后编号已顺延，按本表的component/action辨认；不是重跑已经完成的平台部署。新增DNS连接使用S4-04A/04B，不再次改动S4-05及后续编号。S4-03也可先用`Customer staged migration`的stage=4、mode=config-check、component=certificate-vault检查参数。
 
 | 步骤 | workflow显示名称 | stage | component或action | operation | approved_run_id | confirm_environment |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -809,6 +863,8 @@ Stage5复用该DNS区域和链接：配置了certificate-vault时，`parameters.
 | S4-02 | Customer infrastructure deployment | 4 | component=platform | deploy | S4-01的plan ID | test |
 | S4-03 | Customer infrastructure deployment | 4 | component=certificate-vault | plan | 留空 | 留空 |
 | S4-04 | Customer infrastructure deployment | 4 | component=certificate-vault | deploy | S4-03成功且已审核的plan ID | test |
+| S4-04A | Customer infrastructure deployment | 4 | component=runner-target-connectivity | plan | 留空；先完成4-B1配置和权限 | 留空 |
+| S4-04B | Customer infrastructure deployment | 4 | component=runner-target-connectivity | deploy | S4-04A成功且已审核的plan ID | test |
 | S4-05 | Customer private runtime operations | 4 | action=cluster-bootstrap | plan | 留空 | 留空 |
 | S4-06 | Customer private runtime operations | 4 | action=cluster-bootstrap | execute | S4-05的plan ID | test |
 | S4-07 | Customer private runtime operations | 4 | action=monitoring-onboard | plan | 留空 | 留空 |
@@ -820,11 +876,187 @@ Stage5复用该DNS区域和链接：配置了certificate-vault时，`parameters.
 
 **S4-02部分失败时：** 在目标RG → Deployments → `llmgw-<environment>-s4-platform`查看失败子部署及Operation details，不只看GitHub的通用execution-failed。`aksNetwork`若报`AnotherOperationInProgress`，先核对失败子网和错误中指定的网络操作状态；同一VNet的子网并行写入会发生冲突，模板应通过dependsOn依次更新系统、业务、入口子网。即使顶层Failed，Firewall、DNS、Private Endpoint或其他子网也可能已经成功并产生费用，须逐项核对，不能声称自动回滚或删除已成功资源。冲突操作结束、模板修复经审核后，新建S4-01并审核当前状态下的增量变化，再用新的成功plan ID执行S4-02；旧plan和Re-run jobs不能代替重新审批，也不要回放Stage0网络模板或关闭门禁。代码修复合并产生新SHA时，deploy前仍须按第3节复核前序验收；后续AKS/身份资源是否创建以实际状态为准。
 
-**S4-04之后、S4-05之前：** 按4-C手动导入证书；由网络Owner核验管理VNet到新AKS/ACR/证书Vault的路由、Private DNS和允许端口。确认ARM读取、Kubernetes用户凭据及命名空间权限；运行`Customer private runner checks`，environment=test、check_target=true。该检查不读取证书Secret，Vault访问和CA信任另按4-C核验；失败不开放私有AKS/Vault公网。
+**S4-04之后、S4-05之前：** 按4-C完成获批证书导入；走临时受限公网路径时随后立即关闭Vault公网，已通过批准私网导入的不重复上传。按4-B1完成S4-04A/04B的Runner到AKS DNS连接；由网络Owner核验管理VNet到新AKS/ACR/证书Vault的路由、Private DNS和允许端口。管理员补齐Kubernetes数据权限后，运行`Customer private runner checks`，environment=test、check_target=true、check_backup=false。该检查不读取证书Secret，Vault访问和CA信任另按4-C核验；私网检查失败不重新开放公网掩盖问题，私有AKS始终不开放公网。
 
 `cluster-bootstrap`实际创建litellm和两个ingress命名空间，不安装完整应用或自动授予所有Kubernetes权限。`private-ingress`会扫描/晋级固定Traefik镜像，创建API/admin两套私有入口并核验TLS、Host和内部LB前端；它不是Entra登录或模型调用测试。certificate-renew只更新Vault，不发布证书到入口，S4-11/12仍需运行。
 
+#### 4-B1. Runner到新AKS的DNS连接
+
+**标准交付由IaC管理链接，管理员负责预授权，检查workflow保持只读。** `runner-target-connectivity`复用现有Customer infrastructure deployment，不新增独立workflow。它在Stage4 platform成功后，从真实AKS发现私有API域名、DNS区域、节点RG和API Private Endpoint；只创建或维护到获批Runner VNet的一条链接，不让客户手填系统DNS区域中的随机GUID。
+
+在客户JSON的`parameters`中加入下面的块，并同步完整Environment Secret `CUSTOMER_CONFIG_JSON`；不是放到`parameters.platform`内，也不是新增GitHub Variable：
+
+```json
+"runner-target-connectivity": {
+  "runnerVirtualNetworkId": "REPLACE_RUNNER_VNET_RESOURCE_ID",
+  "manageDnsLink": true
+}
+```
+
+| 值 | 来源与边界 |
+| --- | --- |
+| `runnerVirtualNetworkId` | 实际执行Actions的Runner VM → NIC → IP configurations → VNet → JSON View的完整id；可复用0-A2或4-A已核验的同名值，组件间须一致。不是开发机VNet、Bastion子网、VM或NIC ID。目前支持同订阅，可跨RG/区域或与目标VNet相同 |
+| `manageDnsLink` | Runner VNet → DNS servers为Azure提供DNS时用true（省略也为true）；企业DNS/Private Resolver由网络Owner管理时显式false，并另行核验转发。false不自动删除已有链接，也不证明外部DNS已可用 |
+| 目标AKS及VNet | 从既有`target.resourceGroup`、`parameters.platform.stage4Aks.name`和`stage4Network.virtualNetworkName`取得，组件再与云上AKS身份、节点池子网核对，不新填第二套集群信息 |
+| 实际Private DNS区域 | AKS的`apiServerAccessProfile.privateDnsZone=system`时，从实际privateFqdn和nodeResourceGroup发现；自定义zone模式使用AKS返回的完整zone ID。支持Azure公有云、同订阅zone；`none`或其他云配置当前停止，不猜测区域或关闭校验 |
+
+**1. 预授权和只读核验。** 授权对象是所选Environment的`AZURE_CLIENT_ID`对应部署服务主体，不是人工导入人或`AZURE_RUNTIME_CLIENT_ID`对应的日常运行身份。需要第2.2节列出的管理面操作：`Microsoft.Network/privateDnsZones/virtualNetworkLinks/write`在实际zone范围、`Microsoft.Network/virtualNetworks/join/action`在精确Runner VNet范围；DNS所在RG还需嵌套ARM部署/What-if权限。AKS系统区域通常位于**节点RG**，不能只给目标RG权限就认为已覆盖；不为方便扩大到订阅Owner，不给runtime身份DNS写权限。
+
+管理员可从AKS → Properties/JSON View取得nodeResourceGroup、privateFqdn和apiServerAccessProfile，或在管理终端用客户JSON提供的订阅/RG/AKS名只读查询：
+
+```bash
+SUBSCRIPTION_ID="REPLACE_AZURE_SUBSCRIPTION_ID_FROM_CUSTOMER_JSON"
+TARGET_RG="REPLACE_TARGET_RESOURCE_GROUP_FROM_CUSTOMER_JSON"
+TARGET_AKS="REPLACE_STAGE4_AKS_NAME_FROM_CUSTOMER_JSON"
+az aks show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
+  --name "$TARGET_AKS" \
+  --query '{id:id,state:provisioningState,power:powerState.code,nodeResourceGroup:nodeResourceGroup,privateFqdn:privateFqdn,dns:apiServerAccessProfile.privateDnsZone}' \
+  --output json --only-show-errors
+```
+
+再从实际DNS所在RG → Private DNS zones → 对应区域 → Virtual network links，核对目标VNet链接和已有Runner链接。已有不同名但正确的Runner链接时组件只读复用，不接管其他Owner资源；同VNet场景复用AKS原有链接。自动管理名称由AKS和Runner VNet资源ID稳定计算。关闭自动注册（registrationEnabled=false），已有链接须Succeeded/Completed；名称冲突、重复链接、自动注册开启或未完成时停止，不能删除重建来掩盖问题。
+
+**2. 按S4-04A/04B执行。** 可先用Customer staged migration的main、test、stage=4、mode=config-check、component=runner-target-connectivity验证离线配置。真实计划使用Customer infrastructure deployment：main、test、stage=4、component=runner-target-connectivity、operation=plan，release不勾选、两个approved字段和confirm_environment留空。旧Customer staged migration的what-if入口不支持本组件的云端发现，不能代替这个plan。
+
+plan会检查原`llmgw-<environment>-s4-platform`部署Succeeded、AKS Running/Succeeded、批准的API PE/NIC及DNS记录与实际私有IP一致；AKS stop/start后若记录与PE不一致会阻断并要求排查，不自动覆盖A记录。自动模式只允许实际zone下的固定Runner链接和DNS所在RG中的固定嵌套部署记录，继续禁止Delete、Unsupported和越界变更。不修改AKS、托管PE、DNS区域/A记录、Peering、NSG、路由或任何RBAC；此组件不替代既有私网路由准备。
+
+解密S4-04A的`infrastructure-test-4-runner-target-connectivity-<run ID>`，审核`plan-summary.json`、`reviewed-plan.json`和`connectivity-review.json`。后者列出实际`aksResourceId`、`apiHostname`、`privateDnsZoneId`、`privateEndpointIps`、`runnerVirtualNetworkId`及`management`：managed表示本组件管理，reused表示复用外部既有链接，external表示客户管理DNS。不得把reused/external当作运行探针已通过。
+
+审核后新Run workflow，operation=deploy、approved_run_id填S4-04A的成功plan ID、confirm_environment=test，其余按第3节。deploy会重新发现实际资源并执行What-if；代码、配置、zone、PE地址、链接管理状态或变更内容变化时必须重新plan。成功后管理模式再次核对Runner链接已Completed；输出`runnerTargetConnectivity`仍不是DNS/TLS/Kubernetes已实测或Stage4验收。
+
+**3. 真实Runner检查与权限。** 管理员按[4-B2](#4-b2-runtime身份的kubernetes预授权)授予runtime身份获批的Kubernetes数据权限，再运行Customer private runner checks：main、test、check_target=true、check_backup=false。Contributor/RBAC Administrator不等于Kubernetes数据角色；该检查需要`litellm`命名空间的Deployment读取，后续cluster-bootstrap创建命名空间另需集群级相应权限，不能把Reader当作全部后续权限。组件不获取kubeconfig、不代替OIDC身份执行kubectl、不自动发起验收。
+
+**已经部署过platform的升级路径：** 本次只增加连接组件、既有platform/certificate-vault仍成功且实际资源与批准配置一致时，**不用重跑platform或certificate-vault部署，也不用重新上传证书**。代码合并到受保护main后，再补新配置并同步Secret；旧代码不认识新字段。按第3节在新完整Git SHA复核Stage0–3实际证据并依次draft/confirm，源镜像扫描按新SHA重跑，过期或受影响项目须实测，不能仅填passed。新块只从Stage4进入配置指纹，不改变Stage0–3的stage-config指纹，但不豁免完整SHA和7天有效期约束；旧full-config账本也不能直接复用。
+
+随后直接从S4-04A新plan、审核、S4-04B deploy开始，再做Runner检查、S4-05及后续操作。组件读取旧platform的成功部署和当前AKS，不要求旧platform回执SHA等于新SHA；本次deploy仍要求新SHA的Stage0–3验收及本组件匹配plan。若platform失败、有漂移或确实改变了平台参数/模板，另行评估重跑，不能用本段跳过受影响资源的部署。不要回放Stage0网络模板。
+
+#### 4-B2. runtime身份的Kubernetes预授权
+
+**本节由有权管理员手动执行，不由DNS组件或Runner checks自行授权。** 适用于本项目新AKS的managed Entra集成和`aadProfile.enableAzureRbac=true`模式。此开关为false时停止，按客户实际认证/RBAC设计处理，不为照抄角色而临时切换认证模式。以下授权只针对新AKS，不扩到旧AKS、节点RG或整个订阅。
+
+**1. 取得正确的身份和AKS作用域。** 从客户仓库Settings → Environments → 本次环境 → Variables取得`AZURE_RUNTIME_CLIENT_ID`，不是`AZURE_CLIENT_ID`。UAMI从Managed Identities → 对应身份 → Overview核对Client ID并取Principal ID；企业应用从Entra ID → Enterprise applications按Application ID查找，取服务主体Object ID，不能用App registrations的应用对象Object ID、个人用户ID、Runner VM或Pod身份。演练复用deploy/runtime身份时仍按runtime变量确认，不把复用当作客户默认配置。
+
+管理员在已登录正确客户租户的管理终端执行下面的只读查询；订阅、RG和AKS名称分别取客户JSON的`azure.subscriptionId`、`target.resourceGroup`和`parameters.platform.stage4Aks.name`。`AKS_ID`取实际返回值，不手拼节点RG路径：
+
+```bash
+set -euo pipefail
+SUBSCRIPTION_ID="REPLACE_AZURE_SUBSCRIPTION_ID_FROM_CUSTOMER_JSON"
+TARGET_RG="REPLACE_TARGET_RESOURCE_GROUP_FROM_CUSTOMER_JSON"
+TARGET_AKS="REPLACE_STAGE4_AKS_NAME_FROM_CUSTOMER_JSON"
+RUNTIME_CLIENT_ID="REPLACE_AZURE_RUNTIME_CLIENT_ID_FROM_ENVIRONMENT"
+az account show --subscription "$SUBSCRIPTION_ID" \
+  --query '{tenantId:tenantId,subscriptionId:id}' --output json
+az ad sp show --id "$RUNTIME_CLIENT_ID" \
+  --query '{name:displayName,clientId:appId,objectId:id,type:servicePrincipalType}' --output json
+az aks show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" --name "$TARGET_AKS" \
+  --query '{id:id,tenant:aadProfile.tenantId,managed:aadProfile.managed,azureRbac:aadProfile.enableAzureRbac,private:apiServerAccessProfile.enablePrivateCluster}' --output json
+AKS_ID=$(az aks show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
+  --name "$TARGET_AKS" --query id --output tsv)
+RUNTIME_OBJECT_ID="REPLACE_VERIFIED_RUNTIME_SERVICE_PRINCIPAL_OBJECT_ID"
+```
+
+核对租户与客户JSON一致、managed/azureRbac/private均为true、返回clientId与runtime变量一致，再将objectId填入本机`RUNTIME_OBJECT_ID`。目录查询受限时由Entra管理员提供或按0-A1查询UAMI，不能因此给runtime添加目录管理权限。所有授权命令都由**管理员身份**执行，接收者才是runtime服务主体。
+
+**2. 按操作选择权限，不能混淆四种角色。** 以下是Stage4的分阶段方案，不声称已覆盖Stage5以后的全部发布对象：
+
+| 何时 | 角色/能力 | 实际分配Scope |
+| --- | --- | --- |
+| Runner目标检查及后续获取用户kubeconfig | `Azure Kubernetes Service Cluster User Role`（`4abbcc35-e782-43d8-92c5-2d3f1bd2253f`）；若已有有效等效读取/获取用户凭据权限，不重复添加 | `AKS_ID`，新AKS资源自身 |
+| Runner checks读取Deployment | `Azure Kubernetes Service RBAC Reader`（`7f6c6a51-bcf8-42ba-9220-52d62157d7db`） | `AKS_ID/namespaces/litellm` |
+| S4-05/06创建/更新三个Namespace；S4-11读取Namespace对象 | 下面的`LLMGW AKS Namespace Bootstrapper`，仅Namespace read/write，不含delete | `AKS_ID`；Namespace是集群级对象，不能只授在命名空间内部 |
+| S4-11/12入口对象和TLS Secret发布 | `Azure Kubernetes Service RBAC Writer`（`a7ffa36f-339b-4b5c-8bdf-e2c188b2c0eb`） | 分别为`AKS_ID/namespaces/llm-api-ingress`、`AKS_ID/namespaces/llm-admin-ingress` |
+
+Cluster User Role只解决获取凭据，不授予Deployment读取。RBAC Reader不能发布，RBAC Writer不能创建Namespace；`Azure Kubernetes Service RBAC Admin`也排除了Namespace写入。不要误选名字接近的`Azure Kubernetes Service Cluster Admin Role`（获取管理员凭据），也不默认授予`Azure Kubernetes Service RBAC Cluster Admin`。保持本地管理员账户禁用，不用`--admin`或`az aks command invoke`绕过身份和私网控制。
+
+**3. Portal授予集群范围角色，CLI精确授予命名空间角色。** 管理员须有新AKS范围的`Microsoft.Authorization/roleAssignments/write`，PIM资格需已激活，且条件允许向该服务主体授予选定角色。没有授权能力就交对应Owner，不让runtime通过已有RBAC管理员角色自行给自己提权。
+
+新AKS → Access control (IAM) → Add → Add role assignment，搜索并选择上表的**Cluster User Role**。Members中UAMI选Managed identity，从身份实际所在订阅选择已核对的UAMI；企业应用选User, group, or service principal，按核对过的对象选择。Review + assign前再次确认Scope是**新AKS自身**、接收者是runtime Principal ID。已有效覆盖的角色跳过，不删除重建。
+
+命名空间Scope使用下面的管理员CLI命令，避免在AKS IAM页面误授成整个集群。先按第5步回读该Scope，已有同角色/同主体的有效授权就跳过对应create；同名Namespace尚未创建也不需要先给集群管理员权限，此角色分配本身不会创建Namespace：
+
+```bash
+set -euo pipefail
+az role assignment create --subscription "$SUBSCRIPTION_ID" \
+  --assignee-object-id "$RUNTIME_OBJECT_ID" --assignee-principal-type ServicePrincipal \
+  --role "Azure Kubernetes Service RBAC Reader" --scope "${AKS_ID}/namespaces/litellm" \
+  --query '{id:id,scope:scope,principalId:principalId,roleDefinitionId:roleDefinitionId}' --output json
+```
+
+**4. 初始化和入口发布前补齐写权限。** 管理员在目标RG → IAM → Add custom role → JSON → Edit创建下面的Portal角色定义，或复用已审核同名角色。需要目标RG的`Microsoft.Authorization/roleDefinitions/write`，仅RBAC Administrator不具备创建定义的能力。这里的Assignable scopes仅决定角色可在哪里分配，**真正的分配仍在新AKS资源级**，不能直接分配在整个RG。角色JSON不放进CUSTOMER_CONFIG_JSON：
+
+```json
+{
+  "properties": {
+    "roleName": "LLMGW AKS Namespace Bootstrapper",
+    "description": "Read and write Kubernetes namespaces in an approved AKS cluster; no namespace deletion, workload, secret or role management.",
+    "assignableScopes": [
+      "/subscriptions/REPLACE_TARGET_SUBSCRIPTION_ID/resourceGroups/REPLACE_TARGET_RESOURCE_GROUP"
+    ],
+    "permissions": [{
+      "actions": [],
+      "notActions": [],
+      "dataActions": [
+        "Microsoft.ContainerService/managedClusters/namespaces/read",
+        "Microsoft.ContainerService/managedClusters/namespaces/write"
+      ],
+      "notDataActions": []
+    }]
+  }
+}
+```
+
+Review + create后，再到**新AKS → IAM → Add role assignment**选择该自定义角色，Members选择同一runtime身份，Review + assign。创建角色定义不等于完成分配。该权限允许读写此集群的**所有Namespace对象及其标签**，不是只允许上述三个名称；修改标签也可能影响Pod Security等策略。现有workflow只申请三个Namespace并不能把RBAC变成按名称限制，必须由客户明确批准这一边界。更严格的客户须由平台管理员预建/维护命名空间并调整发布流程，不能声称当前版本已有该替代按钮。
+
+入口发布权限只授两个入口命名空间，不给Writer整个AKS、`kube-system`或默认扩到`litellm`。下面两次create同样先回读并跳过既有匹配授权：
+
+```bash
+set -euo pipefail
+for NAMESPACE in llm-api-ingress llm-admin-ingress; do
+  az role assignment create --subscription "$SUBSCRIPTION_ID" \
+    --assignee-object-id "$RUNTIME_OBJECT_ID" --assignee-principal-type ServicePrincipal \
+    --role "Azure Kubernetes Service RBAC Writer" --scope "${AKS_ID}/namespaces/${NAMESPACE}" \
+    --query '{id:id,scope:scope,principalId:principalId,roleDefinitionId:roleDefinitionId}' --output json
+done
+```
+
+Writer包含命名空间内Secret读写、Pod创建/执行及使用其中ServiceAccount的能力，并非“只写Deployment”，须批准证书私钥可读和工作负载身份风险；不授予Role/RoleBinding管理。`litellm`目前只有Reader，Stage6应用发布前还需另行批准应用命名空间写权限和SecretProviderClass等自定义资源权限，不能把本表当成全阶段权限完成。后续清单仍包含Namespace时也需要相应写权限，按批准窗口和后续动作收回或续期，不在S4-06成功后盲目撤销，也不删除命名空间。
+
+**5. 回读并用实际workflow身份验证。** 在管理员终端核对自定义角色定义及每个Scope下的实际授权；Portal在AKS资源页可能不显示命名空间子Scope授权，不要因为看不到就改授集群范围：
+
+```bash
+set -euo pipefail
+az role definition list --subscription "$SUBSCRIPTION_ID" --name "LLMGW AKS Namespace Bootstrapper" \
+  --query '[].{role:roleName,assignableScopes:assignableScopes,permissions:permissions}' --output json
+for ROLE_SCOPE in "$AKS_ID" "${AKS_ID}/namespaces/litellm" \
+  "${AKS_ID}/namespaces/llm-api-ingress" "${AKS_ID}/namespaces/llm-admin-ingress"; do
+  az role assignment list --subscription "$SUBSCRIPTION_ID" \
+    --assignee-object-id "$RUNTIME_OBJECT_ID" --scope "$ROLE_SCOPE" \
+    --include-inherited --fill-principal-name false \
+    --query '[].{role:roleDefinitionName,scope:scope,principalId:principalId,principalType:principalType,condition:condition}' \
+    --output json
+done
+```
+
+核对principalId、ServicePrincipal类型、Scope与角色定义符合批准内容，并检查组/继承角色、条件和有效期；新增小范围授权不会收紧已存在的宽泛授权。新角色通常需要最多约5分钟传播，以实际调用为准。仅补Azure授权且代码/配置不变，不要求重部署platform或重录仍有效的验收；代码合并后的新SHA要求仍按4-B1执行。
+
+DNS连接完成后，新运行Customer private runner checks：main、test、check_target=true、check_backup=false，`target-cluster-read`必须通过。该检查使用`AZURE_RUNTIME_CLIENT_ID`的OIDC登录，不需要你在Runner执行个人`az login`；个人管理员kubectl成功不能代替它。随后S4-05的服务器端dry-run验证Namespace写权限，批准后S4-06才实际创建；S4-11/12验证入口发布，plan本身也需要相应写授权。没有单独“自动授予Kubernetes权限”按钮，不伪造passed；DNS失败、Forbidden、Admission拒绝和Secret/ACR权限分别排查。
+
+参考[AKS Azure RBAC及命名空间作用域](https://learn.microsoft.com/en-us/azure/aks/manage-azure-rbac)和[AKS内置角色定义](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/containers#azure-kubernetes-service-rbac-writer)。本节命令是管理员操作说明，不表示角色已经在客户环境分配或实测通过。
+
 #### 4-C. 部署后手动导入两个Secret
+
+**这里要上传的是两个Secret，不是两张新证书，也不是CA证书与服务器证书各上传一份。** 已有API证书和admin证书满足域名、信任及有效期要求时直接复用。`.crt`、`.pem`是文件名后缀，不能单凭后缀判断内容；本流程要求PEM格式。每个Secret的值都是一个完整材料包：该入口的证书链加对应叶私钥。
+
+| 已有文件的用途 | 如何使用 | Vault中的目标 |
+| --- | --- | --- |
+| API域名的`.pem`和对应`.key` | 确认证书文件为叶证书在前、随后中间链，与叶私钥合并；只有叶证书时先向签发方取得中间链/fullchain | `api-tls` |
+| admin叶证书，例如`admin.crt`，及对应`admin.key` | 合并为admin材料包；根CA直接签发的叶证书没有中间链，不需为了凑链再加一个文件 | `admin-tls` |
+| admin根CA公钥证书，例如`admin-ca.crt` | 在实际Runner和管理浏览器中建立对admin证书的信任；与入口材料分开处理 | 不作为这两个Secret之一 |
+| CA私钥，例如`admin-ca.key`，或签发申请`admin.csr` | CA私钥独立保管；CSR仅是申请材料，不是已签发证书 | 均不上传 |
+
+**简化操作路径：客户本机准备并验证 → 管理员临时开启Vault受限公网 → 客户本机上传 → 立即关闭公网 → Runner私网验证。** 上传不需要登录Runner，也不需要Bastion/SCP传输私钥。以下命令在客户持有证书的受控机器、仓库根目录的Bash终端执行，需OpenSSL 3、Azure CLI及仓库Python依赖；Windows可使用获批的WSL环境，Portal操作使用客户本机浏览器，不把私钥传给Cloud Shell或GitHub。
+
+本流程仅为**证书Vault**的短时人工导入例外，须事先批准操作人、出口IP、结束时间和负责关闭的人；不是开放LiteLLM API/admin、AKS或其他业务Vault。IaC仍默认`publicNetworkAccess=Disabled`，不修改模板、客户JSON或门禁来长期保留公网。客户Policy或Network Security Perimeter不允许此例外时停止，沿用批准的私网导入方式，不绕过策略。已有合格证书跳过第2步，不重新生成或覆盖原材料。
 
 **1. 取得实际输出。** 解密S4-04的`infrastructure-test-4-certificate-vault-<run ID>`附件，在deployment-outputs.json查看`certificateVault.value`；或从目标RG → Deployments → `llmgw-test-s4-certificate-vault` → Outputs取得。输出只有Vault、PE、DNS及两个预定Secret地址；`certificateMaterialsImported=false`表示此部署没有导入材料，不是证书上传失败。管理终端也可只读查询：
 
@@ -839,25 +1071,72 @@ az deployment group show --subscription "$SUBSCRIPTION_ID" --resource-group "$TA
 
 确认Succeeded，把输出`name`作为下面的CERT_VAULT，`apiTlsSecretId`/`adminTlsSecretId`分别填入privateIngress.api/admin.tlsSecretId，来源CIDR按真实批准范围填写并同步Secret。地址固定为同一Vault中的`/secrets/api-tls`、`/secrets/admin-tls`，不要填`/certificates/`、相同Secret或业务Vault。支持手工固定版本，但须使用对应Secret的真实版本。
 
-**2. 私网和身份准备。** 导入在获准访问该PE的管理机器进行，可使用已建立私网路径的Runner，但交互终端须由获批导入人本人登录，不会继承Actions OIDC登录。通过批准的传输渠道交付材料，不放GitHub artifact、临时公网链接或聊天。先用`az account show --query '{tenant:tenantId,subscription:id,identity:user.name,type:user.type}' --output json`核对租户/订阅及当前身份；人工身份成功不等于runtime身份已可读。
+**2. 没有证书时怎样创建。** 两个域名均由客户JSON的`baseDomain`派生，不使用Vault域名签发入口证书。
 
-从Vault → Networking → Private endpoint connection核验Approved及其NIC私有IP。实际执行机用`getent ahostsv4 "${CERT_VAULT}.vault.azure.net"`检查必须解析到此PE，而非任意私有地址；TLS访问使用正常Vault域名，不用裸IP或跳过证书校验。自定义DNS由Owner补条件转发；RBAC传播或网络失败先修复，不打开Vault公网。
-
-**3. 整理并验证文件。** 每个Secret都包含**该域名的叶证书在前、其后中间链、最后对应未加密叶私钥**，不是一个Secret只放证书、另一个只放私钥。API须由未来Front Door信任的公有CA签发；admin可以使用企业私有CA。签发CA的私钥独立保管，绝不合入这两个文件。以下在仓库根目录的受控终端执行，只填写文件路径；已合并的合格PEM可直接使用，不必再次拼接：
+- **API：公有CA签发。** 向客户批准且被Front Door信任的公有CA申请`llm-api.<baseDomain>`，获取PEM叶证书及中间链/fullchain，并保留匹配的叶私钥。下面仅在本机生成私钥和CSR，不是已签发证书；将CSR提交给CA，按签发方指引完成DNS TXT域名验证、下载fullchain。只提交CSR，不提交私钥。DNS验证不要求提前开放源站80/443、切换业务A/CNAME或打开Vault；公共证书透明度会披露域名。不能用自签名或仅CDN厂商信任的Origin证书替代公有CA证书。
+- **admin正式环境：企业PKI签发。** 向PKI管理员申请`llm-admin.<baseDomain>`的服务器证书，要求SAN包含该域名、用途为serverAuth，同时领取中间链及根CA公钥证书。需要CSR时可按下面命令改为admin域名及独立的admin文件名；CA私钥不由客户导入人取得。
 
 ```bash
 set -euo pipefail
 umask 077
-mkdir -p temp/certificate-import
-chmod 700 temp/certificate-import
+BASE_DOMAIN="REPLACE_BASE_DOMAIN_FROM_CUSTOMER_JSON"
+mkdir -p temp
+API_DIR=$(mktemp -d temp/api-csr.XXXXXXXX)
+openssl req -new -newkey rsa:2048 -noenc -sha256 \
+  -keyout "$API_DIR/api.key" -out "$API_DIR/api.csr" \
+  -subj "/CN=llm-api.${BASE_DOMAIN}" \
+  -addext "subjectAltName=DNS:llm-api.${BASE_DOMAIN}"
+openssl req -in "$API_DIR/api.csr" -noout -verify
+printf 'API CSR directory: %s\n' "$API_DIR"
+```
+
+**admin获批演练可选：** 没有企业PKI时，可在本机生成独立测试根CA并签发90天的admin叶证书。已有admin证书时不要再运行。CA私钥口令只在OpenSSL终端提示中输入并独立保管，不写到命令或聊天；叶私钥因入口加载需要不加密，依靠受控目录和文件权限保护。根CA直接签发时没有中间链，上传材料只需admin.crt加admin.key。
+
+```bash
+set -euo pipefail
+umask 077
+BASE_DOMAIN="REPLACE_BASE_DOMAIN_FROM_CUSTOMER_JSON"
+mkdir -p temp
+PKI_DIR=$(mktemp -d temp/admin-pki.XXXXXXXX)
+openssl req -x509 -newkey rsa:3072 -sha256 -days 365 \
+  -keyout "$PKI_DIR/admin-ca.key" -out "$PKI_DIR/admin-ca.crt" \
+  -subj "/CN=LLMGW Test Admin CA" \
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign"
+openssl req -new -newkey rsa:2048 -noenc -sha256 \
+  -keyout "$PKI_DIR/admin.key" -out "$PKI_DIR/admin.csr" \
+  -subj "/CN=llm-admin.${BASE_DOMAIN}"
+openssl x509 -req -in "$PKI_DIR/admin.csr" -CA "$PKI_DIR/admin-ca.crt" \
+  -CAkey "$PKI_DIR/admin-ca.key" -set_serial "0x$(openssl rand -hex 16)" \
+  -days 90 -sha256 -out "$PKI_DIR/admin.crt" \
+  -extfile <(printf '%s\n' 'basicConstraints=critical,CA:FALSE' \
+    'keyUsage=critical,digitalSignature,keyEncipherment' 'extendedKeyUsage=serverAuth' \
+    "subjectAltName=DNS:llm-admin.${BASE_DOMAIN}")
+openssl verify -CAfile "$PKI_DIR/admin-ca.crt" -purpose sslserver \
+  -verify_hostname "llm-admin.${BASE_DOMAIN}" "$PKI_DIR/admin.crt"
+openssl x509 -in "$PKI_DIR/admin-ca.crt" -noout -fingerprint -sha256
+printf 'Admin PKI directory: %s\n' "$PKI_DIR"
+```
+
+示例使用新的受限临时目录，不覆盖已有材料。记录输出目录，将其中admin.crt/admin.key填入第3步；admin-ca.crt仅供安装信任，admin-ca.key和admin.csr均不上传。证书至少还需有效7天，并在到期前按批准流程续期；新建测试CA不等于客户生产PKI。
+
+**3. 整理并验证文件。** 每个Secret都包含**该域名的叶证书在前、其后中间链、最后对应未加密叶私钥**，不是一个Secret只放证书、另一个只放私钥。API须由未来Front Door信任的公有CA签发；admin可以使用企业私有CA。签发CA的私钥独立保管，绝不合入这两个文件。以下在仓库根目录的受控终端执行，只填写文件路径；已合并的合格PEM可直接使用，不必再次拼接：
+
+四个输入路径就是上表的现有材料：`API_CHAIN_FILE`填API证书/fullchain的`.pem`，`API_LEAF_KEY_FILE`填其`.key`，`ADMIN_CHAIN_FILE`填admin叶证书及可选中间链，`ADMIN_LEAF_KEY_FILE`填admin叶私钥。不要把admin根CA证书或CA私钥填成后两项。所有路径均属于**运行该命令的机器**；另一台电脑上的文件先安全传来。输出目录已有同名材料时先核对并保留恢复副本，不盲目覆盖。
+
+```bash
+set -euo pipefail
+umask 077
+mkdir -p temp
+mkdir -m 700 temp/certificate-import
 API_CHAIN_FILE="REPLACE_API_LEAF_AND_CHAIN_FILE"
 API_LEAF_KEY_FILE="REPLACE_API_LEAF_PRIVATE_KEY_FILE"
 ADMIN_CHAIN_FILE="REPLACE_ADMIN_LEAF_AND_CHAIN_FILE"
 ADMIN_LEAF_KEY_FILE="REPLACE_ADMIN_LEAF_PRIVATE_KEY_FILE"
 API_PEM_FILE="temp/certificate-import/api.pem"
 ADMIN_PEM_FILE="temp/certificate-import/admin.pem"
-cat "$API_CHAIN_FILE" "$API_LEAF_KEY_FILE" > "$API_PEM_FILE"
-cat "$ADMIN_CHAIN_FILE" "$ADMIN_LEAF_KEY_FILE" > "$ADMIN_PEM_FILE"
+{ cat "$API_CHAIN_FILE"; printf '\n'; cat "$API_LEAF_KEY_FILE"; } > "$API_PEM_FILE"
+{ cat "$ADMIN_CHAIN_FILE"; printf '\n'; cat "$ADMIN_LEAF_KEY_FILE"; } > "$ADMIN_PEM_FILE"
 chmod 600 "$API_PEM_FILE" "$ADMIN_PEM_FILE"
 BASE_DOMAIN="REPLACE_BASE_DOMAIN_FROM_CUSTOMER_JSON"
 .venv/bin/python - "$BASE_DOMAIN" "$API_PEM_FILE" "$ADMIN_PEM_FILE" <<'PY'
@@ -877,12 +1156,39 @@ except Exception:
 PY
 ```
 
-本机需具备仓库Python依赖。验证覆盖域名/SAN、私钥匹配、有效期至少7天和Secret 25KB限制，不证明CA链已被实际Runner/Front Door信任。由管理员把admin根CA**公钥证书**安装到实际Runner的OpenSSL系统信任和管理浏览器信任；仅在生成证书的开发VM验证通过不算完成。S4-11的plan已经会验证Runner信任，不能等execute再补；API信任链也需符合后续Front Door要求。
+本机需具备仓库Python依赖。目录已存在时命令会停止，请核对旧材料或换新输出路径，不覆盖。记录两份叶证书的`sha256`和`expiresAt`，第7步要与上传后的材料比对。验证覆盖域名/SAN、私钥匹配、有效期至少7天和Secret 25KB限制，不证明CA链已被实际Runner/Front Door信任。
 
-**4. 人工上传。** 在已核对私网与导入人登录的终端执行；使用上述受控PEM路径，命令明确过滤输出，不启用`--debug`或shell trace。在另一机器执行时须先安全传输并重新核对这些路径/变量。这一步写入Secret的新版本，已有版本时需先批准轮换，不为测试而删除旧版本：
+**4. 管理员临时开启受限公网。** 先完成证书准备与本地验证，再开始计时的上传窗口。Portal操作只作用于第1步输出的证书Vault，不改`privateIngress.allowedCidrs`；该CIDR限制的是LiteLLM入口，与Vault防火墙无关。
+
+1. 管理员记录Vault原网络设置和结束时间；需具备该Vault的`Microsoft.KeyVault/vaults/write`管理权限。导入人仍需已批准的Key Vault Secrets Officer数据权限，网络管理员权限不能代替它。
+2. Vault → **Networking → Firewalls and virtual networks**，选择**Allow public access from specific virtual networks and IP addresses**（部分Portal显示Selected networks），只添加上传机器的实际公网出口IPv4，单地址使用`/32`。从Portal的Add your client IP取值，并由网络Owner核对公司代理/VPN/NAT出口；浏览器与CLI出口不同时分别核对，只批准实际需要的地址。不要填本机10.x地址、Runner/Bastion网段或PE IP，不选择All networks，不填`0.0.0.0/0`。
+3. 保持默认拒绝及trusted services bypass关闭，即`defaultAction=Deny`、`bypass=None`，Save。保留PE、Private DNS、RBAC、软删除、清除保护和CanNotDelete锁。并行IaC部署会与临时设置冲突，窗口内不要同时运行certificate-vault部署。
+
+开启公网仍需正常Azure登录和数据授权，不是匿名上传。上传机器须能通过正常Vault域名走获批公网路径；若企业DNS仍解析到不可达PE，交网络Owner处理，不改hosts或跳过TLS。如果授权/网络失败或到了结束时间，**无论上传成功、失败或中断，都立即执行第6步关闭公网**，不等待Runner排障完成。Policy拒绝修改时不自行申请Owner或删除锁绕过。
+
+**5. 客户在本机上传。** Portal为主路径：用获批导入人账号登录正确租户，进入证书Vault → **Secrets → Generate/Import**，不是Certificates。分别创建`api-tls`和`admin-tls`，Secret value粘贴第3步对应完整合并PEM，保留换行；Content type填`application/x-pem-file`，Enabled设为Yes，日期如设置须覆盖使用窗口。不把文件路径、base64文本、CSR或CA私钥当作值。已有同名Secret时先批准轮换，不删除旧版本；已删除保留中的同名Secret由Owner处理，不擅自purge。
+
+也可在同一获批出口的**客户本机**使用CLI文件上传，避免手动粘贴出错。租户/订阅来自客户JSON的`azure`，Vault名称来自第1步输出；不是GitHub Client ID，也不使用Actions登录身份。以下先登录并仅列举元数据，任何一步失败都不继续上传，并由管理员关闭窗口：
 
 ```bash
+set -euo pipefail
+TENANT_ID="REPLACE_TENANT_ID_FROM_CUSTOMER_JSON"
+SUBSCRIPTION_ID="REPLACE_SUBSCRIPTION_ID_FROM_CUSTOMER_JSON"
 CERT_VAULT="REPLACE_NAME_FROM_CERTIFICATE_VAULT_OUTPUT"
+API_PEM_FILE="temp/certificate-import/api.pem"
+ADMIN_PEM_FILE="temp/certificate-import/admin.pem"
+az login --tenant "$TENANT_ID" --output none
+az account set --subscription "$SUBSCRIPTION_ID"
+az account show --query '{tenant:tenantId,subscription:id,identity:user.name,type:user.type}' --output json
+az ad signed-in-user show --query '{objectId:id,upn:userPrincipalName}' --output json
+az keyvault secret list --subscription "$SUBSCRIPTION_ID" --vault-name "$CERT_VAULT" \
+  --query '[].{id:id,enabled:attributes.enabled}' --output json --only-show-errors
+```
+
+核对当前用户Object ID与certificateImporterPrincipalId一致；配置Group时核对实际成员资格。列表不返回值，也不证明写权限。出现同名Secret时停止并走轮换审批；全部核对后执行下面两条命令，不启用`--debug`或shell trace，不使用`--value`把私钥写入命令行：
+
+```bash
+set -euo pipefail
 az keyvault secret set --subscription "$SUBSCRIPTION_ID" --vault-name "$CERT_VAULT" \
   --name api-tls --file "$API_PEM_FILE" --encoding utf-8 --content-type application/x-pem-file \
   --query '{id:id,enabled:attributes.enabled}' --output json --only-show-errors
@@ -891,9 +1197,33 @@ az keyvault secret set --subscription "$SUBSCRIPTION_ID" --vault-name "$CERT_VAU
   --query '{id:id,enabled:attributes.enabled}' --output json --only-show-errors
 ```
 
-Portal替代路径为该Vault → **Secrets → Generate/Import**，不是Certificates；在有私网可达路径的浏览器分别创建api-tls/admin-tls，值粘贴各自完整合并PEM，不上传CA私钥。上传后按客户保管策略处理受控临时文件并保留原始恢复材料，不删除唯一副本。自动API签发路径只需人工导入admin-tls，再于S4-09/10签发API；专用身份的精确TXT/API及ACME状态Secret授权仍须另行批准，不授予它整库Secrets Officer或admin读取权限。
+在Portal每个Secret的当前版本页面，或CLI成功输出中记录**完整带版本Secret Identifier**与Enabled状态；没有两份成功结果就记为未完成。`certificateMaterialsImported=false`是基础设施部署的固定输出，手工上传后不会变成true，不用重跑S4-04更新它。首次手动导入两份证书时跳过S4-09/10；选自动API签发时只手动导入admin，关闭公网后按已批准权限运行S4-09/10，不能把两条路径混成重复写入。
 
-**完成条件：** 两个Secret可用、私钥匹配、实际Runner信任CA、privateIngress指向上述地址及获准CIDR。S4-11由真实runtime身份读取两套材料生成计划，审核后S4-12发布并核验TLS/Host。上传成功不代表入口已发布，也不自动生成Stage4验收。
+**6. 立即关闭公网并核对。** 管理员回到Networking，将Public network access设为**Disable public access**并Save；清除本次新增的临时IP规则并保存，不删除PE或其他Owner的资源。刷新确认`Disabled`、`defaultAction=Deny`、`bypass=None`，PE仍为Approved。本组件基线IP规则为空，应恢复`ipRules=[]`。这些是人工步骤，关闭窗口不靠下次部署自动收回；上传失败、中途退出也必须完成关闭。
+
+Portal JSON View或下面的管理面只读查询均可核对（客户本机执行，TARGET_RG取客户JSON的target.resourceGroup）：
+
+```bash
+TARGET_RG="REPLACE_TARGET_RESOURCE_GROUP_FROM_CUSTOMER_JSON"
+az keyvault show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
+  --name "$CERT_VAULT" \
+  --query '{publicNetworkAccess:properties.publicNetworkAccess,defaultAction:properties.networkAcls.defaultAction,bypass:properties.networkAcls.bypass,ipRules:properties.networkAcls.ipRules,privateEndpoints:properties.privateEndpointConnections[].properties.privateLinkServiceConnectionState.status}' \
+  --output json
+```
+
+关闭后，从同一本机公网路径用原获批账号重新列举Secret，应被网络策略拒绝；保留网络拒绝信息而非Secret正文。凭据过期、普通RBAC拒绝、匿名404或仍能打开Portal的Vault Overview均不是关闭证明。公网DNS仍能解析是正常现象，不能据此认定未关闭。网络设置未恢复、仍可公网读取时停止后续步骤，交管理员处理。参考[Key Vault网络设置](https://learn.microsoft.com/en-us/azure/key-vault/general/network-security)。
+
+**7. 验证上传材料真正可用。** 不要求把私钥再传到Runner；由已有runtime workflow从Vault私网读取。验证分三层，不能仅凭Portal显示两个Secret就签验收：
+
+| 检查 | 操作与通过标准 |
+| --- | --- |
+| CA信任和私网 | 管理员将核验过指纹的admin根CA**公钥证书**安装到实际Runner的OpenSSL/Python系统信任及管理浏览器；不是安装叶证书/CA私钥。Runner解析Vault正常域名须与PE的NIC私有IP一致，TLS/443可达。Vault HTTPS通过不代表admin CA已受信任 |
+| 上传后读取与内容校验 | 完成S4-05/06及所需前置后，新建S4-11：Customer private runtime operations，main、test、stage=4、action=private-ingress、operation=plan，所有approved/audit_continue/confirm字段留空。公网已关闭时真实runtime身份成功读取两份Secret、验证Enabled、域名/SAN、私钥匹配、剩余有效期及Runner信任链，并完成Kubernetes dry-run；私网失败不打开Vault公网兜底 |
+| 与本地材料一致且已发布 | 解密成功plan的runtime-review.json，逐项比对`certificates.api/admin.secretId`等于第5步版本地址、`sha256`等于第3步本地叶证书指纹、`expiresAt`一致。审核后S4-12引用该plan ID，成功结果应含`applied=true`、`verified=true`，实际两个私有入口的TLS指纹、域名校验及错误Host拒绝通过 |
+
+证书地址仍填写在客户JSON**顶层**privateIngress的api/admin.tlsSecretId，且allowedCidrs覆盖批准来源；同步完整GitHub Environment Secret `CUSTOMER_CONFIG_JSON`，不是把PEM填进去。手动路径可固定第5步版本；使用无版本地址时须确认选中的当前版本正确。变更配置/代码/证书版本后重新plan，不能沿用旧批准。PE/DNS、AKS、ACR或权限检查失败须分别定位，S4-11不是独立的证书专用按钮。
+
+**完成条件：** 公网窗口已关闭且临时规则已清理、两份Secret版本及证书指纹一致、实际Runner私网读取和CA信任通过、S4-12实际入口验证通过。Front Door源站TLS在Stage9继续验证，业务认证另行验收；上传成功不代表入口已发布，也不自动生成Stage4验收。按保管策略处理本机临时PEM并保留原始恢复材料，演练CA私钥独立保管，不删除唯一副本。
 
 **Stage4验收前的镜像步骤：** 私有ACR可达后运行`Promote LiteLLM image`，environment=test、acr_name=客户ACR名称、source_image保持仓库固定源digest、target_tag=`litellm-azure:rehearsal-1`（示例，按发布版本命名）、build_azure_runtime=true、build_auth_proxy=false。没有stage/approved_run_id输入。deploy身份需批准的ACR推送权限；Runner需访问源registry、扫描库和Sigstore。记录成功输出的完整`ACR/repository@sha256:...`，下一阶段应用配置使用它；扫描失败时即使已推送也不能作为已批准镜像。
 

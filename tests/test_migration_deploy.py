@@ -30,6 +30,206 @@ class FakeAzure:
 
 
 class MigrationDeploymentTests(unittest.TestCase):
+    def target_connectivity_config(self):
+        config = customer_config()
+        config["parameters"]["runner-target-connectivity"] = {
+            "runnerVirtualNetworkId": group_id(config).replace("rg-secure", "rg-runner") + "/providers/Microsoft.Network/virtualNetworks/runner-vnet",
+        }
+        return config
+
+    def test_target_connectivity_is_stage4_only_and_preserves_early_fingerprints(self):
+        from scripts.runner_target_connectivity import target_connectivity_settings
+        config = self.target_connectivity_config()
+        validate_config(config, "test")
+        template, document = parameters_for(config, 4, "runner-target-connectivity")
+        self.assertEqual(template.parent.name, "runner-target-connectivity")
+        self.assertTrue(document["parameters"]["manageDnsLink"]["value"])
+        original = customer_config()
+        for stage in range(4):
+            self.assertEqual(stage_fingerprint(config, stage), stage_fingerprint(original, stage))
+        self.assertNotEqual(stage_fingerprint(config, 4), stage_fingerprint(original, 4))
+        for stage in (0, 3, 5):
+            with self.subTest(stage=stage), self.assertRaises(ValueError):
+                parameters_for(config, stage, "runner-target-connectivity")
+        settings = target_connectivity_settings(config)
+        config["parameters"]["runner-target-connectivity"]["runnerVirtualNetworkId"] = settings["runnerVirtualNetworkId"].upper()
+        self.assertEqual(settings["linkName"], target_connectivity_settings(config)["linkName"])
+
+    def test_target_connectivity_rejects_unapproved_scope_and_management_values(self):
+        from scripts.runner_target_connectivity import target_connectivity_settings
+        config = self.target_connectivity_config()
+        identifier = config["parameters"]["runner-target-connectivity"]["runnerVirtualNetworkId"]
+        for updates in (
+            {"runnerVirtualNetworkId": identifier + "/subnets/runner"},
+            {"runnerVirtualNetworkId": identifier.replace(config["azure"]["subscriptionId"], "33333333-3333-4333-8333-333333333333")},
+            {"manageDnsLink": "false"},
+            {"privateDnsZoneId": "/unapproved/zone"},
+        ):
+            invalid = copy.deepcopy(config)
+            invalid["parameters"]["runner-target-connectivity"].update(updates)
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                target_connectivity_settings(invalid)
+        config["parameters"]["runner-connectivity"] = {"runnerVirtualNetworkId": identifier + "-other"}
+        with self.assertRaisesRegex(ValueError, "differs"):
+            target_connectivity_settings(config)
+
+    def target_connectivity_azure(self, config):
+        from unittest.mock import Mock
+        from scripts.runner_target_connectivity import target_connectivity_settings, target_connectivity_resource_ids
+        settings = target_connectivity_settings(config)
+        node_prefix = group_id(config).replace("rg-secure", "rg-nodes") + "/providers/"
+        zone_name = "synthetic.privatelink.westus.azmk8s.io"
+        resources = {
+            "deployment": "Succeeded",
+            "cluster": {"id": settings["aksResourceId"], "provisioningState": "Succeeded", "powerState": {"code": "Running"}, "nodeResourceGroup": "rg-nodes", "privateFqdn": "new-aks." + zone_name, "apiServerAccessProfile": {"enablePrivateCluster": True, "privateDnsZone": "system"}, "agentPoolProfiles": [{"vnetSubnetId": settings["targetVirtualNetworkId"] + "/subnets/system"}]},
+            "zone": {"id": node_prefix + "Microsoft.Network/privateDnsZones/" + zone_name},
+            "endpoints": [{"provisioningState": "Succeeded", "subnet": {"id": settings["targetVirtualNetworkId"] + "/subnets/system"}, "privateLinkServiceConnections": [{"privateLinkServiceId": settings["aksResourceId"], "privateLinkServiceConnectionState": {"status": "Approved"}}], "networkInterfaces": [{"id": node_prefix + "Microsoft.Network/networkInterfaces/api-nic"}]}],
+            "ips": ["10.30.1.4"], "record": {"aRecords": [{"ipv4Address": "10.30.1.4"}]},
+            "runner": {"id": settings["runnerVirtualNetworkId"]}, "links": [],
+        }
+        azure = Mock()
+        azure.run.return_value = {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}
+        def scoped(command):
+            if command[:3] == ["deployment", "group", "show"]:
+                return resources["deployment"]
+            if command[:2] == ["aks", "show"]:
+                return resources["cluster"]
+            for prefix, key in ((["network", "private-dns", "zone", "show"], "zone"), (["network", "private-endpoint", "list"], "endpoints"), (["network", "nic", "show"], "ips"), (["network", "private-dns", "record-set", "a", "show"], "record"), (["network", "vnet", "show"], "runner"), (["network", "private-dns", "link", "vnet", "list"], "links")):
+                if command[:len(prefix)] == prefix:
+                    return resources[key]
+            if "what-if" in command:
+                context = {"createDnsLink": True, "privateDnsZoneId": resources["zone"]["id"], "dnsResourceGroupName": "rg-nodes", "linkName": settings["linkName"]}
+                return {"status": "Succeeded", "changes": [{"resourceId": identifier, "changeType": "Create"} for identifier in sorted(target_connectivity_resource_ids(config, context))]}
+            if command[:3] == ["deployment", "group", "create"]:
+                resources["links"] = [{"name": settings["linkName"], "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}, "registrationEnabled": False, "provisioningState": "Succeeded", "virtualNetworkLinkState": "Completed"}]
+                return {"properties": {"provisioningState": "Succeeded"}}
+            raise AssertionError(command)
+        azure.scoped.side_effect = scoped
+        return azure, resources
+
+    def test_target_connectivity_discovers_only_existing_aks_dns_and_scopes_changes(self):
+        from scripts.runner_target_connectivity import inspect_target_connectivity, target_connectivity_resource_ids
+        config = self.target_connectivity_config()
+        azure, resources = self.target_connectivity_azure(config)
+        context = inspect_target_connectivity(config, azure)
+        self.assertEqual(context["privateEndpointIps"], ["10.30.1.4"])
+        self.assertEqual(context["privateDnsZoneId"], resources["zone"]["id"])
+        allowed = target_connectivity_resource_ids(config, context)
+        self.assertEqual(len(allowed), 2)
+        assert_change_scope(config, "runner-target-connectivity", [{"resourceId": identifier, "changeType": "Create"} for identifier in allowed], context)
+        for identifier in (resources["zone"]["id"], resources["zone"]["id"] + "/A/new-aks", context["aksResourceId"], context["runnerVirtualNetworkId"], next(iter(allowed)) + "-other"):
+            with self.subTest(identifier=identifier), self.assertRaises(ValueError):
+                assert_change_scope(config, "runner-target-connectivity", [{"resourceId": identifier, "changeType": "Modify"}], context)
+        for change_type in ("Delete", "Unsupported"):
+            with self.assertRaises(ValueError):
+                assert_change_scope(config, "runner-target-connectivity", [{"resourceId": next(iter(allowed)), "changeType": change_type}], context)
+
+    def test_target_connectivity_rejects_dns_drift_and_unapproved_resources(self):
+        from scripts.runner_target_connectivity import inspect_target_connectivity
+        config = self.target_connectivity_config()
+        mutations = (
+            lambda resources: resources.update(deployment="Failed"),
+            lambda resources: resources["cluster"].update(provisioningState="Updating"),
+            lambda resources: resources["cluster"]["powerState"].update(code="Stopped"),
+            lambda resources: resources["cluster"]["apiServerAccessProfile"].update(enablePrivateCluster=False),
+            lambda resources: resources["cluster"]["apiServerAccessProfile"].update(privateDnsZone="none"),
+            lambda resources: resources["cluster"].update(privateFqdn="unapproved.invalid"),
+            lambda resources: resources["cluster"]["agentPoolProfiles"][0].update(vnetSubnetId="/other/subnets/system"),
+            lambda resources: resources["zone"].update(id="/other/zone"),
+            lambda resources: resources["endpoints"][0]["privateLinkServiceConnections"][0]["privateLinkServiceConnectionState"].update(status="Pending"),
+            lambda resources: resources["endpoints"][0]["networkInterfaces"][0].update(id="/other/nic"),
+            lambda resources: resources.update(ips=["8.8.8.8"]),
+            lambda resources: resources["record"].update(aRecords=[{"ipv4Address": "10.30.1.5"}]),
+            lambda resources: resources["runner"].update(id="/other/vnet"),
+            lambda resources: resources["runner"].update(dhcpOptions={"dnsServers": ["10.50.0.10"]}),
+        )
+        for mutate in mutations:
+            azure, resources = self.target_connectivity_azure(config)
+            mutate(resources)
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                inspect_target_connectivity(config, azure)
+
+    def test_target_connectivity_reuses_existing_links_and_supports_external_dns(self):
+        from scripts.runner_target_connectivity import inspect_target_connectivity, target_connectivity_resource_ids, target_connectivity_settings
+        config = self.target_connectivity_config()
+        azure, resources = self.target_connectivity_azure(config)
+        settings = target_connectivity_settings(config)
+        resources["links"] = [{"name": "network-owner-link", "virtualNetwork": {"id": settings["runnerVirtualNetworkId"]}, "registrationEnabled": False, "provisioningState": "Succeeded", "virtualNetworkLinkState": "Completed"}]
+        context = inspect_target_connectivity(config, azure)
+        self.assertEqual(context["management"], "reused")
+        self.assertEqual(target_connectivity_resource_ids(config, context), set())
+        resources["links"][0]["name"] = settings["linkName"]
+        self.assertTrue(inspect_target_connectivity(config, azure)["createDnsLink"])
+        resources["links"][0]["registrationEnabled"] = True
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            inspect_target_connectivity(config, azure)
+        resources["links"][0]["registrationEnabled"] = False
+        resources["links"][0]["virtualNetwork"]["id"] += "-other"
+        with self.assertRaisesRegex(ValueError, "another VNet"):
+            inspect_target_connectivity(config, azure)
+        resources["links"] = []
+        config["parameters"]["runner-target-connectivity"]["manageDnsLink"] = False
+        resources["runner"]["dhcpOptions"] = {"dnsServers": ["10.50.0.10"]}
+        context = inspect_target_connectivity(config, azure)
+        self.assertEqual(context["management"], "external")
+        self.assertFalse(context["createDnsLink"])
+
+    def test_target_connectivity_deployment_reuses_platform_but_requires_new_sha_evidence(self):
+        config = self.target_connectivity_config()
+        azure, resources = self.target_connectivity_azure(config)
+        records = [{"stage": stage, "environment": "test", "binding": "stage-config", "configSha256": stage_fingerprint(config, stage), "revision": self.revision, "status": "passed", "checks": stage_checks(stage, config), "approvedBy": [config["azure"]["tenantId"], config["azure"]["subscriptionId"]], "observedAt": datetime.now(timezone.utc).isoformat(), "reportUrl": "https://evidence.customer.invalid/report", "reportSha256": "b" * 64} for stage in range(4)]
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_deploy.subprocess.run", side_effect=self.compile):
+            plan = deploy_component(config, 4, "runner-target-connectivity", self.revision, "plan", [], directory, azure=azure)
+            self.assertFalse(any("create" in call.args[0] for call in azure.scoped.call_args_list))
+            context = json.loads((Path(directory) / "connectivity-review.json").read_text())
+            self.assertEqual(context["privateDnsZoneId"], resources["zone"]["id"])
+            parameters = json.loads((Path(directory) / "parameters.json").read_text())["parameters"]
+            self.assertEqual(parameters["dnsResourceGroupName"]["value"], "rg-nodes")
+            self.assertTrue(parameters["createDnsLink"]["value"])
+            with self.assertRaisesRegex(ValueError, "Prior stage evidence"):
+                deploy_component(config, 4, "runner-target-connectivity", self.revision, "deploy", [], directory, plan["planSha256"], azure)
+            old_records = [{**record, "revision": "c" * 40} for record in records]
+            with self.assertRaisesRegex(ValueError, "revision mismatch"):
+                deploy_component(config, 4, "runner-target-connectivity", self.revision, "deploy", old_records, directory, plan["planSha256"], azure)
+            resources["ips"] = ["10.30.1.5"]
+            resources["record"]["aRecords"][0]["ipv4Address"] = "10.30.1.5"
+            with self.assertRaisesRegex(ValueError, "Plan changed"):
+                deploy_component(config, 4, "runner-target-connectivity", self.revision, "deploy", records, directory, plan["planSha256"], azure)
+            resources["ips"] = ["10.30.1.4"]
+            resources["record"]["aRecords"][0]["ipv4Address"] = "10.30.1.4"
+            receipt = deploy_component(config, 4, "runner-target-connectivity", self.revision, "deploy", records, directory, plan["planSha256"], azure)
+            self.assertFalse(receipt["stageAccepted"])
+            creates = [call.args[0] for call in azure.scoped.call_args_list if call.args[0][:3] == ["deployment", "group", "create"]]
+            self.assertEqual(len(creates), 1)
+            self.assertIn("llmgw-test-s4-runner-target-connectivity", creates[0])
+            self.assertNotIn("llmgw-test-s4-platform", creates[0])
+            self.assertIn("Incremental", creates[0])
+            self.assertFalse(any("get-credentials" in call.args[0] for call in azure.scoped.call_args_list))
+
+    def test_target_connectivity_postdeploy_requires_link_and_legacy_preview_is_blocked(self):
+        from scripts.customer_migration import preview
+        from scripts.runner_target_connectivity import inspect_target_connectivity
+        config = self.target_connectivity_config()
+        azure, _ = self.target_connectivity_azure(config)
+        with self.assertRaisesRegex(ValueError, "missing after deployment"):
+            inspect_target_connectivity(config, azure, require_link=True)
+        template, _ = parameters_for(config, 4, "runner-target-connectivity")
+        with patch("scripts.customer_migration.subprocess.run") as command, self.assertRaisesRegex(ValueError, "infrastructure deployment plan"):
+            preview(config, template, ROOT / "temp/parameters.json", "runner-target-connectivity")
+        command.assert_not_called()
+
+    def test_target_connectivity_supports_reported_custom_zone_and_same_vnet(self):
+        from scripts.runner_target_connectivity import inspect_target_connectivity, target_connectivity_settings
+        config = self.target_connectivity_config()
+        azure, resources = self.target_connectivity_azure(config)
+        resources["zone"]["id"] = resources["zone"]["id"].replace("rg-nodes", "rg-dns")
+        resources["cluster"]["apiServerAccessProfile"]["privateDnsZone"] = resources["zone"]["id"]
+        self.assertEqual(inspect_target_connectivity(config, azure)["dnsResourceGroupName"], "rg-dns")
+        config["parameters"]["runner-target-connectivity"]["runnerVirtualNetworkId"] = target_connectivity_settings(config)["targetVirtualNetworkId"]
+        azure, resources = self.target_connectivity_azure(config)
+        resources["links"] = [{"name": "aks-system-link", "virtualNetwork": {"id": resources["runner"]["id"]}, "registrationEnabled": False, "provisioningState": "Succeeded", "virtualNetworkLinkState": "Completed"}]
+        self.assertEqual(inspect_target_connectivity(config, azure)["management"], "reused")
+
     def connectivity_config(self):
         config = customer_config()
         config["parameters"]["backup"] = {"virtualNetworkName": "backup-vnet"}

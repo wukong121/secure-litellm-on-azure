@@ -37,6 +37,7 @@ COMPONENTS = {
     "monitoring": (1, "monitoring", {"logAnalyticsWorkspaceName"}),
     "platform": (3, "environments", {"containerRegistryName", "logAnalyticsWorkspaceName", "stage4Network", "stage4Aks", "stage4RoleAssignmentNaming", "stage5Data", "approvedHttpsFqdns", "azureOpenAIConnections", "createStage5KeyVaultPrivateDnsZone", "createStage5PostgresqlPrivateDnsZone", "createStage5ManagedRedisPrivateDnsZone"}),
     "certificate-vault": (4, "certificate-vault", {"vaultName", "ingressReaderPrincipalId", "certificateImporterPrincipalId", "certificateImporterPrincipalType", "runnerVirtualNetworkId", "createPrivateDnsZone", "manageRunnerDnsLink", "manageTargetDnsLink"}),
+    "runner-target-connectivity": (4, "runner-target-connectivity", {"runnerVirtualNetworkId", "manageDnsLink"}),
     "audit-foundation": (8, "audit-foundation", set()),
     "observability": (8, "observability", set()),
     "proxy-foundation": (7, "proxy-foundation", set()),
@@ -53,6 +54,7 @@ REQUIRED = {
     "monitoring": {"logAnalyticsWorkspaceName"},
     "platform": {"containerRegistryName", "logAnalyticsWorkspaceName", "stage4Network", "stage4Aks"},
     "certificate-vault": {"vaultName", "ingressReaderPrincipalId", "certificateImporterPrincipalId", "certificateImporterPrincipalType", "runnerVirtualNetworkId", "createPrivateDnsZone", "manageRunnerDnsLink"},
+    "runner-target-connectivity": {"runnerVirtualNetworkId"},
     "audit-foundation": set(),
     "observability": set(),
     "proxy-foundation": set(),
@@ -251,6 +253,10 @@ def validate_config(config, environment):
     if certificate_vault is not None and (configured(certificate_vault) or "privateIngress" in config):
         from scripts.certificate_vault import certificate_vault_parameters
         certificate_vault_parameters(config)
+    target_connectivity = config["parameters"].get("runner-target-connectivity")
+    if target_connectivity is not None and configured(target_connectivity):
+        from scripts.runner_target_connectivity import target_connectivity_settings
+        target_connectivity_settings(config)
     network = config["parameters"].get("network")
     if network is not None:
         require(REQUIRED["network"].issubset(network), "Network bootstrap configuration is incomplete")
@@ -341,6 +347,10 @@ def parameters_for(config, stage, component):
     elif component == "certificate-vault":
         from scripts.certificate_vault import certificate_vault_parameters
         parameters = certificate_vault_parameters(config)
+    elif component == "runner-target-connectivity":
+        from scripts.runner_target_connectivity import target_connectivity_settings
+        settings = target_connectivity_settings(config)
+        parameters = {key: settings[key] for key in ("runnerVirtualNetworkId", "manageDnsLink")}
     elif component == "monitoring":
         require(config["legacy"]["namespace"] == "litellm" and config["legacy"]["postgresPvc"] == "pg-data", "Monitoring queries currently require litellm namespace and pg-data PVC; adapt and test queries first")
         parameters.update(aksClusterName=config["legacy"]["aksClusterName"], ownerEmail=config["ownerEmail"])
@@ -397,6 +407,7 @@ def prepare(config, stage, component, destination):
 
 
 def preview(config, template, path, component):
+    require(component != "runner-target-connectivity", "Use Customer infrastructure deployment plan to discover and review existing AKS DNS resources")
     group = config["legacy" if component in {"monitoring", "legacy-logging"} else "target"]["resourceGroup"]
     scope = ["sub", "what-if", "--location", config["location"]] if component == "bootstrap" else ["group", "what-if", "--resource-group", group]
     result = subprocess.run(["az", "deployment", *scope, "--subscription", config["azure"]["subscriptionId"], "--template-file", str(template), "--parameters", f"@{path}", "--result-format", "FullResourcePayloads", "--no-pretty-print", "--output", "json"], capture_output=True, text=True, check=False)

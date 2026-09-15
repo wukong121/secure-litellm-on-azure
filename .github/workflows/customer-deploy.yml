@@ -14,7 +14,7 @@ on:
       component:
         type: choice
         required: true
-        options: [bootstrap, network, backup, runner-connectivity, legacy-logging, monitoring, platform, certificate-vault, proxy-foundation, audit-foundation, audit, observability, origin, edge]
+        options: [bootstrap, network, backup, runner-connectivity, legacy-logging, monitoring, platform, certificate-vault, runner-target-connectivity, proxy-foundation, audit-foundation, audit, observability, origin, edge]
       operation:
         type: choice
         required: true
@@ -109,7 +109,7 @@ jobs:
         if: success() || failure()
         env:
           ARTIFACT_NAME: infrastructure-${{ inputs.environment }}-${{ inputs.stage }}-${{ inputs.component }}-${{ github.run_id }}
-        run: python -m scripts.workflow_security seal --directory temp/migration-deploy --name "$ARTIFACT_NAME" plan-summary.json reviewed-plan.json operation-receipt.json deployment-receipt.json deployment-outputs.json operation-status.json
+        run: python -m scripts.workflow_security seal --directory temp/migration-deploy --name "$ARTIFACT_NAME" plan-summary.json reviewed-plan.json connectivity-review.json operation-receipt.json deployment-receipt.json deployment-outputs.json operation-status.json
       - name: Save encrypted evidence
         if: success() || failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
