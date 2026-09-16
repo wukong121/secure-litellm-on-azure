@@ -326,6 +326,7 @@ module keyVault '../modules/key-vault/main.bicep' = if (stage5Enabled) {
     name: keyVaultName
     location: location
     workloadPrincipalId: workloadIdentity!.outputs.workloadIdentity.principalId
+    principalSourceResourceId: stage4RoleAssignmentNaming == 'resource-id' ? resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'id-litellm-workload-${environmentName}') : ''
     bootstrapPrincipalId: bootstrapPrincipalId
     logAnalyticsWorkspaceId: logAnalyticsWorkspace.id
     tags: tags
@@ -352,6 +353,7 @@ module managedRedis '../modules/managed-redis/main.bicep' = if (stage5Enabled) {
     name: managedRedisName
     location: location
     workloadPrincipalId: workloadIdentity!.outputs.workloadIdentity.principalId
+    principalSourceResourceId: stage4RoleAssignmentNaming == 'resource-id' ? resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'id-litellm-workload-${environmentName}') : ''
     logAnalyticsWorkspaceId: logAnalyticsWorkspace.id
     skuName: stage5Data.redisSkuName
     tags: tags
