@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: validate validate-stage4 validate-stage5 validate-stage6 validate-stage7 validate-stage8 validate-stage9 validate-oss-callbacks test test-local test-local-full bicep kustomize
+.PHONY: validate validate-stage4 validate-stage5 validate-stage6 validate-stage7 validate-stage8 validate-stage9 validate-local-execution validate-oss-callbacks test test-local test-local-full bicep kustomize
 
 validate:
 	bash scripts/validate-stage3.sh
@@ -22,6 +22,9 @@ validate-stage8:
 
 validate-stage9:
 	bash scripts/validate-stage9.sh
+
+validate-local-execution:
+	./.venv/bin/python -m unittest tests.test_local_execution
 
 validate-oss-callbacks:
 	./.venv/bin/python -m unittest tests.test_litellm_audit_envelope
