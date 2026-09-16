@@ -9,6 +9,9 @@ param location string
 @description('LiteLLM Workload Identity principal ID.')
 param workloadPrincipalId string
 
+@description('Optional stable identity resource ID for first-deployment What-if. Empty preserves existing principal-based assignment names.')
+param principalSourceResourceId string = ''
+
 @description('Optional approved bootstrap runner principal ID for secret initialization; never the pod identity.')
 param bootstrapPrincipalId string = ''
 
@@ -52,7 +55,7 @@ resource vault 'Microsoft.KeyVault/vaults@2025-05-01' = {
 }
 
 resource secretsUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(vault.id, workloadPrincipalId, keyVaultSecretsUserRoleId)
+  name: guid(vault.id, empty(principalSourceResourceId) ? workloadPrincipalId : principalSourceResourceId, keyVaultSecretsUserRoleId)
   scope: vault
   properties: {
     description: 'Allow only the LiteLLM Workload Identity to read secret values at runtime.'

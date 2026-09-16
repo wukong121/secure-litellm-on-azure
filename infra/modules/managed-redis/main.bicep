@@ -9,6 +9,9 @@ param location string
 @description('LiteLLM Workload Identity object ID used as the Redis Entra username.')
 param workloadPrincipalId string
 
+@description('Optional stable identity resource ID for first-deployment What-if. Empty preserves existing principal-based assignment names.')
+param principalSourceResourceId string = ''
+
 @description('Existing Log Analytics workspace resource ID.')
 param logAnalyticsWorkspaceId string
 
@@ -56,7 +59,7 @@ resource database 'Microsoft.Cache/redisEnterprise/databases@2025-07-01' = {
 
 resource accessPolicyAssignment 'Microsoft.Cache/redisEnterprise/databases/accessPolicyAssignments@2025-07-01' = {
   parent: database
-  name: workloadPrincipalId
+  name: empty(principalSourceResourceId) ? workloadPrincipalId : uniqueString(database.id, principalSourceResourceId)
   properties: {
     accessPolicyName: 'default'
     user: {

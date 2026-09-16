@@ -163,6 +163,27 @@ class CustomerTemplateTests(unittest.TestCase):
                 self.assertEqual(assignment["properties"]["principalType"], "ServicePrincipal")
                 self.assertIn(role_id, nested["variables"][role_variable])
 
+        for module_name in ("keyVault", "managedRedis"):
+            with self.subTest(module=module_name):
+                module = compiled["resources"][module_name]
+                source = json.dumps(module["properties"]["parameters"]["principalSourceResourceId"])
+                self.assertIn("parameters('stage4RoleAssignmentNaming')", source)
+                self.assertIn("resourceId('Microsoft.ManagedIdentity/userAssignedIdentities'", source)
+                self.assertNotIn("reference(", source)
+                self.assertNotIn("principalId", source)
+                nested = module["properties"]["template"]
+                self.assertEqual(nested["parameters"]["principalSourceResourceId"]["defaultValue"], "")
+
+        key_vault = compiled["resources"]["keyVault"]["properties"]["template"]
+        secrets_user = next(resource for resource in key_vault["resources"] if resource["type"] == "Microsoft.Authorization/roleAssignments" and "keyVaultSecretsUserRoleId" in resource["properties"]["roleDefinitionId"])
+        self.assertEqual(secrets_user["name"], "[guid(resourceId('Microsoft.KeyVault/vaults', parameters('name')), if(empty(parameters('principalSourceResourceId')), parameters('workloadPrincipalId'), parameters('principalSourceResourceId')), variables('keyVaultSecretsUserRoleId'))]")
+        self.assertEqual(secrets_user["properties"]["principalId"], "[parameters('workloadPrincipalId')]")
+
+        managed_redis = compiled["resources"]["managedRedis"]["properties"]["template"]
+        redis_assignment = next(resource for resource in managed_redis["resources"] if resource["type"] == "Microsoft.Cache/redisEnterprise/databases/accessPolicyAssignments")
+        self.assertIn("if(empty(parameters('principalSourceResourceId')), parameters('workloadPrincipalId'), uniqueString(", redis_assignment["name"])
+        self.assertEqual(redis_assignment["properties"]["user"]["objectId"], "[parameters('workloadPrincipalId')]")
+
     def assert_certificate_vault_contract(self, compiled):
         resources = compiled["resources"]
         resources = list(resources.values()) if isinstance(resources, dict) else resources
