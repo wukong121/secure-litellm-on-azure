@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "deploymentMode": "migration",
+  "environment": "test",
+  "localExecution": {
+    "postgresRestoreImage": "postgres@sha256:REPLACE_APPROVED_64_HEX_DIGEST",
+    "executionHost": {
+      "virtualNetworkId": "REPLACE_EXISTING_EXECUTION_HOST_VNET_RESOURCE_ID",
+      "managePeering": true,
+      "manageBlobDnsLink": true
+    }
+  },
+  "azure": {
+    "tenantId": "REPLACE_TENANT_ID",
+    "subscriptionId": "REPLACE_SUBSCRIPTION_ID"
+  },
+  "location": "REPLACE_AZURE_REGION",
+  "baseDomain": "REPLACE_CUSTOMER_BASE_DOMAIN",
+  "ownerEmail": "REPLACE_BACKUP_OWNER_EMAIL",
+  "legacy": {
+    "resourceGroup": "REPLACE_LEGACY_RESOURCE_GROUP",
+    "aksClusterName": "REPLACE_LEGACY_AKS_NAME",
+    "namespace": "litellm",
+    "postgresPvc": "pg-data"
+  },
+  "target": {
+    "resourceGroup": "REPLACE_NEW_RESOURCE_GROUP"
+  },
+  "parameters": {
+    "backup": {
+      "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
+      "backupOwnerPrincipalId": "REPLACE_APPROVED_USER_OBJECT_ID",
+      "virtualNetworkName": "REPLACE_TARGET_VNET",
+      "virtualNetworkAddressPrefix": "10.30.0.0/16",
+      "privateEndpointSubnetName": "snet-private-endpoints",
+      "privateEndpointSubnetPrefix": "10.30.8.0/24"
+    },
+    "legacy-logging": {
+      "workspaceMode": "create"
+    },
+    "monitoring": {
+      "logAnalyticsWorkspaceName": "REPLACE_LEGACY_LOG_WORKSPACE"
+    }
+  }
+}

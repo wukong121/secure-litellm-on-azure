@@ -20,6 +20,7 @@ READMES = (
     "docs/litellm-azure-security-hardening-zh.md",
     "docs/litellm-stage7-entra-proxy-domains-2026-09-07.md",
     "docs/customer-migration-guide-zh.md",
+    "local_execution/README_ZH.md",
     "docs/customer-stage0-acceptance-checklist-zh.md",
     "docs/customer-stage1-acceptance-checklist-zh.md",
     "docs/customer-stage2-acceptance-checklist-zh.md",
