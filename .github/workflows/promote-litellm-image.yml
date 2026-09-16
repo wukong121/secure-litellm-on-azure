@@ -186,11 +186,68 @@ jobs:
             cosign sign --yes "$IMAGE_REFERENCE"
           fi
 
-      - name: Encrypt SBOM evidence
+      - name: Verify promoted digest signature
+        env:
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+          BUILD_AZURE_RUNTIME: ${{ inputs.build_azure_runtime }}
+          BUILD_AUTH_PROXY: ${{ inputs.build_auth_proxy }}
+          CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/promote-litellm-image.yml@${GITHUB_REF}"
+          annotations=()
+          runtime=source
+          if [[ "$BUILD_AZURE_RUNTIME" == true ]]; then
+            runtime=azure
+            annotations+=(-a llmgw.runtime=azure -a "llmgw.revision=$GITHUB_SHA" -a "llmgw.environment=$CUSTOMER_ENVIRONMENT")
+          elif [[ "$BUILD_AUTH_PROXY" == true ]]; then
+            runtime=auth-proxy
+            annotations+=(-a llmgw.runtime=auth-proxy -a "llmgw.revision=$GITHUB_SHA" -a "llmgw.environment=$CUSTOMER_ENVIRONMENT")
+          fi
+          verification="$RUNNER_TEMP/target-image-verification-$GITHUB_RUN_ID.json"
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${annotations[@]}" "$IMAGE_REFERENCE" > "$verification"
+          mv "$verification" temp/image-promotion/target-image-verification.json
+          export LLMGW_RUNTIME="$runtime"
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          directory = Path("temp/image-promotion")
+          evidence = {}
+          for name in ("litellm-sbom.spdx.json", "target-image-verification.json"):
+              evidence[name] = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+          summary = {
+              "schemaVersion": 1,
+              "check": "target_image_signature_sbom",
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "ref": os.environ["GITHUB_REF"],
+              "revision": os.environ["GITHUB_SHA"],
+              "environment": os.environ["CUSTOMER_ENVIRONMENT"],
+              "image": os.environ["IMAGE_REFERENCE"],
+              "runtime": os.environ["LLMGW_RUNTIME"],
+              "signatureVerified": True,
+              "vulnerabilityPolicy": {"severity": ["CRITICAL"], "ignoreUnfixed": True},
+              "evidenceSha256": evidence,
+              "observedAt": datetime.now(timezone.utc).isoformat(),
+              "stageAccepted": False,
+              "notCovered": ["Kubernetes deployment", "application authentication", "model inference", "stage acceptance"],
+          }
+          (directory / "target-image-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+          PY
+
+      - name: Encrypt image evidence
         if: success() || failure()
         env:
           ARTIFACT_NAME: litellm-sbom-${{ github.run_id }}
-        run: python -m scripts.workflow_security seal --directory temp/image-promotion --name "$ARTIFACT_NAME" litellm-sbom.spdx.json
+        run: >-
+          python -m scripts.workflow_security seal --directory temp/image-promotion --name "$ARTIFACT_NAME"
+          litellm-sbom.spdx.json target-image-verification.json target-image-summary.json
       - name: Upload encrypted SBOM evidence
         if: success() || failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -24,6 +24,7 @@ READMES = (
     "docs/customer-stage1-acceptance-checklist-zh.md",
     "docs/customer-stage2-acceptance-checklist-zh.md",
     "docs/customer-stage3-acceptance-checklist-zh.md",
+    "docs/customer-stage4-acceptance-checklist-zh.md",
     "docs/litellm-security-hardening-implementation-roadmap-zh.md",
     "docs/litellm-security-hardening-change-list-zh.md",
     "docs/litellm-code-completion-backlog-2026-09-07.md",
@@ -369,6 +370,71 @@ class ProjectDocumentationTests(unittest.TestCase):
                 result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 for forbidden in ("get-access-token", "credential show", "role assignment create", "acr update", "acr login", "az aks stop", "docker pull", "rm -rf", "curl -k"):
+                    self.assertNotIn(forbidden, source)
+
+    def test_stage_four_guide_matches_checks_workflows_and_artifacts(self):
+        from scripts.customer_migration import stage_checks
+        from tests.test_customer_migration import customer_config
+
+        path = "docs/customer-stage4-acceptance-checklist-zh.md"
+        guide = (ROOT / path).read_text()
+        self.assertIn("!" + path, (ROOT / ".gitignore").read_text().splitlines())
+        main = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        section = main.split("### 阶段4：", 1)[1].split("### 阶段5：", 1)[0]
+        self.assertIn(Path(path).name, section)
+        checks = stage_checks(4, customer_config())
+        self.assertEqual(checks, ["private_dns_egress", "private_runner", "target_image_signature_sbom", "workload_identity", "private_ingress"])
+        for index, check in enumerate(checks, start=2):
+            self.assertIn(f"## {index}. {check}：", guide)
+        self.assertIn(",".join(checks), guide)
+        self.assertIn(",".join(checks), section)
+
+        acceptance = yaml.load((ROOT / ".github/workflows/customer-acceptance.yml").read_text(), Loader=yaml.BaseLoader)
+        for field in ("reviewed_run_id", "checked_items", "evidence_notes", "confirm_environment"):
+            self.assertIn(acceptance["on"]["workflow_dispatch"]["inputs"][field]["description"], guide)
+        runner = (ROOT / ".github/workflows/customer-runner-checks.yml").read_text()
+        promotion = (ROOT / ".github/workflows/promote-litellm-image.yml").read_text()
+        runtime = (ROOT / ".github/workflows/customer-runtime.yml").read_text()
+        for value in ("runner-checks-${{ inputs.environment }}-${{ github.run_id }}", "runner-readiness.json"):
+            self.assertIn(value, runner)
+            self.assertIn(value.replace("${{ inputs.environment }}", "test").replace("${{ github.run_id }}", "<run ID>"), guide)
+        for value in ("litellm-sbom-${{ github.run_id }}", "litellm-sbom.spdx.json", "target-image-verification.json", "target-image-summary.json", "Promoted immutable image:"):
+            self.assertIn(value, promotion)
+            self.assertIn(value.replace("${{ github.run_id }}", "<run ID>"), guide)
+        for value in ("runtime-summary.json", "runtime-review.json", "operation-receipt.json"):
+            self.assertIn(value, runtime)
+            self.assertIn(value, guide)
+
+    def test_stage_four_guide_is_explicit_about_evidence_gaps_and_safe_examples(self):
+        import subprocess
+
+        path = ROOT / "docs/customer-stage4-acceptance-checklist-zh.md"
+        guide = path.read_text()
+        for required in (
+            "GitHub Artifacts页面右侧", "不是镜像digest", "currentIngressObservationNotPlanBound",
+            "applied=true", "verified=true", "--severity CRITICAL --ignore-unfixed",
+            "同一个GitHub OIDC登录和临时`az acr login`上下文",
+            "当前Stage4流程没有创建该应用Pod或提供有界probe workflow",
+            "未执行W-3就不能确认此项", "当前confirm不支持部分通过",
+            "12至4000字符", "independentlyVerified=false", "acceptance-record-test-4-<run ID>",
+        ):
+            self.assertIn(required, guide)
+        for target in re.findall(r"\]\(([^)]+)\)", guide):
+            link = urlsplit(target)
+            if link.scheme or not link.fragment:
+                continue
+            with self.subTest(target=target):
+                linked_path = path.parent / unquote(link.path)
+                headings = re.findall(r"^#{1,6} (.+)$", linked_path.read_text(), re.M)
+                anchors = {re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-") for heading in headings}
+                self.assertIn(unquote(link.fragment), anchors)
+        snippets = re.findall(r"```bash\n(.*?)\n```", guide, re.S)
+        self.assertGreaterEqual(len(snippets), 9)
+        for index, source in enumerate(snippets):
+            with self.subTest(snippet=index):
+                result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for forbidden in ("get-access-token", "role assignment create", "acr update", "az aks stop", "az aks command invoke", "kubectl apply", "docker pull", "rm -rf", "curl -k", "--admin"):
                     self.assertNotIn(forbidden, source)
 
     def test_stage_two_guide_matches_native_checks_and_workflow_inputs(self):
