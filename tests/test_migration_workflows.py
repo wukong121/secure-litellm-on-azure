@@ -171,3 +171,8 @@ class MigrationWorkflowTests(unittest.TestCase):
         self.assertIn("llmgw.environment=$CUSTOMER_ENVIRONMENT", content)
         self.assertIn("llmgw.runtime=auth-proxy", content)
         self.assertIn("Choose only one runtime build", content)
+        self.assertIn("Verify promoted digest signature", content)
+        self.assertIn("cosign verify", content)
+        self.assertIn("target-image-verification.json", content)
+        self.assertIn("target-image-summary.json", content)
+        self.assertIn('"signatureVerified": True', content)

@@ -250,6 +250,7 @@ config/migration-evidence.json
 !docs/customer-stage1-acceptance-checklist-zh.md
 !docs/customer-stage2-acceptance-checklist-zh.md
 !docs/customer-stage3-acceptance-checklist-zh.md
+!docs/customer-stage4-acceptance-checklist-zh.md
 !docs/customer-deployment-workflows-zh.md
 !docs/litellm-content-audit-phase1-customer-brief-zh.md
 !docs/litellm-ingress-tls-certificate-design-zh.md

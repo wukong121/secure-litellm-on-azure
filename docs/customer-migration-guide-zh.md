@@ -1234,9 +1234,9 @@ az keyvault show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG"
 
 **完成条件：** 公网窗口已关闭且临时规则已清理、两份Secret版本及证书指纹一致、实际Runner私网读取和CA信任通过、S4-12实际入口验证通过。Front Door源站TLS在Stage9继续验证，业务认证另行验收；上传成功不代表入口已发布，也不自动生成Stage4验收。按保管策略处理本机临时PEM并保留原始恢复材料，演练CA私钥独立保管，不删除唯一副本。
 
-**Stage4验收前的镜像步骤：** 私有ACR可达后运行`Promote LiteLLM image`，environment=test、acr_name=客户ACR名称、source_image保持仓库固定源digest、target_tag=`litellm-azure:rehearsal-1`（示例，按发布版本命名）、build_azure_runtime=true、build_auth_proxy=false。没有stage/approved_run_id输入。deploy身份需批准的ACR推送权限；Runner需访问源registry、扫描库和Sigstore。记录成功输出的完整`ACR/repository@sha256:...`，下一阶段应用配置使用它；扫描失败时即使已推送也不能作为已批准镜像。
+**Stage4验收前的镜像步骤：** 私有ACR可达后运行`Promote LiteLLM image`，environment=test、acr_name=客户ACR名称、source_image保持仓库固定源digest、target_tag=`litellm-azure:rehearsal-1`（示例，按发布版本命名）、build_azure_runtime=true、build_auth_proxy=false。没有stage/approved_run_id输入。deploy身份需批准的ACR推送权限；Runner需访问源registry、扫描库和Sigstore。记录成功输出的完整`ACR/repository@sha256:...`，并审核加密artifact中的SBOM、`target-image-verification.json`和`target-image-summary.json`；下一阶段应用配置使用该完整镜像引用。扫描、签名或同作业验证失败时，即使已推送也不能作为已批准镜像。
 
-**阶段验收：** stage=4 draft/confirm；`private_dns_egress`、`private_runner`、`target_image_signature_sbom`、`workload_identity`、`private_ingress`。目标镜像签名/拉取以及WI正反向访问要实际验证，不能用公共源扫描替代。Stage4之后不得重放Stage0 backup/network模板覆盖已扩展VNet。
+**阶段验收：** stage=4 draft/confirm；`private_dns_egress`、`private_runner`、`target_image_signature_sbom`、`workload_identity`、`private_ingress`。五项全部通过时，`checked_items`填写`private_dns_egress,private_runner,target_image_signature_sbom,workload_identity,private_ingress`。逐步取值、artifact审核、只读命令、通过标准和confirm填写见[Stage4私网、AKS身份与入口验收操作指南](customer-stage4-acceptance-checklist-zh.md)。目标镜像签名/拉取以及WI正反向访问要实际验证，不能用公共源扫描、UAMI存在或静态YAML替代；当前缺少标准WI探针时保持待核验，不能编造通过。Stage4之后不得重放Stage0 backup/network模板覆盖已扩展VNet。
 
 ### 阶段5：数据服务与迁移演练
 
