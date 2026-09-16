@@ -1,6 +1,6 @@
 # 客户既有LiteLLM迁移执行手册：架构阶段0与阶段1
 
-> 核对日期：2026-09-15。本文是按当前workflow输入及控制代码核对的主操作手册，不是客户云上全流程已经验收的证明。
+> 核对日期：2026-09-16。本文是按当前workflow输入及控制代码核对的主操作手册，不是客户云上全流程已经验收的证明。
 >
 > 适用：已有LiteLLM on AKS，先加固旧环境，再并行新建、迁移、验证、切流和停旧。示例统一使用GitHub Environment `test`；客户实际用`prod`时须整套一致替换，不混用环境。
 >
@@ -1245,6 +1245,193 @@ az keyvault show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG"
 **本阶段新增Variables：** `AZURE_DATABASE_CLIENT_ID`、`MIGRATION_RESTORE_BLOB`、`MIGRATION_BACKUP_SHA256`。后两项必须来自同一个已核对Stage0备份报告。顶层另加`"databaseAccess":{"migrationPrincipalId":"REPLACE_RUNTIME_SERVICE_PRINCIPAL_OBJECT_ID"}`，填runtime身份的Principal ID而非其Client ID。
 
 **PG管理员注意：** `database-roles`使用专项OIDC服务主体，必须已是该PG的Entra管理员或获准管理员组成员。若PG配置只填某个人的User Object ID，该个人不是此OIDC服务主体，不能把个人UPN填入变量就完成初始化。先与DBA确认受支持管理员配置/组成员，再运行；Azure RBAC不自动产生数据库内角色。
+
+#### 5-A. Stage5开始前由客户人工准备的身份与权限
+
+**先区分人工授权和自动授权。** 客户管理员只为workflow登录身份准备OIDC、管理面读取/回执写入及旧AKS Secret读取权限；S5-02和S5-04会建立下表右侧的资源内授权。不要因为四种身份都参与Stage5，就把它们合并或全部授予目标RG Contributor、PG管理员和Vault写权限。
+
+| 身份 | Stage5前由客户人工准备 | 本流程自动完成 |
+| --- | --- | --- |
+| deploy，`AZURE_CLIENT_ID` | 保留Stage4已批准的作用域；目标RG内资源部署/What-if、受限角色分配及锁写入权限 | S5-02创建PG、Redis、后台Vault、PE/DNS、诊断和下述数据面授权 |
+| database，`AZURE_DATABASE_CLIENT_ID` | 专用应用/UAMI、GitHub Environment OIDC、目标RG Reader或等效自定义读取角色；使用管理员组时另加组成员关系 | 直接配置`ServicePrincipal`时，S5-02把该Principal ID设为目标PG的Entra管理员 |
+| runtime，`AZURE_RUNTIME_CLIENT_ID` | 目标RG Reader或等效读取、目标RG回执写入；migration模式另需旧AKS用户凭据和旧namespace Secret读取 | S5-02授予后台Vault Secrets Officer；S5-04创建`llmgw_migrator`；Stage0配置正确时已有备份容器Blob Data Contributor |
+| application，Stage4创建的LiteLLM Workload Identity | Stage5不要求客户手工增加PG管理员、Vault写入或Redis管理权限 | S5-02授予后台Vault Secrets User和Redis default访问策略；S5-04创建`llmgw_app` |
+
+上述Reader只解决ARM元数据读取，不产生PG、Key Vault、Blob、Redis或Kubernetes数据权限。反过来，PG Entra管理员或Vault Secrets Officer也不能读取ARM部署输出。Runner私网DNS/TLS可达性同样不是角色分配，仍须在S5-02后实测。
+
+**1. 创建并核对database身份和GitHub OIDC。** 由有权管理员在客户管理RG创建专用UAMI或应用服务主体；不使用个人用户、Runner VM身份、runtime身份或应用Pod身份。UAMI的Client ID填GitHub Environment Variable，Principal ID填客户JSON。下面以UAMI为例，所有值都从客户自己的资源取得：
+
+```bash
+set -euo pipefail
+SUBSCRIPTION_ID="REPLACE_AZURE_SUBSCRIPTION_ID_FROM_CUSTOMER_JSON"
+TARGET_RG="REPLACE_TARGET_RESOURCE_GROUP_FROM_CUSTOMER_JSON"
+DATABASE_IDENTITY_RG="REPLACE_DATABASE_IDENTITY_RESOURCE_GROUP"
+DATABASE_IDENTITY_NAME="REPLACE_DATABASE_IDENTITY_NAME"
+az account show --subscription "$SUBSCRIPTION_ID" \
+  --query '{tenantId:tenantId,subscriptionId:id,identity:user.name}' --output json
+az identity show --subscription "$SUBSCRIPTION_ID" --resource-group "$DATABASE_IDENTITY_RG" \
+  --name "$DATABASE_IDENTITY_NAME" \
+  --query '{name:name,tenantId:tenantId,clientId:clientId,principalId:principalId,id:id}' --output json
+az identity federated-credential list --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$DATABASE_IDENTITY_RG" --identity-name "$DATABASE_IDENTITY_NAME" \
+  --query '[].{name:name,issuer:issuer,subject:subject,audiences:audiences}' --output json
+```
+
+联邦凭据必须使用issuer=`https://token.actions.githubusercontent.com`、audience=`api://AzureADTokenExchange`，subject必须对应实际客户仓库和所选Environment。GitHub默认格式为`repo:<owner>/<repo>:environment:<environment>`；组织配置了OIDC subject自定义模板时可能包含仓库Owner/Repository的数字ID，应按该仓库实际Token声明或已验证的同环境身份核对，不能把其他仓库的subject照抄过来。
+
+在GitHub仓库 **Settings → Environments → 本次environment → Environment variables** 设置：
+
+```text
+AZURE_DATABASE_CLIENT_ID=<上述UAMI的clientId>
+```
+
+客户JSON的`parameters.platform.stage5Data`使用同一个对象：
+
+```json
+{
+  "postgresqlEntraAdministratorObjectId": "REPLACE_DATABASE_UAMI_PRINCIPAL_ID",
+  "postgresqlEntraAdministratorPrincipalName": "REPLACE_DATABASE_UAMI_NAME",
+  "postgresqlEntraAdministratorPrincipalType": "ServicePrincipal"
+}
+```
+
+如果客户选择Entra管理员组，JSON填写组Object ID、显示名称和`Group`，并由Entra管理员把database服务主体加入该组；GitHub变量仍填database服务主体的Client ID。不要把组Object ID、UAMI Principal ID或个人Object ID填入`AZURE_DATABASE_CLIENT_ID`。
+
+**2. 给database身份最小ARM读取权限。** `database-roles`会用该身份读取目标RG中的Stage5 deployment、PG属性和应用UAMI，然后才以PG管理员Token连接数据库。最简单的内置角色是目标RG级Reader；生产客户也可预建只含`Microsoft.Resources/deployments/read`、`Microsoft.DBforPostgreSQL/flexibleServers/read`及`Microsoft.ManagedIdentity/userAssignedIdentities/read`的等效自定义角色。先回读，已有等效继承授权时不重复创建：
+
+```bash
+DATABASE_OBJECT_ID="REPLACE_DATABASE_UAMI_PRINCIPAL_ID"
+TARGET_RG_SCOPE="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${TARGET_RG}"
+az role assignment list --subscription "$SUBSCRIPTION_ID" \
+  --assignee-object-id "$DATABASE_OBJECT_ID" --scope "$TARGET_RG_SCOPE" \
+  --include-inherited --fill-principal-name false \
+  --query '[].{role:roleDefinitionName,scope:scope,principalId:principalId,condition:condition}' --output json
+az role assignment create --subscription "$SUBSCRIPTION_ID" \
+  --assignee-object-id "$DATABASE_OBJECT_ID" --assignee-principal-type ServicePrincipal \
+  --role "Reader" --scope "$TARGET_RG_SCOPE" \
+  --query '{scope:scope,principalId:principalId,roleDefinitionId:roleDefinitionId}' --output json
+```
+
+Reader不是PG管理员授权。直接`ServicePrincipal`路径的PG管理员子资源由S5-02根据客户JSON创建；管理员组路径的组成员关系由客户Entra管理员预先维护。database身份不需要目标RG Contributor、Owner、Key Vault Secrets Officer或Kubernetes写权限。
+
+**3. 核对deploy身份仍能创建Stage5资源和模板内授权。** S5-01/02继续使用`AZURE_CLIENT_ID`，不是database或runtime身份。该身份在目标RG需要三类现有授权：
+
+1. Contributor或客户等效自定义角色，用于PG/管理员、Redis/访问策略、Vault、PE、DNS链接和诊断资源的What-if及部署。
+2. `Microsoft.Authorization/roleAssignments/read/write`能力，用于只向runtime和application身份分配后台Vault的Secrets Officer/User。优先使用带条件的Role Based Access Control Administrator，只允许Key Vault Secrets User（`4633458b-17de-408a-b874-0445c86b69e6`）和Key Vault Secrets Officer（`b86a8fe4-44ce-4948-aee5-eccb2c155cd7`），并限制到已核实的两个Principal ID；不能把这项权限授给runtime或database身份。
+3. [4-A1](#4-a1-证书vault防删除锁权限)中的`LLMGW Resource Lock Writer`，目标RG范围的`Microsoft.Authorization/locks/read`和`locks/write`即可；后台Vault也有CanNotDelete锁，不需要`locks/delete`。
+
+S5-01重新使用platform模板，因此Stage4模型账号、目标网络和ACR等已批准作用域也必须仍然有效；不要在Stage4完成后提前撤销deploy身份的必要跨RG授权。已有更宽的Owner/User Access Administrator不因新增受限角色而自动收紧，客户应先检查继承和条件，再决定是否回收。回读时使用`AZURE_CLIENT_ID`对应的服务主体Object ID，不用Client ID本身：
+
+```bash
+DEPLOY_CLIENT_ID="REPLACE_AZURE_CLIENT_ID_FROM_ENVIRONMENT"
+DEPLOY_OBJECT_ID=$(az ad sp show --id "$DEPLOY_CLIENT_ID" --query id --output tsv)
+az role assignment list --subscription "$SUBSCRIPTION_ID" \
+  --assignee-object-id "$DEPLOY_OBJECT_ID" --scope "$TARGET_RG_SCOPE" \
+  --include-inherited --fill-principal-name false \
+  --query '[].{role:roleDefinitionName,scope:scope,condition:condition,conditionVersion:conditionVersion}' --output json
+```
+
+**4. 给runtime身份读取和写回执权限。** S5-05/06的backend-secrets与S5-09/10的schema-migrate会在目标RG创建只含输出的ARM deployment回执；Reader不能写回执，Contributor又超出该用途。由管理员在目标RG创建或复用下面的自定义角色，再分配给`AZURE_RUNTIME_CLIENT_ID`对应的服务主体Object ID。角色定义不是客户JSON内容：
+
+```json
+{
+  "properties": {
+    "roleName": "LLMGW Runtime Receipt Writer",
+    "description": "Read and write reviewed ARM deployment receipts in the approved gateway resource group; no business resource or deployment deletion permissions.",
+    "assignableScopes": [
+      "/subscriptions/REPLACE_SUBSCRIPTION_ID/resourceGroups/REPLACE_TARGET_RG"
+    ],
+    "permissions": [{
+      "actions": [
+        "Microsoft.Resources/deployments/read",
+        "Microsoft.Resources/deployments/write",
+        "Microsoft.Resources/deployments/validate/action",
+        "Microsoft.Resources/deployments/operations/read"
+      ],
+      "notActions": [],
+      "dataActions": [],
+      "notDataActions": []
+    }]
+  }
+}
+```
+
+创建自定义角色需要目标scope上的`Microsoft.Authorization/roleDefinitions/write`；只有RBAC Administrator时不能创建定义，应由权限管理员预建，不扩大为订阅Owner。然后回读runtime身份并分配目标RG Reader和该回执角色；已有等效继承权限时跳过重复分配：
+
+```bash
+RUNTIME_CLIENT_ID="REPLACE_AZURE_RUNTIME_CLIENT_ID_FROM_ENVIRONMENT"
+RUNTIME_OBJECT_ID=$(az ad sp show --id "$RUNTIME_CLIENT_ID" --query id --output tsv)
+az role assignment create --subscription "$SUBSCRIPTION_ID" \
+  --assignee-object-id "$RUNTIME_OBJECT_ID" --assignee-principal-type ServicePrincipal \
+  --role "Reader" --scope "$TARGET_RG_SCOPE" --output none
+az role assignment create --subscription "$SUBSCRIPTION_ID" \
+  --assignee-object-id "$RUNTIME_OBJECT_ID" --assignee-principal-type ServicePrincipal \
+  --role "LLMGW Runtime Receipt Writer" --scope "$TARGET_RG_SCOPE" --output none
+az role assignment list --subscription "$SUBSCRIPTION_ID" \
+  --assignee-object-id "$RUNTIME_OBJECT_ID" --scope "$TARGET_RG_SCOPE" \
+  --include-inherited --fill-principal-name false \
+  --query '[].{role:roleDefinitionName,scope:scope,principalId:principalId,condition:condition}' --output json
+```
+
+`deployments/write`允许在该RG创建或更新部署记录，但不单独授予其中业务资源的写入权限；它仍能覆盖已有同名回执，必须依靠受保护workflow、plan批准和固定命名约束使用。该角色不包含deployment删除、取消、What-if或任何PG/Vault数据权限。
+
+**5. migration模式核对旧AKS Secret读取。** backend-secrets会从旧namespace精确读取`litellm-env`中的Master Key和Salt。若Stage0使用同一个runtime身份完成过backup-restore，通常已具备旧AKS Cluster User及更广的Pod操作权限，但Secret读取仍须单独实测，不能从Pod exec成功推断。先查询旧集群授权模式：
+
+```bash
+LEGACY_RG="REPLACE_LEGACY_RESOURCE_GROUP"
+LEGACY_AKS="REPLACE_LEGACY_AKS_NAME"
+LEGACY_NAMESPACE="REPLACE_LEGACY_NAMESPACE"
+LEGACY_AKS_ID=$(az aks show --subscription "$SUBSCRIPTION_ID" --resource-group "$LEGACY_RG" \
+  --name "$LEGACY_AKS" --query id --output tsv)
+az aks show --subscription "$SUBSCRIPTION_ID" --resource-group "$LEGACY_RG" --name "$LEGACY_AKS" \
+  --query '{managed:aadProfile.managed,azureRbac:aadProfile.enableAzureRbac,id:id}' --output json
+az role assignment create --subscription "$SUBSCRIPTION_ID" \
+  --assignee-object-id "$RUNTIME_OBJECT_ID" --assignee-principal-type ServicePrincipal \
+  --role "Azure Kubernetes Service Cluster User Role" --scope "$LEGACY_AKS_ID" --output none
+```
+
+旧AKS启用Azure RBAC时，由管理员创建仅含`Microsoft.ContainerService/managedClusters/secrets/read` dataAction的自定义角色，将Assignable scope限制在旧AKS所属RG，并把实际角色分配限制在`${LEGACY_AKS_ID}/namespaces/${LEGACY_NAMESPACE}`。Azure RBAC的namespace scope仍允许读取该namespace内其他Secret，不能声称只限`litellm-env`；客户不接受该边界时须先改造密钥交接流程，不能改授整个集群RBAC Writer。
+
+旧AKS使用Kubernetes RBAC时，由集群管理员创建仅允许`get`指定Secret的Role，并绑定runtime服务主体Object ID；不要把这份权限给database或application身份：
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: llmgw-legacy-key-reader
+  namespace: REPLACE_LEGACY_NAMESPACE
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["litellm-env"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: llmgw-legacy-key-reader
+  namespace: REPLACE_LEGACY_NAMESPACE
+subjects:
+  - kind: User
+    name: REPLACE_RUNTIME_SERVICE_PRINCIPAL_OBJECT_ID
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: llmgw-legacy-key-reader
+```
+
+使用管理员的受控kubeconfig应用后，再通过实际runtime OIDC上下文取得用户kubeconfig并执行`kubectl auth can-i get secret/litellm-env -n "$LEGACY_NAMESPACE"`；必须返回yes。不要打印、base64解码或上传Secret正文来证明权限。greenfield模式不读取旧Secret，跳过本项。
+
+**6. 不要重复手工分配模板已管理的权限。** 审核S5-01计划时应看到预期的自动授权；缺失就停止并修配置/模板，不在Portal临时堆叠权限：
+
+| 自动发生的步骤 | 授权结果 | 人工只需核对 |
+| --- | --- | --- |
+| Stage0 backup，已配置`backupAutomationPrincipalId` | runtime在固定备份容器获得Storage Blob Data Contributor | S5-07前确认角色仍在、Blob引用/哈希来自同一报告；不要改授Storage账号Owner |
+| S5-02 platform | database对象成为PG Entra管理员；runtime获得后台Vault Secrets Officer；application获得后台Vault Secrets User和Redis default访问策略 | Principal ID、资源scope和角色/策略名称与计划一致；PG、Vault、Redis均保持公网关闭 |
+| S5-04 database-roles | runtime映射为`llmgw_migrator`，application映射为`llmgw_app`并按DDL/DML边界授权 | 审核database-roles计划和执行结果；不要再给application管理员或migrator成员关系 |
+
+**7. 按时间点完成回读。** S5-01之前完成database OIDC/Variable、database Reader、deploy权限、runtime Reader/回执角色和适用的旧AKS权限。S5-02之后先在PG → Authentication核对实际Entra管理员，再核对Vault及Redis自动授权和Runner私网DNS/TLS；这些资源创建前无法用手工角色代替。S5-03/04只使用database身份，S5-05至S5-10切回runtime身份。任一实际登录身份、Object ID、scope或授权类型不匹配就停止，不用个人管理员Token或订阅Owner成功来代替workflow身份验证。
 
 | 步骤 | workflow显示名称 | stage | component或action | operation | approved_run_id | confirm_environment |
 | --- | --- | --- | --- | --- | --- | --- |
