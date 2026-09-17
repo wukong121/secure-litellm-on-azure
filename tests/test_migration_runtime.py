@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from scripts.customer_migration import ROOT
 from scripts.migration_deploy import group_id
-from scripts.migration_runtime import backup_restore, check_application, hardened_spec, monitoring_onboard, publish, target_database_restore
+from scripts.migration_runtime import backup_restore, capture_restore_container_diagnostics, check_application, hardened_spec, monitoring_onboard, publish, target_database_restore
 from tests.test_customer_migration import customer_config
 from scripts.legacy_access import access_operation, access_patch, access_settings, access_target, access_view, restricted_value
 
@@ -235,6 +235,15 @@ class RuntimeSafetyTests(unittest.TestCase):
                 backup_restore(config, "a" * 40, Path(directory))
             self.assertFalse((Path(directory) / "acceptance-report.json").exists())
 
+    def test_restore_failure_diagnostics_preserve_container_state_and_logs(self):
+        state = SimpleNamespace(returncode=0, stdout=json.dumps({"OOMKilled": True, "ExitCode": 137}), stderr="")
+        logs = SimpleNamespace(returncode=0, stdout="database system is shutting down\n", stderr="")
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.subprocess.run", side_effect=[state, logs]):
+            path = Path(directory)
+            capture_restore_container_diagnostics("restore-container", path)
+            self.assertTrue(json.loads((path / "restore-container-state.json").read_text())["OOMKilled"])
+            self.assertIn("shutting down", (path / "restore-container.log").read_text())
+
     def test_successful_backup_restores_uploads_verifies_and_stays_pending(self):
         config = customer_config()
         azure = Mock()
@@ -267,6 +276,8 @@ class RuntimeSafetyTests(unittest.TestCase):
             docker_run = next(command for command in command_calls if command[:2] == ["docker", "run"])
             self.assertEqual(docker_run[docker_run.index("--network") + 1], "none")
             self.assertNotIn("--publish", docker_run)
+            readiness = next(command for command in command_calls if command[:3] == ["docker", "exec", docker_run[docker_run.index("--name") + 1]] and "/proc/1/comm" in " ".join(command))
+            self.assertIn("pg_isready", " ".join(readiness))
             self.assertTrue(any(command[:2] == ["docker", "exec"] and "pg_restore" in command for command in command_calls))
             self.assertTrue(any(call.args[0][:2] == ["docker", "rm"] for call in cleanup.call_args_list))
 

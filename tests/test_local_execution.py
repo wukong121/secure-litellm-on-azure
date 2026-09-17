@@ -20,6 +20,7 @@ from local_execution.runner import (
     run_connectivity_check,
     run_infrastructure,
     run_runtime,
+    require_legacy_cluster_running,
 )
 from scripts.customer_migration import ROOT, validate_config
 from scripts.migration_deploy import deploy_component
@@ -185,13 +186,23 @@ class LocalExecutionTests(unittest.TestCase):
                 output = "deployment/postgres"
             return subprocess.CompletedProcess(arguments, 0, output, "")
 
-        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch("local_execution.runner.shutil.which", return_value="installed"), patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl"]), patch("scripts.runner_connectivity.backup_target", return_value=target), patch("local_execution.runner.AzureCommands"):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch("local_execution.runner.shutil.which", return_value="installed"), patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl"]), patch("scripts.runner_connectivity.backup_target", return_value=target), patch("local_execution.runner.require_legacy_cluster_running", return_value={"powerState": "Running"}), patch("local_execution.runner.AzureCommands"):
             directory = Path(folder)
             result = run_connectivity_check(config, "a" * 40, directory, run=run)
             report = json.loads((directory / "local-readiness.json").read_text())
         self.assertEqual(result, {"status": "passed"})
         self.assertEqual(report["status"], "passed")
         self.assertIn("local-tools", {check["name"] for check in report["checks"]})
+
+    def test_stopped_legacy_cluster_is_rejected_before_kubernetes_access(self):
+        config, _settings = self.prepared()
+
+        class FakeAzure:
+            def scoped(self, _arguments):
+                return {"provisioningState": "Succeeded", "powerState": "Stopped", "fqdn": "legacy.invalid", "privateFqdn": None}
+
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, self.assertRaisesRegex(ValueError, "not Running"):
+            require_legacy_cluster_running(config, Path(folder), FakeAzure())
 
     def test_runtime_preview_hash_is_used_immediately(self):
         config, _settings = self.prepared()
@@ -216,7 +227,7 @@ class LocalExecutionTests(unittest.TestCase):
         def restore(_config, revision, _directory):
             observed.append((revision, os.environ.get("POSTGRES_RESTORE_IMAGE")))
 
-        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch.dict(os.environ, {"POSTGRES_RESTORE_IMAGE": "previous"}), patch("scripts.migration_runtime.backup_restore", side_effect=restore):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch.dict(os.environ, {"POSTGRES_RESTORE_IMAGE": "previous"}), patch("local_execution.runner.require_legacy_cluster_running"), patch("scripts.migration_runtime.backup_restore", side_effect=restore):
             result = run_backup_restore(config, settings, "f" * 40, Path(folder))
             self.assertEqual(os.environ["POSTGRES_RESTORE_IMAGE"], "previous")
         self.assertEqual(result, {"status": "completed"})
@@ -228,6 +239,17 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertEqual(set(example["localExecution"]), {"postgresRestoreImage", "executionHost"})
         self.assertNotIn("runner-connectivity", example["parameters"])
         self.assertIn("在线Runner VM绝不能挂载高权限UAMI", guide)
+        self.assertIn("可以复用客户现有的deploy/runtime UAMI", guide)
+        self.assertIn("不要使用数据库管理员UAMI", guide)
+        self.assertIn("Client ID用于VM内`az login --identity`", guide)
+        for value in ("llmgw-manual-stage01-test", "S0-L02之前", "S0-L03之前", "17d1049b-9a84-46fb-8f53-869881c3d3ab", "b7e6dc6d-f1e8-4753-8033-0f276bb0955b", "ba92f5b4-2d11-453d-a403-e96b0029c9fe", "不是创建UAMI时预先手工分配的角色", "不属于Stage0–1手工执行UAMI的最低要求"):
+            self.assertIn(value, guide)
+        for value in ("旧AKS必须处于`Running`", "power=Stopped", "az aks start", "getent ahostsv4 \"$AKS_FQDN\"", "不是Runner DNS配置或数据库错误"):
+            self.assertIn(value, guide)
+        for value in ("database system is shutting down", "容器PID 1已经切换为`postgres`", "restore-container-state.json", "restore-container.log", "本次失败不会生成正式`backupBlob`"):
+            self.assertIn(value, guide)
+        for value in ("没有`legacy-monitoring`字段", "workspaceMode", "只能是`create`或`existing`", "REPLACE_EXISTING_LEGACY_WORKSPACE_NAME", "REPLACE_NEW_LEGACY_WORKSPACE_NAME", "不能用`create`试探资源是否存在", "az monitor log-analytics workspace list"):
+            self.assertIn(value, guide)
         for step in STEPS:
             self.assertIn(f"--step {step}", guide)
         ordered = ["config-check", "bootstrap", "backup", "execution-host-connectivity", "connectivity-check", "backup-restore", "legacy-logging", "monitoring-onboard", "monitoring", "legacy-hardening", "legacy-access-restrict"]
