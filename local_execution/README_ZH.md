@@ -38,9 +38,8 @@ make validate-local-execution
 确认没有Actions作业运行，然后在Bastion会话停止服务：
 
 ```bash
-cd /srv/runner/agent
-sudo ./svc.sh stop
-sudo ./svc.sh status || true
+sudo bash -c 'cd /srv/runner/agent && ./svc.sh stop'
+sudo bash -c 'cd /srv/runner/agent && ./svc.sh status' || true
 ```
 
 在GitHub仓库Settings → Actions → Runners确认该机器显示Offline。VM尚未注册GitHub时跳过此项，且不要执行注册命令。手工执行期间不得重新启动服务或派发作业。
@@ -65,9 +64,40 @@ az account show \
 - 获取旧AKS用户凭据，在旧namespace读取Deployment/Pod、执行PostgreSQL Pod的exec/cp、更新两个既定Deployment及可选入口来源设置。
 - 对Stage0备份容器执行Blob列举、上传和下载。
 
+#### 客户自建手工执行UAMI的角色
+
+客户不需要创建名为`github-developer`的身份，也不需要复制某个现有环境的全部角色。可创建环境专用UAMI，例如`llmgw-manual-stage01-test`；它不需要GitHub Federated Credential。当前脚本最简单的授权路径为：
+
+| 时间 | 角色/权限 | Scope | 用途 |
+| --- | --- | --- | --- |
+| S0-L02之前 | `Contributor` | 目标订阅 | 执行订阅级bootstrap、创建目标RG/Workspace，并管理Stage0–1 ARM、网络、旧AKS addon和告警资源；不包含角色分配 |
+| S0-L03之前 | `Role Based Access Control Administrator`，带条件 | 新目标RG | 仅允许分配Storage Account Contributor、Storage Blob Data Owner和Storage Blob Data Contributor；接收者仅限批准的备份Owner用户和手工执行UAMI |
+| 使用Entra/Azure RBAC的旧AKS | `Azure Kubernetes Service Cluster User Role` | 旧AKS资源 | 获取非admin用户kubeconfig |
+| 使用Entra/Azure RBAC的旧AKS | `Azure Kubernetes Service RBAC Writer`或客户等效自定义角色 | 旧AKS的实际legacy namespace | Deployment/Pod读取、Pod exec/cp、Deployment更新及可选Service/Ingress/ConfigMap操作 |
+
+目标RG在bootstrap之前尚不存在，所以可先只授订阅Contributor，成功执行S0-L02后暂停，由客户权限管理员在新目标RG分配带条件RBAC Administrator，再执行S0-L03。不要为了省略这一步授予订阅Owner或无条件User Access Administrator。
+
+RBAC Administrator条件允许的三个RoleDefinition ID为：
+
+```text
+Storage Account Contributor:    17d1049b-9a84-46fb-8f53-869881c3d3ab
+Storage Blob Data Owner:        b7e6dc6d-f1e8-4753-8033-0f276bb0955b
+Storage Blob Data Contributor:  ba92f5b4-2d11-453d-a403-e96b0029c9fe
+```
+
+在Portal打开新目标RG → Access control (IAM) → Add role assignment → Role Based Access Control Administrator → Conditions，选择只允许上述三个角色，并把可接收主体限制为customer.json中的`backupOwnerPrincipalId`和手工执行UAMI Principal ID。若客户Portal或政策不支持该条件，由权限管理员在S0-L03窗口代为执行backup部署；不要改为无条件订阅级角色管理。
+
+S0-L03的backup模板会自动完成三条授权：备份Owner用户获得Storage Account Contributor和Storage Blob Data Owner；配置`backupAutomationPrincipalId`时，手工执行UAMI在固定备份容器获得Storage Blob Data Contributor。因此后者不是创建UAMI时预先手工分配的角色，Storage尚未创建时也没有可用scope。
+
+旧AKS若像传统集群一样未启用Entra/Azure RBAC，订阅Contributor通常可以取得本地cluster-user凭据，不另外复制新AKS角色；仍必须以S0-L05的真实读取和S0-L06的exec/cp结果为准。旧集群使用Kubernetes RBAC时，由集群管理员创建等效Role/RoleBinding，而不是给目标新AKS授权。
+
+下列角色不属于Stage0–1手工执行UAMI的最低要求：`LLMGW Resource Lock Writer`、`Key Vault Secrets User`、目标新AKS的Namespace Bootstrapper/RBAC Reader/RBAC Writer，以及任何PostgreSQL数据库管理员角色。它们属于Stage4/5或新平台，不要因其他环境截图中存在就复制。
+
 个人登录时，`backupOwnerPrincipalId`填写该用户在客户租户内的Object ID，Stage0 backup模板会为其建立备份管理和Blob数据授权。
 
-如果条件访问阻止VM内的个人登录，只能在Runner保持Offline期间临时挂载专用手工执行UAMI。在线Runner VM绝不能挂载高权限UAMI，否则Actions作业可能通过IMDS取得Token。
+如果条件访问阻止VM内的个人登录，只能在Runner保持Offline期间临时挂载手工执行UAMI。可以复用客户现有的deploy/runtime UAMI，但必须先确认它同时具备本节列出的ARM、旧AKS和备份Blob权限；缺少任一权限就使用独立的手工执行UAMI。不要使用数据库管理员UAMI、LiteLLM应用Workload Identity、AKS控制面/kubelet身份或Runner系统身份替代。在线Runner VM绝不能挂载高权限UAMI，否则Actions作业可能通过IMDS取得Token。
+
+选择现有UAMI时分别核对：Client ID用于VM内`az login --identity`，Principal ID用于customer.json的`backupAutomationPrincipalId`和RBAC，完整资源ID用于`az vm identity assign/remove --identities`。三个值不能互换。
 
 客户外部电脑执行：
 
@@ -123,10 +153,27 @@ docker version --format '{{.Server.Version}}'
 az bicep install
 ```
 
-Runner模板默认只把`actions-runner`加入Docker组，工作盘父目录也属于该组。由VM管理员把手工登录用户加入本机组，退出并重新通过Bastion登录：
+Runner模板默认只把`actions-runner`加入Docker组，工作盘父目录也属于该组。由VM管理员把手工登录用户加入本机组，然后退出当前VM会话；组成员关系不会在现有shell中自动生效：
 
 ```bash
 sudo usermod -aG docker,actions-runner "$USER"
+exit
+```
+
+回到客户外部电脑，重新执行第3节取得的实际`bastionSshCommand`：
+
+```bash
+REPLACE_BASTION_SSH_COMMAND_FROM_RUNNER_DEPLOYMENT_OUTPUT
+```
+
+重新进入VM后，先确认两个组均已生效，再访问Runner目录和Docker；任一命令失败就停止，不继续迁移：
+
+```bash
+id -nG | tr ' ' '\n' | grep -Fx actions-runner
+id -nG | tr ' ' '\n' | grep -Fx docker
+cd /srv/runner/agent
+docker version --format '{{.Server.Version}}'
+cd ~
 ```
 
 在加密工作盘建立手工目录，不使用Actions工作目录：
@@ -144,7 +191,8 @@ cd /srv/runner/manual
 git clone "REPLACE_CUSTOMER_REPOSITORY_URL" secure-litellm-on-azure
 cd secure-litellm-on-azure
 git fetch --tags --prune
-git checkout --detach "REPLACE_REVIEWED_FULL_COMMIT_SHA"
+git checkout main
+git pull --ff-only origin main
 git --no-pager show --no-patch --format='commit=%H%nsubject=%s' HEAD
 
 python3 -m venv .venv
@@ -174,6 +222,54 @@ chmod 600 local_execution/customer.json
 | `legacyAccess` | 可选来源限制；只有真实CIDR和影响已批准时才加入 |
 | `localExecution.postgresRestoreImage` | 与旧PG大版本匹配的完整`postgres@sha256:...` |
 | `localExecution.executionHost.virtualNetworkId` | Runner部署输出`managementVnetId`；复用子网模式从`runnerSubnetId`去掉`/subnets/<名称>` |
+
+### 4.2 旧日志Workspace怎样填写
+
+配置中没有`legacy-monitoring`字段。旧环境日志由下面两个字段共同决定：
+
+| 字段 | 允许值 | 作用 |
+| --- | --- | --- |
+| `parameters.legacy-logging.workspaceMode` | 只能是`create`或`existing` | 决定`legacy-logging`步骤创建Workspace，还是只引用已有Workspace |
+| `parameters.monitoring.logAnalyticsWorkspaceName` | 旧资源组内的真实Workspace名称 | 两种模式都从这里取得Workspace名称；不是Workspace资源ID或新目标Workspace名称 |
+
+选择规则：
+
+- `create`：仅在确认`legacy.resourceGroup`内没有该名称的Workspace，并且客户批准新建时使用。`legacy-logging`会在配置的`location`创建PerGB2018 Workspace，并设置30天留存、禁用本地认证和仅按资源权限访问。若同名Workspace已经存在，Azure部署可能更新其属性，因此不能用`create`试探资源是否存在。
+- `existing`：旧资源组内已经有要复用的Workspace时使用。该步骤不会创建或修改Workspace；当前实现只支持与旧AKS位于同一个`legacy.resourceGroup`的Workspace。`legacy-logging`成功本身不证明资源存在，后续步骤会读取它，所以执行前必须先核验。
+
+先从Portal打开 **旧资源组 → Log Analytics workspaces**，记录实际名称和区域；或执行：
+
+```bash
+az monitor log-analytics workspace list \
+  --subscription "REPLACE_SUBSCRIPTION_ID" \
+  --resource-group "REPLACE_LEGACY_RESOURCE_GROUP" \
+  --query '[].{name:name,location:location,state:provisioningState}' \
+  --output table
+```
+
+已有Workspace时配置为：
+
+```json
+"legacy-logging": {
+  "workspaceMode": "existing"
+},
+"monitoring": {
+  "logAnalyticsWorkspaceName": "REPLACE_EXISTING_LEGACY_WORKSPACE_NAME"
+}
+```
+
+确认没有Workspace并获准新建时配置为：
+
+```json
+"legacy-logging": {
+  "workspaceMode": "create"
+},
+"monitoring": {
+  "logAnalyticsWorkspaceName": "REPLACE_NEW_LEGACY_WORKSPACE_NAME"
+}
+```
+
+这两个名称都描述旧环境监控目的地。Stage0备份及后续新网关使用的是`parameters.backup.logAnalyticsWorkspaceName`，不要把两者因名称相似而互换。
 
 恢复镜像必须使用完整RepoDigest：
 
@@ -237,12 +333,49 @@ docker run --rm --network none --read-only --entrypoint pg_restore \
 
 ### S0-L05 连通性检查
 
+旧AKS必须处于`Running`。停止的公网AKS可能暂时没有API DNS记录，此时会表现为`no such host`，不是Runner DNS配置或数据库错误。先查询：
+
+```bash
+az aks show \
+  --subscription "REPLACE_SUBSCRIPTION_ID" \
+  --resource-group "REPLACE_LEGACY_RESOURCE_GROUP" \
+  --name "REPLACE_LEGACY_AKS_NAME" \
+  --query '{state:provisioningState,power:powerState.code,fqdn:fqdn}' \
+  --output json
+```
+
+返回`power=Stopped`时，在批准的计费和维护窗口启动旧AKS：
+
+```bash
+az aks start \
+  --subscription "REPLACE_SUBSCRIPTION_ID" \
+  --resource-group "REPLACE_LEGACY_RESOURCE_GROUP" \
+  --name "REPLACE_LEGACY_AKS_NAME"
+```
+
+`az aks start`成功返回后，再确认状态和API域名解析；解析仍为空时不要运行备份：
+
+```bash
+AKS_FQDN="$(az aks show \
+  --subscription "REPLACE_SUBSCRIPTION_ID" \
+  --resource-group "REPLACE_LEGACY_RESOURCE_GROUP" \
+  --name "REPLACE_LEGACY_AKS_NAME" \
+  --query fqdn --output tsv)"
+
+az aks show \
+  --subscription "REPLACE_SUBSCRIPTION_ID" \
+  --resource-group "REPLACE_LEGACY_RESOURCE_GROUP" \
+  --name "REPLACE_LEGACY_AKS_NAME" \
+  --query powerState.code --output tsv
+getent ahostsv4 "$AKS_FQDN"
+```
+
 ```bash
 .venv/bin/python -m local_execution \
   --config local_execution/customer.json --step connectivity-check
 ```
 
-检查旧AKS读取、备份PE DNS/TLS及Blob列举。结果在`local-readiness.json`；Pod exec/cp和Blob写入由下一步真实验证。
+检查旧AKS运行状态和Deployment读取、备份PE DNS/TLS及Blob列举。结果在`local-readiness.json`；Pod exec/cp和Blob写入由下一步真实验证。
 
 ### S0-L06 备份和隔离恢复
 
@@ -254,6 +387,10 @@ docker run --rm --network none --read-only --entrypoint pg_restore \
 ```
 
 成功条件：旧Pod真实`pg_dump`、无网络临时容器完整`pg_restore`、存在公共业务表、私有Blob上传/回读及SHA256一致。将`acceptance-report.json`中的备份引用、哈希、大小、表数量和耗时记录到客户受控位置，不记录dump正文或凭据。
+
+若看到`database system is shutting down`，说明恢复镜像的临时初始化服务器被过早判为就绪。更新到包含最终服务器就绪检查的最新`main`后重新执行；不要在旧提交上反复碰运气。修复后的脚本要求容器PID 1已经切换为`postgres`且`pg_isready`成功，才开始恢复。失败时会在本次输出目录保留`restore-container-state.json`和`restore-container.log`，先检查`OOMKilled`、退出码和末尾日志；这些文件可能包含客户对象名称，只保存在受控位置。
+
+该错误发生在Blob上传步骤之前，本次失败不会生成正式`backupBlob`。重新执行会重新导出旧库并创建新的临时恢复容器。
 
 ### S0-L07 人工核验
 
@@ -347,9 +484,8 @@ az account clear
 删除`local_execution/customer.json`和不再需要的手工输出。若挂载过UAMI，从客户外部电脑卸载并确认VM不再关联该身份。确认无Azure凭据、高权限UAMI、dump、kubeconfig或手工进程后，恢复服务：
 
 ```bash
-cd /srv/runner/agent
-sudo ./svc.sh start
-sudo ./svc.sh status
+sudo bash -c 'cd /srv/runner/agent && ./svc.sh start'
+sudo bash -c 'cd /srv/runner/agent && ./svc.sh status'
 ```
 
 最后在GitHub确认Runner重新Idle。不得让手工执行与Actions作业同时使用这台VM。

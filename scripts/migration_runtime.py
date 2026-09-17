@@ -36,6 +36,23 @@ def run_command(arguments, directory, label, allowed=(0,), environment=None):
     return result.stdout
 
 
+def capture_restore_container_diagnostics(container_name, directory):
+    try:
+        state = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .State}}", container_name],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        document = json.loads(state.stdout) if state.returncode == 0 and state.stdout.strip() else {"inspectExitCode": state.returncode}
+        private_write(directory / "restore-container-state.json", json.dumps(document, indent=2) + "\n")
+        logs = subprocess.run(
+            ["docker", "logs", "--tail", "200", container_name],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        private_write(directory / "restore-container.log", logs.stdout + logs.stderr)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+
 def connect_cluster(config, directory, legacy):
     require(not legacy or deployment_mode(config) == "migration", "Greenfield cannot access a legacy cluster")
     azure = AzureCommands(config, directory)
@@ -332,7 +349,7 @@ def backup_restore(config, revision, directory):
         run_command(["docker", "pull", image], directory, "restore-image")
         run_command(["docker", "run", "--detach", "--name", container_name, "--network", "none", "--memory", "4g", "--env", "POSTGRES_HOST_AUTH_METHOD=trust", image], directory, "restore-start")
         started = True
-        run_command(["docker", "exec", container_name, "sh", "-c", "for attempt in $(seq 1 60); do pg_isready -U postgres >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1"], directory, "restore-ready")
+        run_command(["docker", "exec", container_name, "sh", "-c", "for attempt in $(seq 1 120); do if [ \"$(cat /proc/1/comm 2>/dev/null)\" = postgres ] && pg_isready -U postgres >/dev/null 2>&1; then exit 0; fi; sleep 1; done; exit 1"], directory, "restore-ready")
         run_command(["docker", "cp", str(backup), f"{container_name}:/tmp/database.dump"], directory, "restore-copy")
         started_at = time.monotonic()
         run_command(["docker", "exec", container_name, "pg_restore", "--exit-on-error", "--no-owner", "--no-acl", "-U", "postgres", "-d", "postgres", "/tmp/database.dump"], directory, "pg-restore")
@@ -350,6 +367,10 @@ def backup_restore(config, revision, directory):
         report["checks"]["backup_restore"]["evidence"] = "Automated full restore and private upload completed; review row counts, roles/ACLs, encryption and application behavior before accepting."
         private_write(directory / "acceptance-report.json", json.dumps(report, indent=2) + "\n")
         print("Backup uploaded and restored in an isolated container. Acceptance report remains pending until all checks are reviewed.")
+    except Exception:
+        if started:
+            capture_restore_container_diagnostics(container_name, directory)
+        raise
     finally:
         subprocess.run([*kube, "exec", pod, "-c", "postgres", "--", "rm", "-f", remote], capture_output=True, check=False)
         if started:

@@ -184,6 +184,20 @@ def run_runtime(config, revision, stage, action, destination):
     return {"planSha256": plan_sha}
 
 
+def require_legacy_cluster_running(config, destination, azure=None):
+    azure = azure or AzureCommands(config, destination)
+    cluster = azure.scoped([
+        "aks", "show",
+        "--resource-group", config["legacy"]["resourceGroup"],
+        "--name", config["legacy"]["aksClusterName"],
+        "--query", "{provisioningState:provisioningState,powerState:powerState.code,fqdn:fqdn,privateFqdn:privateFqdn}",
+    ])
+    require(cluster.get("provisioningState") == "Succeeded", "Legacy AKS provisioning state must be Succeeded")
+    require(cluster.get("powerState") == "Running", "Legacy AKS is not Running; start it and wait for its API hostname to resolve before continuing")
+    require(isinstance(cluster.get("privateFqdn") or cluster.get("fqdn"), str), "Legacy AKS did not expose an API hostname")
+    return cluster
+
+
 def run_connectivity_check(config, revision, destination, run=subprocess.run):
     from scripts.migration_runtime import connect_cluster
     from scripts.runner_connectivity import backup_target
@@ -215,13 +229,16 @@ def run_connectivity_check(config, revision, destination, run=subprocess.run):
         account = None
     target = None
     if account is not None:
+        azure = AzureCommands(config, destination)
+        cluster = probe("legacy-cluster-state", lambda: require_legacy_cluster_running(config, destination, azure))
+
         def cluster_read():
             kube = connect_cluster(config, destination, legacy=True)
             execute([*kube, "get", "deployments", "-o", "name"])
             return "Old cluster deployment listing succeeded"
 
-        probe("legacy-cluster-read", cluster_read)
-        azure = AzureCommands(config, destination)
+        if cluster is not None:
+            probe("legacy-cluster-read", cluster_read)
         target = probe("backup-resources", lambda: backup_target(config, azure))
     if target is not None:
         def private_dns():
@@ -263,6 +280,7 @@ def run_connectivity_check(config, revision, destination, run=subprocess.run):
 def run_backup_restore(config, settings, revision, destination):
     from scripts.migration_runtime import backup_restore
 
+    require_legacy_cluster_running(config, destination)
     image = settings["postgresRestoreImage"]
     previous = os.environ.get("POSTGRES_RESTORE_IMAGE")
     os.environ["POSTGRES_RESTORE_IMAGE"] = image
