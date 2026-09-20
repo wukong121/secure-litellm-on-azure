@@ -772,6 +772,8 @@ chmod 600 local_execution/stage-5-values.local.json
 
 该步骤创建/配置私有Entra-only PostgreSQL、Managed Redis、后台Key Vault、Private Endpoint/DNS、诊断设置和应用Workload Identity；不会恢复数据库。
 
+若旧版本在`send-managed-redis-to-log-analytics`报`CategoryGroup: 'allLogs' is not supported`，本次Stage5父部署为Failed，不能继续`database-roles`。Azure Managed Redis集群资源只提供`AllMetrics`，`default`数据库子资源提供`ConnectionEvents`日志；旧模板把集群误配为`allLogs`。失败时Redis集群/数据库及其他Stage5资源可能已经成功创建，但集群诊断设置整项未创建，因此缺少送往Log Analytics的Redis集群指标。不要删除这些部分成功资源，也不要手工把父部署改成成功。更新到包含“集群`AllMetrics`、数据库`ConnectionEvents`”修复的版本后，重新运行`stage5-platform --operation plan`，审核当前实际状态下的全部增量，再用新plan哈希execute；不得复用失败前的plan哈希。成功后确认父部署为Succeeded，并分别回读两级诊断设置。
+
 2. 客户模式切换到获批PG管理员账号；验证模式继续用PG管理员组内的operator UAMI。创建`llmgw_migrator`、`llmgw_app`及DDL/DML边界：
 
 ```bash

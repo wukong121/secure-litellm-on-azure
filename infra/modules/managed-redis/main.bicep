@@ -74,12 +74,6 @@ resource clusterDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-pr
   properties: {
     workspaceId: logAnalyticsWorkspaceId
     logAnalyticsDestinationType: 'Dedicated'
-    logs: [
-      {
-        categoryGroup: 'allLogs'
-        enabled: true
-      }
-    ]
     metrics: [
       {
         category: 'AllMetrics'
@@ -97,7 +91,7 @@ resource databaseDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-p
     logAnalyticsDestinationType: 'Dedicated'
     logs: [
       {
-        categoryGroup: 'allLogs'
+        category: 'ConnectionEvents'
         enabled: true
       }
     ]

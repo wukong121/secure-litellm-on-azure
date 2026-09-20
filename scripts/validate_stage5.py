@@ -40,6 +40,9 @@ def validate_infrastructure() -> None:
     assert "accessKeysAuthentication: 'Disabled'" in redis
     assert "clusteringPolicy: 'NoCluster'" in redis
     assert "accessPolicyAssignments@2025-07-01" in redis
+    assert "category: 'AllMetrics'" in redis
+    assert "category: 'ConnectionEvents'" in redis
+    assert "categoryGroup: 'allLogs'" not in redis
 
     expected_private_link = {
         "key-vault-private-endpoint/main.bicep": ("'vault'", "privatelink.vaultcore.azure.net"),
