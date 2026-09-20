@@ -12,6 +12,7 @@ local_execution/
 ├── stage2-9-guide-zh.md        # Stage2–9顺序、Entra和发布边界
 ├── customer.example.json       # 可逐Stage扩展的最小配置
 ├── customer.stage2-9.fragments.example.json # Stage2–9分阶段配置片段
+├── merge_config.py             # 分阶段预览/合并customer.json
 ├── image_supply_chain.py       # 本地镜像SBOM/扫描/签名
 ├── requirements.txt            # 本地全部Python依赖
 ├── __main__.py                 # python -m local_execution入口
@@ -215,7 +216,7 @@ chmod 600 local_execution/customer.json
 
 `local_execution/customer.json`已被Git忽略。配置不包含密码、Token、Master Key或Salt。
 
-`customer.example.json`故意只包含Stage0–1可运行的基础字段。进入Stage2后，按[Stage2–9指南的分阶段模板说明](stage2-9-guide-zh.md#分阶段配置模板)从`customer.stage2-9.fragments.example.json`只合并当前阶段片段；该补充文件是片段目录，不能整份替换`customer.json`。
+`customer.example.json`故意只包含Stage0–1可运行的基础字段。进入Stage2后，按[Stage2–9指南的分阶段模板说明](stage2-9-guide-zh.md#分阶段配置模板)使用`python -m local_execution.merge_config`合并当前阶段；不要手工覆盖整个`customer.json`。
 
 ### 4.1 配置字段
 

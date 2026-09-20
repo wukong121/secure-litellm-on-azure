@@ -208,13 +208,70 @@ az bicep install
 
 [基础模板](customer.example.json)保持Stage0–1最小可运行范围；[Stage2–9片段目录](customer.stage2-9.fragments.example.json)补充后续全部字段。片段目录本身不是合法的客户配置，不能整份复制为`customer.json`，也不能把`catalogVersion`或`stages`写入客户配置。
 
-每次只处理即将执行的Stage：
+使用合并器，不手工递归编辑：
 
-1. 从`stages.<阶段>.customerConfig`取字段，递归合并到`customer.json`根对象。
-2. 从`localExecutionMerge`取字段，递归合并到现有`localExecution`；不要覆盖已有`postgresRestoreImage`和`executionHost`。
-3. `parameters.platform`也必须递归合并，不能用Stage4/5的小片段覆盖Stage3已填写的网络、AKS、ACR和Workspace。
-4. `optional...`和`...Alternative`只在客户明确选择该方案时合并。Stage8的原生审计与增强L3互斥；选择增强L3前按模板要求删除`contentAudit`。
-5. 合并前替换当前片段内所有`REPLACE_`值。尚未决定的未来Stage块继续留在片段目录，不提前写入`customer.json`。
+```bash
+# 1. 预览当前Stage；不会修改customer.json
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json \
+  --stage REPLACE_STAGE --operation plan
+```
+
+最后一行JSON会给出：
+
+- `preview`：递归合并后的完整配置预览。
+- `requiredValues`：本Stage尚未替换的`REPLACE_*`列表。
+- `changedPaths`：本次会修改的JSON路径。
+
+若`missingPlaceholders`非空，把生成的`values.required.json`复制到Git忽略的本地文件并填写客户值：
+
+```bash
+cp "REPLACE_REQUIRED_VALUES_PATH" \
+  "local_execution/stage-REPLACE_STAGE-values.local.json"
+chmod 600 "local_execution/stage-REPLACE_STAGE-values.local.json"
+# 使用受控编辑器填写右侧空字符串，不添加密码、Token、Master Key或Salt。
+```
+
+然后再次预览，确认`missingPlaceholders=[]`：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json \
+  --stage REPLACE_STAGE --operation plan \
+  --values "local_execution/stage-REPLACE_STAGE-values.local.json"
+```
+
+审核`preview`和`changedPaths`后才真正写入：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json \
+  --stage REPLACE_STAGE --operation apply \
+  --values "local_execution/stage-REPLACE_STAGE-values.local.json"
+```
+
+`apply`会先调用现有配置校验器，成功后以0600权限原子替换`customer.json`，并把变更前完整配置保存到输出目录的`customer.before.json`。校验失败或仍有占位符时不会修改原文件。
+
+可选块必须显式加`--option`：
+
+| Stage | 选项 | 作用 |
+| --- | --- | --- |
+| 2 | `single-validation-identity` | 配置单一local-operator UAMI；客户直接登录不选 |
+| 4 | `automatic-api-certificate` | 启用自动API证书；手工导入不选 |
+| 8 | `observability` | 加入可选collector |
+| 8 | `enhanced-l3` | 删除原生`contentAudit`并切换增强L3；不能与observability在同一次合并 |
+| 9 | `azure-dns` | 使用仓库自动发布Azure DNS |
+| 9 | `approved-release` | 打开最终流量开关并加入release报告路径；默认只合并禁流量prepare |
+
+例如验证环境Stage2：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 2 --operation plan \
+  --option single-validation-identity
+```
+
+合并器会自动复用customer.json中已有的订阅、区域、baseDomain、目标Workspace/VNet、Runner VNet、ACR和证书Vault名称；其他实际客户值从values文件提供。
 
 片段覆盖关系如下：
 
@@ -313,7 +370,20 @@ execute会重新生成实时plan；代码、配置、云状态或发布报告变
 
 ### Stage2：冻结决策，不部署资源
 
-1. 按分阶段模板合并Stage2的`governance`和`contentAudit`。确认网络CIDR、区域/SKU配额、PG HA、域名证书、实际客户端协议、正文留存和Entra Free决策均已有客户负责人。
+1. 合并Stage2的`governance`和`contentAudit`。客户直接登录不加option；验证环境的单一UAMI加`--option single-validation-identity`：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 2 --operation plan \
+  --values local_execution/stage-2-values.local.json \
+  --option single-validation-identity
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 2 --operation apply \
+  --values local_execution/stage-2-values.local.json \
+  --option single-validation-identity
+```
+
+客户直接登录时删除两条命令中的`--option single-validation-identity`。确认网络CIDR、区域/SKU配额、PG HA、域名证书、实际客户端协议、正文留存和Entra Free决策均已有客户负责人。
 2. Runner VM执行：
 
 ```bash
@@ -326,7 +396,16 @@ execute会重新生成实时plan；代码、配置、云状态或发布报告变
 
 **执行身份：客户当前登录账号，或验证模式的operator UAMI。** 确认该主体在目标RG有部署权限；模型RG权限可在Stage4前补齐。
 
-1. 按模板合并Stage3 `parameters.platform`，替换ACR、Workspace、VNet、AKS版本和VM SKU；先确认CIDR不与Runner、旧环境或企业网络重叠。
+1. 合并Stage3 `parameters.platform`；先确认CIDR不与Runner、旧环境或企业网络重叠：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 3 --operation plan \
+  --values local_execution/stage-3-values.local.json
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 3 --operation apply \
+  --values local_execution/stage-3-values.local.json
+```
 2. Runner VM先检查固定上游源镜像：
 
 ```bash
@@ -372,7 +451,18 @@ az acr show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
 - 当前执行主体在Runner VNet有Network Contributor。
 - Stage4模板中的模型账号、区域、AKS版本/SKU和CIDR已获批。
 
-1. 按模板合并Stage4片段，替换模型账号、证书Vault、Runner VNet、入口证书地址和CIDR。先部署私网AKS和模型连接：
+1. 合并Stage4片段。手工导入证书使用下列命令；选择自动API证书时，两条命令都追加`--option automatic-api-certificate`：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 4 --operation plan \
+  --values local_execution/stage-4-values.local.json
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 4 --operation apply \
+  --values local_execution/stage-4-values.local.json
+```
+
+确认模型账号、证书Vault、Runner VNet、入口证书地址和CIDR后，部署私网AKS和模型连接：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -550,6 +640,17 @@ rm -f "$VERIFY_KUBECONFIG"
 - `runtimeInputs.backupBlob`和`backupSha256`来自同一个成功Stage0报告。
 - deploy仍有目标RG Contributor、Lock Writer和受约束角色分配权限。
 
+先合并Stage5配置和Stage0备份引用：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 5 --operation plan \
+  --values local_execution/stage-5-values.local.json
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 5 --operation apply \
+  --values local_execution/stage-5-values.local.json
+```
+
 1. 客户模式使用当前Azure部署账号，验证模式使用operator，创建Stage5私有数据资源：
 
 ```bash
@@ -652,7 +753,16 @@ az postgres flexible-server show --subscription "$SUBSCRIPTION_ID" \
 
 **客户模式使用当前登录账号；验证模式使用operator UAMI。** 它已获得新AKS Cluster User/Cluster Admin；Stage5数据库、秘密和Schema回执必须属于当前代码和配置。
 
-1. 将Stage4镜像步骤输出的完整digest和实际模型deployment填入Stage6 `application`片段；`connectionAlias`必须匹配Stage4模型账号。
+1. 将Stage4镜像步骤输出的完整digest和实际模型deployment填入Stage6 values文件；`connectionAlias`必须匹配Stage4模型账号，然后合并：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 6 --operation plan \
+  --values local_execution/stage-6-values.local.json
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 6 --operation apply \
+  --values local_execution/stage-6-values.local.json
+```
 2. 计划并发布后端：
 
 ```bash
@@ -709,7 +819,16 @@ export COSIGN_PASSWORD
 unset COSIGN_PASSWORD
 ```
 
-保存输出完整digest，再合并Stage7片段并把digest填入`proxy.image`；填写真实调用客户端Application Client ID、API用户/服务主体Object ID和管理员用户Object ID。
+保存输出完整digest，在Stage7 values文件填写代理digest、真实调用客户端Application Client ID、API用户/服务主体Object ID、管理员用户Object ID及两个Entra身份，然后合并：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 7 --operation plan \
+  --values local_execution/stage-7-values.local.json
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 7 --operation apply \
+  --values local_execution/stage-7-values.local.json
+```
 
 2. deploy身份创建API/admin代理Workload Identity、独立Vault、Private Endpoint/DNS和最小Vault角色：
 
@@ -861,7 +980,18 @@ export COSIGN_PASSWORD
 unset COSIGN_PASSWORD
 ```
 
-将输出完整digest填入`observability.collectorImage`，然后执行：
+将输出完整digest填入Stage8 values文件，用`observability`选项合并，再部署：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 8 --operation plan \
+  --values local_execution/stage-8-values.local.json --option observability
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 8 --operation apply \
+  --values local_execution/stage-8-values.local.json --option observability
+```
+
+然后执行：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -902,7 +1032,16 @@ rm -f "$VERIFY_KUBECONFIG"
 
 ### 7.2 增强L3替代路径
 
-只有客户明确批准增强L3时使用。先删除`contentAudit`，再合并Stage8 `enhancedL3Alternative`，其中包含独立审计Team映射和审计读取者。
+只有客户明确批准增强L3时使用。合并器会删除`contentAudit`并加入独立审计Team映射和审计读取者：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 8 --operation plan \
+  --values local_execution/stage-8-values.local.json --option enhanced-l3
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 8 --operation apply \
+  --values local_execution/stage-8-values.local.json --option enhanced-l3
+```
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -960,7 +1099,18 @@ Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身
 
 ### 8.1 禁流量准备
 
-1. deploy仍需读取AKS节点RG中的内部LB；保留Stage4窗口的节点RG读取/部署权限。合并Stage9 origin/edge配置，`privateLinkServiceId`和LB名称可使用模板中的`auto`。
+1. deploy仍需读取AKS节点RG中的内部LB；保留Stage4窗口的节点RG读取/部署权限。默认合并禁流量prepare；使用Azure DNS时追加`--option azure-dns`：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 9 --operation plan \
+  --values local_execution/stage-9-values.local.json
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 9 --operation apply \
+  --values local_execution/stage-9-values.local.json
+```
+
+`privateLinkServiceId`和LB名称可保留模板中的`auto`。
 2. 创建Private Link Service源站：
 
 ```bash
@@ -1014,6 +1164,17 @@ Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身
 ```
 
 报告必须符合当前Stage9 release校验器，绑定当前revision、Stage9配置哈希、Front Door ID、私有源站、phase、实际检查和批准人。文件只放受控且Git忽略的位置。
+
+推荐使用合并器打开最终发布开关；若前面使用Azure DNS，此处同时保留`--option azure-dns`：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 9 --operation plan \
+  --values local_execution/stage-9-values.local.json --option approved-release
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 9 --operation apply \
+  --values local_execution/stage-9-values.local.json --option approved-release
+```
 
 deploy身份正式启用获批phase：
 
