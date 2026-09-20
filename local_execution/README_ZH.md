@@ -1,6 +1,6 @@
 # Stage0–9 本地手工执行包
 
-> 核对日期：2026-09-17
+> 核对日期：2026-09-20
 >
 > 适用：客户无法运行GitHub Actions，但已取得本仓库受审核代码，需要从本地完成Stage0–9。本文件详细覆盖已验证的Stage0–1；后续按[Stage2–9本地手工部署指南](stage2-9-guide-zh.md)执行。
 
@@ -11,6 +11,7 @@ local_execution/
 ├── README_ZH.md                # Stage0–1及公共准备
 ├── stage2-9-guide-zh.md        # Stage2–9顺序、Entra和发布边界
 ├── customer.example.json       # 可逐Stage扩展的最小配置
+├── customer.stage2-9.fragments.example.json # Stage2–9分阶段配置片段
 ├── image_supply_chain.py       # 本地镜像SBOM/扫描/签名
 ├── requirements.txt            # 本地全部Python依赖
 ├── __main__.py                 # python -m local_execution入口
@@ -213,6 +214,8 @@ chmod 600 local_execution/customer.json
 ```
 
 `local_execution/customer.json`已被Git忽略。配置不包含密码、Token、Master Key或Salt。
+
+`customer.example.json`故意只包含Stage0–1可运行的基础字段。进入Stage2后，按[Stage2–9指南的分阶段模板说明](stage2-9-guide-zh.md#分阶段配置模板)从`customer.stage2-9.fragments.example.json`只合并当前阶段片段；该补充文件是片段目录，不能整份替换`customer.json`。
 
 ### 4.1 配置字段
 

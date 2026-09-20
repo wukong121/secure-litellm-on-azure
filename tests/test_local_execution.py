@@ -10,7 +10,11 @@ import unittest
 from unittest.mock import patch
 
 from local_execution.runner import (
+    IMAGE_STEPS,
+    INFRASTRUCTURE_STEPS,
+    RUNTIME_STEPS,
     STEPS,
+    authentication_profile,
     authenticate_azure,
     check_configuration,
     enforce_local_policy,
@@ -25,7 +29,7 @@ from local_execution.runner import (
     run_target_connectivity_check,
     require_legacy_cluster_running,
 )
-from scripts.customer_migration import ROOT, validate_config
+from scripts.customer_migration import ROOT, parameters_for, validate_config
 from scripts.migration_deploy import deploy_component
 from tests.test_customer_migration import customer_config
 
@@ -77,6 +81,8 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertEqual(settings["postgresRestoreImage"], source["localExecution"]["postgresRestoreImage"])
         self.assertEqual(settings["executionHost"], source["localExecution"]["executionHost"])
         self.assertEqual(settings["authentication"], {"default": {"method": "existing"}})
+        for profile in ("deploy", "runtime", "database", "certificate", "entraBootstrap", "entraAccess"):
+            self.assertEqual(authentication_profile(settings, profile), {"method": "existing"})
         self.assertEqual(settings["features"], {"entraMode": "deferred", "allowTrafficRelease": False})
         self.assertEqual(config["parameters"]["runner-connectivity"]["runnerVirtualNetworkId"], settings["executionHost"]["virtualNetworkId"])
 
@@ -451,9 +457,33 @@ class LocalExecutionTests(unittest.TestCase):
         requirements = (ROOT / "local_execution/requirements.txt").read_text()
         feishu = (ROOT / "local_execution/feishu-alert-notification-zh.md").read_text()
         example = json.loads((ROOT / "local_execution/customer.example.json").read_text())
+        staged = json.loads((ROOT / "local_execution/customer.stage2-9.fragments.example.json").read_text())
         self.assertEqual(set(example["localExecution"]), {"postgresRestoreImage", "executionHost", "authentication", "features", "runtimeInputs"})
         self.assertEqual(example["localExecution"]["authentication"], {"default": {"method": "existing"}})
         self.assertEqual(example["localExecution"]["features"], {"entraMode": "deferred", "allowTrafficRelease": False})
+        self.assertEqual(staged["catalogVersion"], 1)
+        self.assertEqual(set(staged["stages"]), set("23456789"))
+        self.assertIn("customer.stage2-9.fragments.example.json", guide)
+        self.assertIn("customer.stage2-9.fragments.example.json", later_guide)
+        self.assertEqual(set(staged["stages"]["2"]["customerConfig"]), {"governance", "contentAudit"})
+        self.assertIn("platform", staged["stages"]["3"]["customerConfig"]["parameters"])
+        stage4 = staged["stages"]["4"]
+        self.assertEqual(set(stage4["customerConfig"]["parameters"]), {"platform", "certificate-vault", "runner-target-connectivity"})
+        self.assertIn("privateIngress", stage4["customerConfig"])
+        self.assertIn("imageSigning", stage4["localExecutionMerge"])
+        stage5 = staged["stages"]["5"]
+        self.assertIn("stage5Data", stage5["customerConfig"]["parameters"]["platform"])
+        self.assertIn("databaseAccess", stage5["customerConfig"])
+        self.assertEqual(set(stage5["localExecutionMerge"]["runtimeInputs"]), {"backupBlob", "backupSha256", "postgresMigrationUser"})
+        self.assertIn("application", staged["stages"]["6"]["customerConfig"])
+        self.assertEqual(set(staged["stages"]["7"]["customerConfig"]), {"entra", "proxy"})
+        self.assertEqual(staged["stages"]["7"]["localExecutionMerge"]["features"]["entraMode"], "enabled")
+        self.assertEqual(set(staged["stages"]["7"]["localExecutionMerge"]["authentication"]), {"entraBootstrap", "entraAccess"})
+        self.assertIn("nativeAuditOptionalObservability", staged["stages"]["8"])
+        self.assertIn("enhancedL3Alternative", staged["stages"]["8"])
+        self.assertEqual(staged["stages"]["8"]["enhancedL3Alternative"]["removeCustomerConfigKeysBeforeMerge"], ["contentAudit"])
+        self.assertEqual(set(staged["stages"]["9"]["customerConfig"]["parameters"]), {"origin", "edge"})
+        self.assertTrue(staged["stages"]["9"]["localExecutionForApprovedRelease"]["features"]["allowTrafficRelease"])
         for dependency in ("-r ../requirements.txt", "acme==5.8.0", "dnspython==2.8.0", "josepy==2.2.0"):
             self.assertIn(dependency, requirements)
         self.assertIn("local_execution/requirements.txt", guide)
@@ -477,6 +507,153 @@ class LocalExecutionTests(unittest.TestCase):
             self.assertIn(f"--step {step}", all_guides)
         ordered = ["config-check", "bootstrap", "backup", "execution-host-connectivity", "connectivity-check", "backup-restore", "legacy-logging", "monitoring-onboard", "monitoring", "legacy-hardening", "legacy-access-restrict"]
         self.assertEqual([guide.index(f"--step {step}") for step in ordered], sorted(guide.index(f"--step {step}") for step in ordered))
+
+    def test_stage2_to_9_fragments_merge_into_validator_compatible_config(self):
+        catalog = json.loads((ROOT / "local_execution/customer.stage2-9.fragments.example.json").read_text())["stages"]
+        source = self.configuration()
+        runner_vnet = source["localExecution"]["executionHost"]["virtualNetworkId"]
+        replacements = {
+            "REPLACE_APPROVED_OPERATOR_USER_OBJECT_ID": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "REPLACE_APPROVED_GITHUB_LOGIN": "approved-user",
+            "REPLACE_LOCAL_OPERATOR_UAMI_CLIENT_ID": "10000000-0000-4000-8000-000000000001",
+            "REPLACE_ENTRA_BOOTSTRAP_UAMI_CLIENT_ID": "10000000-0000-4000-8000-000000000005",
+            "REPLACE_ENTRA_ACCESS_UAMI_CLIENT_ID": "10000000-0000-4000-8000-000000000006",
+            "REPLACE_GLOBALLY_UNIQUE_ACR_NAME": "syntheticregistry",
+            "REPLACE_TARGET_LOG_WORKSPACE": "target-logs",
+            "REPLACE_TARGET_VNET": "target-vnet",
+            "REPLACE_NEW_PRIVATE_AKS_NAME": "target-aks",
+            "REPLACE_NEW_AKS_DNS_PREFIX": "target-aks",
+            "REPLACE_SUPPORTED_K8S_VERSION": "1.30",
+            "REPLACE_SUPPORTED_VM_SKU": "Standard_D4s_v5",
+            "REPLACE_MODEL_SUBSCRIPTION_ID": source["azure"]["subscriptionId"],
+            "REPLACE_MODEL_RESOURCE_GROUP": "rg-model",
+            "REPLACE_MODEL_ACCOUNT_NAME": "synthetic-model",
+            "REPLACE_LOCAL_OPERATOR_UAMI_PRINCIPAL_ID": "44444444-4444-4444-8444-444444444444",
+            "REPLACE_APPROVED_CERTIFICATE_IMPORTER_OBJECT_ID": "55555555-5555-4555-8555-555555555555",
+            "REPLACE_RUNNER_VNET_RESOURCE_ID": runner_vnet,
+            "REPLACE_GLOBALLY_UNIQUE_CERTIFICATE_VAULT_NAME": "synthetic-cert-vault",
+            "REPLACE_CERTIFICATE_VAULT_NAME": "synthetic-cert-vault",
+            "REPLACE_SUBSCRIPTION_ID": source["azure"]["subscriptionId"],
+            "REPLACE_DNS_RESOURCE_GROUP": "rg-dns",
+            "REPLACE_CUSTOMER_BASE_DOMAIN": source["baseDomain"],
+            "REPLACE_SUPPORTED_PG_SKU": "Standard_D2s_v3",
+            "REPLACE_PG_ADMIN_GROUP_OBJECT_ID": "66666666-6666-4666-8666-666666666666",
+            "REPLACE_PG_ADMIN_GROUP_NAME": "database-bootstrap-group",
+            "REPLACE_32_HEX": "1" * 32,
+            "REPLACE_64_HEX_SHA256": "2" * 64,
+            "REPLACE_BUILT_64_HEX_DIGEST": "3" * 64,
+            "REPLACE_EXISTING_MODEL_DEPLOYMENT_NAME": "gpt-deployment",
+            "REPLACE_ENTRA_BOOTSTRAP_SERVICE_PRINCIPAL_OBJECT_ID": "77777777-7777-4777-8777-777777777777",
+            "REPLACE_ENTRA_ACCESS_SERVICE_PRINCIPAL_OBJECT_ID": "88888888-8888-4888-8888-888888888888",
+            "REPLACE_CALLING_APPLICATION_CLIENT_ID": "99999999-9999-4999-8999-999999999999",
+            "REPLACE_API_USER_OBJECT_ID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "REPLACE_ADMIN_USER_OBJECT_ID": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            "REPLACE_AUDIT_READER_USER_OBJECT_ID": "cccccccc-dddd-4eee-8fff-000000000001",
+            "REPLACE_APPROVED_AUDIT_TEAM_ID": "approved-team",
+            "REPLACE_AUDIT_CMK_VAULT": "synthetic-audit-vault",
+            "REPLACE_AUDIT_CMK_KEY": "audit-key",
+            "REPLACE_AZURE_REGION": source["location"],
+        }
+
+        def replace(value):
+            if isinstance(value, dict):
+                return {key: replace(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [replace(item) for item in value]
+            if isinstance(value, str):
+                for old, new in replacements.items():
+                    value = value.replace(old, new)
+                self.assertNotIn("REPLACE_", value)
+            return value
+
+        def merge(target, addition):
+            for key, value in addition.items():
+                if isinstance(value, dict) and isinstance(target.get(key), dict):
+                    merge(target[key], value)
+                else:
+                    target[key] = copy.deepcopy(value)
+
+        def validated(document):
+            with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+                path = Path(folder) / "customer.json"
+                path.write_text(json.dumps(document))
+                return load_config(path)[0]
+
+        merge(source, replace(catalog["2"]["customerConfig"]))
+        merge(source["localExecution"], replace(catalog["2"]["singleValidationIdentityAlternative"]))
+        validated(source)
+
+        merge(source, replace(catalog["3"]["customerConfig"]))
+        config = validated(source)
+        parameters_for(config, 3, "platform")
+
+        merge(source, replace(catalog["4"]["customerConfig"]))
+        merge(source["localExecution"], replace(catalog["4"]["localExecutionMerge"]))
+        config = validated(source)
+        for component in ("platform", "certificate-vault", "runner-target-connectivity"):
+            parameters_for(config, 4, component)
+        automatic_certificate = copy.deepcopy(source)
+        merge(automatic_certificate, replace(catalog["4"]["optionalAutomaticApiCertificate"]["customerConfig"]))
+        validated(automatic_certificate)
+
+        merge(source, replace(catalog["5"]["customerConfig"]))
+        merge(source["localExecution"], replace(catalog["5"]["localExecutionMerge"]))
+        config = validated(source)
+        parameters_for(config, 5, "platform")
+
+        merge(source, replace(catalog["6"]["customerConfig"]))
+        validated(source)
+
+        merge(source, replace(catalog["7"]["customerConfig"]))
+        merge(source["localExecution"], replace(catalog["7"]["localExecutionMerge"]))
+        config = validated(source)
+        parameters_for(config, 7, "proxy-foundation")
+
+        stage7_source = copy.deepcopy(source)
+        merge(source, replace(catalog["8"]["nativeAuditOptionalObservability"]["customerConfig"]))
+        config = validated(source)
+        parameters_for(config, 8, "observability")
+
+        merge(source, replace(catalog["9"]["customerConfig"]))
+        merge(source, replace(catalog["9"]["optionalAzureDns"]["customerConfig"]))
+        merge(source["localExecution"], replace(catalog["9"]["localExecutionForApprovedRelease"]))
+        config = validated(source)
+        parameters_for(config, 9, "origin")
+        parameters_for(config, 9, "edge")
+
+        stage7_source.pop("contentAudit")
+        merge(stage7_source, replace(catalog["8"]["enhancedL3Alternative"]["customerConfig"]))
+        config = validated(stage7_source)
+        parameters_for(config, 8, "audit-foundation")
+        parameters_for(config, 8, "audit")
+
+    def test_stage2_to_9_runbook_has_complete_execution_and_identity_steps(self):
+        guide = (ROOT / "local_execution/stage2-9-guide-zh.md").read_text()
+        paired = {
+            step for step in (*INFRASTRUCTURE_STEPS, *RUNTIME_STEPS)
+            if step.startswith("stage")
+        } | {"stage9-edge-release"}
+        for step in paired:
+            with self.subTest(step=step):
+                self.assertIn(f"--step {step} --operation plan", guide)
+                self.assertIn(f"--step {step} --operation execute", guide)
+        for step in IMAGE_STEPS:
+            with self.subTest(image_step=step):
+                self.assertIn(f"--step {step} --operation execute", guide)
+        for value in (
+            "az identity create",
+            "az vm identity assign",
+            "az vm identity remove",
+            "Application.ReadWrite.OwnedBy",
+            "AppRoleAssignment.ReadWrite.All",
+            "LLMGW Model Deployment Operator",
+            "LLMGW Resource Lock Writer",
+            "LLMGW Runtime Receipt Writer",
+            "LLMGW AKS Namespace Bootstrapper",
+            "az aks stop",
+            "az aks start",
+        ):
+            self.assertIn(value, guide)
 
 
 if __name__ == "__main__":
