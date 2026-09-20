@@ -1,1 +1,1 @@
-"""Standalone local execution path for migration Stage 0 and Stage 1."""
+"""Standalone local execution path for migration Stage 0 through Stage 9."""

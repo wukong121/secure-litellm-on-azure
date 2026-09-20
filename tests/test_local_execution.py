@@ -29,6 +29,7 @@ from local_execution.runner import (
     run_target_connectivity_check,
     require_legacy_cluster_running,
 )
+from local_execution.merge_config import main as merge_config_main, merge_stage, operation_directory, read_json
 from scripts.customer_migration import ROOT, parameters_for, validate_config
 from scripts.migration_deploy import deploy_component
 from tests.test_customer_migration import customer_config
@@ -465,6 +466,11 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertEqual(set(staged["stages"]), set("23456789"))
         self.assertIn("customer.stage2-9.fragments.example.json", guide)
         self.assertIn("customer.stage2-9.fragments.example.json", later_guide)
+        self.assertIn("merge_config.py", guide)
+        self.assertIn("python -m local_execution.merge_config", later_guide)
+        for stage in range(2, 10):
+            self.assertIn(f"--stage {stage} --operation plan", later_guide)
+            self.assertIn(f"--stage {stage} --operation apply", later_guide)
         self.assertEqual(set(staged["stages"]["2"]["customerConfig"]), {"governance", "contentAudit"})
         self.assertIn("platform", staged["stages"]["3"]["customerConfig"]["parameters"])
         stage4 = staged["stages"]["4"]
@@ -654,6 +660,129 @@ class LocalExecutionTests(unittest.TestCase):
             "az aks start",
         ):
             self.assertIn(value, guide)
+
+    def test_config_merge_recurses_preserves_existing_platform_and_reports_placeholders(self):
+        source = self.configuration()
+        before = copy.deepcopy(source)
+        catalog = {
+            "catalogVersion": 1,
+            "stages": {
+                "3": {
+                    "customerConfig": {
+                        "parameters": {
+                            "platform": {
+                                "containerRegistryName": "REPLACE_ACR_NAME",
+                                "stage4Network": {"privateEndpointSubnetName": "snet-private-endpoints"},
+                            }
+                        }
+                    }
+                }
+            },
+        }
+        merged, missing = merge_stage(source, catalog, 3)
+        self.assertEqual(source, before)
+        self.assertEqual(missing, ["REPLACE_ACR_NAME"])
+        self.assertEqual(merged["parameters"]["platform"]["stage4Aks"], source["parameters"]["platform"]["stage4Aks"])
+        self.assertEqual(merged["parameters"]["platform"]["stage4Network"]["virtualNetworkName"], source["parameters"]["platform"]["stage4Network"]["virtualNetworkName"])
+        merged, missing = merge_stage(source, catalog, 3, values={"REPLACE_ACR_NAME": "mergedregistry"})
+        self.assertFalse(missing)
+        self.assertEqual(merged["parameters"]["platform"]["containerRegistryName"], "mergedregistry")
+
+    def test_config_merge_options_are_explicit_and_enhanced_l3_removes_native_audit(self):
+        source = self.configuration()
+        source["contentAudit"] = {"mode": "native", "retentionDays": 7, "contentPolicyAccepted": True}
+        catalog = {
+            "catalogVersion": 1,
+            "stages": {
+                "8": {
+                    "enhancedL3Alternative": {
+                        "removeCustomerConfigKeysBeforeMerge": ["contentAudit"],
+                        "customerConfig": {"auditRuntime": {"retentionDays": 7, "captureEnabled": True, "retentionEnabled": True, "deliveryPolicyAccepted": True}},
+                    },
+                    "nativeAuditOptionalObservability": {"customerConfig": {"observability": {"collectorImage": "synthetic"}}},
+                },
+                "9": {
+                    "customerConfig": {},
+                    "localExecutionForPrepare": {"features": {"entraMode": "enabled", "allowTrafficRelease": False}},
+                    "localExecutionForApprovedRelease": {"features": {"entraMode": "enabled", "allowTrafficRelease": True}, "releaseReportPath": "temp/release.json"},
+                },
+            },
+        }
+        merged, missing = merge_stage(source, catalog, 8, options=("enhanced-l3",))
+        self.assertFalse(missing)
+        self.assertNotIn("contentAudit", merged)
+        self.assertIn("auditRuntime", merged)
+        with self.assertRaisesRegex(ValueError, "not both"):
+            merge_stage(source, catalog, 8, options=("enhanced-l3", "observability"))
+        prepared, _ = merge_stage(source, catalog, 9)
+        released, _ = merge_stage(source, catalog, 9, options=("approved-release",))
+        self.assertFalse(prepared["localExecution"]["features"]["allowTrafficRelease"])
+        self.assertTrue(released["localExecution"]["features"]["allowTrafficRelease"])
+
+    def test_config_merge_plan_does_not_write_and_apply_backs_up_atomically(self):
+        source = self.configuration()
+        catalog = {
+            "catalogVersion": 1,
+            "stages": {
+                "2": {
+                    "customerConfig": {"contentAudit": {"mode": "native", "retentionDays": 7, "contentPolicyAccepted": True}},
+                    "localExecutionMerge": {"features": {"entraMode": "deferred", "allowTrafficRelease": False}},
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            directory = Path(folder)
+            config_path = directory / "customer.json"
+            catalog_path = directory / "catalog.json"
+            output_root = directory / "runs"
+            config_path.write_text(json.dumps(source))
+            catalog_path.write_text(json.dumps(catalog))
+            with patch("sys.argv", ["merge-config", "--config", str(config_path), "--catalog", str(catalog_path), "--stage", "2", "--operation", "plan", "--output-root", str(output_root)]), patch("sys.stdout", new_callable=io.StringIO) as output:
+                merge_config_main()
+                planned = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(json.loads(config_path.read_text()), source)
+            self.assertFalse(planned["applied"])
+            self.assertTrue((ROOT / planned["preview"]).is_file())
+            with patch("sys.argv", ["merge-config", "--config", str(config_path), "--catalog", str(catalog_path), "--stage", "2", "--operation", "apply", "--output-root", str(output_root)]), patch("sys.stdout", new_callable=io.StringIO) as output:
+                merge_config_main()
+                applied = json.loads(output.getvalue().splitlines()[-1])
+            document = json.loads(config_path.read_text())
+            self.assertTrue(applied["applied"])
+            self.assertEqual(document["contentAudit"]["mode"], "native")
+            self.assertEqual(json.loads((ROOT / applied["backup"]).read_text()), source)
+            self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
+
+    def test_config_merge_rejects_unfilled_values_file(self):
+        source = self.configuration()
+        catalog = {"catalogVersion": 1, "stages": {"3": {"customerConfig": {"parameters": {"platform": {"containerRegistryName": "REPLACE_ACR_NAME"}}}}}}
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            directory = Path(folder)
+            config_path = directory / "customer.json"
+            catalog_path = directory / "catalog.json"
+            values_path = directory / "values.local.json"
+            config_path.write_text(json.dumps(source))
+            catalog_path.write_text(json.dumps(catalog))
+            values_path.write_text(json.dumps({"REPLACE_ACR_NAME": ""}))
+            with patch("sys.argv", ["merge-config", "--config", str(config_path), "--catalog", str(catalog_path), "--values", str(values_path), "--stage", "3"]), self.assertRaisesRegex(ValueError, "nonempty strings"):
+                merge_config_main()
+
+    def test_config_merge_rejects_symlinked_parent_paths(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            base = Path(folder)
+            real = base / "real"
+            real.mkdir()
+            config = real / "customer.json"
+            config.write_text("{}")
+            linked = base / "linked"
+            linked.symlink_to(real, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink path components"):
+                read_json(linked / "customer.json", "local customer configuration")
+            output = base / "output-real"
+            output.mkdir()
+            output_link = base / "output-link"
+            output_link.symlink_to(output, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink path components"):
+                operation_directory(output_link, 3)
 
 
 if __name__ == "__main__":
