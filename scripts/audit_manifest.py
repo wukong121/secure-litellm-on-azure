@@ -95,7 +95,7 @@ def render_audit_documents(config, source, foundation, storage, subnet, registry
     return documents
 
 
-def prepare_audit_documents(config, revision, directory, azure, source, kube):
+def prepare_audit_documents(config, revision, directory, azure, source, kube, image_public_key=None):
     from scripts.audit_runtime import AuditCluster
 
     audit_settings(config)
@@ -157,5 +157,5 @@ def prepare_audit_documents(config, revision, directory, azure, source, kube):
         documents = [document for document in documents if not (document["kind"] == "ConfigMap" and document["metadata"]["name"] == "audit-approvals")]
     if "observability" in config:
         from scripts.observability import prepare_observability
-        documents = prepare_observability(config, documents, azure, cidr)
+        documents = prepare_observability(config, documents, azure, cidr, image_public_key=image_public_key, revision=revision, directory=directory)
     return documents

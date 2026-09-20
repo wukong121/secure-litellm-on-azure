@@ -40,7 +40,7 @@ These are target capabilities, not claims that every component is deployed or pr
 ## Start Here
 
 1. Choose migration or greenfield in the [deployment guide](docs/customer-deployment-workflows-zh.md). Existing gateway migration details are in the [migration guide](docs/customer-migration-guide-zh.md).
-    If GitHub Actions is unavailable, use the standalone [local Stage 0–1 package (Chinese)](local_execution/README_ZH.md); it does not automatically extend to later stages.
+    If GitHub Actions is unavailable for an existing-gateway migration, use the bounded [local Stage 0–9 package (Chinese)](local_execution/README_ZH.md). It does not yet support greenfield mode; Stage 7 can be deferred, and Stage 9 traffic remains blocked until its separate release conditions are met.
 2. Fork this repository (public forks are supported), protect the default branch, and configure the selected GitHub Environment and its Azure OIDC identities. Customer operations are manual workflows, never untrusted PR jobs.
 3. Use the [migration template](config/customer.example.json) or [greenfield template](config/customer.greenfield.example.json) for the `CUSTOMER_CONFIG_JSON` Environment Secret, and add a separate `WORKFLOW_ARTIFACT_KEY` Secret for encrypted evidence. Greenfield omits `legacy`. Configure OIDC and the [private runner](docs/customer-private-runner-preparation-zh.md); no automated runner platform is required.
 4. Start with **Customer staged migration**, stage `0`, mode `config-check`, component `none`, then **Customer private runner checks** with `check_target=false`. Review decrypted results before resource operations. Single-operator `draft → confirm` records actual manual checks without hand-written report JSON.

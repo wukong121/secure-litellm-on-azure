@@ -167,7 +167,7 @@ def check_application(documents, stage, config):
     require(expected.issubset(deployments), "Stage workload set is incomplete")
 
 
-def publish(config, stage, action, operation, revision, directory, approved):
+def publish(config, stage, action, operation, revision, directory, approved, image_public_key=None):
     validate_action(config, stage, action)
     kube = connect_cluster(config, directory, legacy=action == "legacy-hardening")
     if action == "cluster-bootstrap":
@@ -191,17 +191,17 @@ def publish(config, stage, action, operation, revision, directory, approved):
             require(not manifest, "Managed application generation cannot be mixed with manual manifests")
             require(stage == 6 or (stage == 7 and "proxy" in config) or (stage == 8 and "proxy" in config and ("auditRuntime" in config or "contentAudit" in config)), "Managed application generation requires proxy settings for Stage7; Stage8 remains blocked without explicit auditRuntime or contentAudit decisions")
             from scripts.backend_manifest import prepare_backend_documents
-            documents = prepare_backend_documents(config, revision, directory, AzureCommands(config, directory))
+            documents = prepare_backend_documents(config, revision, directory, AzureCommands(config, directory), image_public_key=image_public_key)
             if stage >= 7:
                 from scripts.proxy_manifest import prepare_proxy_documents
-                documents = [*documents, *prepare_proxy_documents(config, revision, directory, AzureCommands(config, directory))]
+                documents = [*documents, *prepare_proxy_documents(config, revision, directory, AzureCommands(config, directory), image_public_key=image_public_key)]
             if stage == 8:
                 if "contentAudit" in config:
                     from scripts.native_audit import prepare_native_audit
-                    documents = prepare_native_audit(config, documents, directory, AzureCommands(config, directory), kube)
+                    documents = prepare_native_audit(config, documents, directory, AzureCommands(config, directory), kube, image_public_key=image_public_key, revision=revision)
                 else:
                     from scripts.audit_manifest import prepare_audit_documents
-                    documents = prepare_audit_documents(config, revision, directory, AzureCommands(config, directory), documents, kube)
+                    documents = prepare_audit_documents(config, revision, directory, AzureCommands(config, directory), documents, kube, image_public_key=image_public_key)
         else:
             documents = [document for document in yaml.safe_load_all(manifest) if document]
         if stage >= 7:
@@ -216,10 +216,16 @@ def publish(config, stage, action, operation, revision, directory, approved):
         live = []
         for document in documents:
             live.append(json.loads(run_command([*kube, "get", document["kind"], document["metadata"]["name"], "--ignore-not-found", "-o", "json"], directory, "live-" + document["kind"] + "-" + document["metadata"]["name"]) or "null"))
-        plan_hash = fingerprint({"revision": revision, "config": stage_fingerprint(config, stage), "action": action, "documents": documents, "live": [{"uid": item["metadata"]["uid"], "spec": item.get("spec"), "data": item.get("data"), "annotations": item["metadata"].get("annotations")} if item else None for item in live]})
+        plan_contract = {"revision": revision, "config": stage_fingerprint(config, stage), "action": action, "documents": documents, "live": [{"uid": item["metadata"]["uid"], "spec": item.get("spec"), "data": item.get("data"), "annotations": item["metadata"].get("annotations")} if item else None for item in live]}
+        if image_public_key is not None:
+            plan_contract["imageTrust"] = {"cosignPublicKeySha256": file_sha256(Path(image_public_key))}
+        plan_hash = fingerprint(plan_contract)
     summary = {"stage": stage, "action": action, "planSha256": plan_hash, "revision": revision, "stageAccepted": False}
     if action != "legacy-hardening":
-        private_write(directory / "runtime-review.json", json.dumps({"planSha256": plan_hash, "desiredObjects": documents}, indent=2) + "\n")
+        review = {"planSha256": plan_hash, "desiredObjects": documents}
+        if action == "application" and image_public_key is not None:
+            review["imageTrust"] = plan_contract["imageTrust"]
+        private_write(directory / "runtime-review.json", json.dumps(review, indent=2) + "\n")
     private_write(directory / "runtime-summary.json", json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary))
     if operation == "plan":

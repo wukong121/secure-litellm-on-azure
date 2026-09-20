@@ -1,0 +1,4 @@
+-r ../requirements.txt
+acme==5.8.0
+dnspython==2.8.0
+josepy==2.2.0
