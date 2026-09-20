@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 import yaml
 
-from scripts.backend_manifest import application_settings, prepare_backend_documents, render_backend_manifest
+from scripts.backend_manifest import application_settings, prepare_backend_documents, render_backend_manifest, verify_runtime_image
 from scripts.customer_migration import ROOT, stage_fingerprint, validate_config
 from scripts.migration_deploy import group_id
 from scripts.runtime_secrets import BACKEND_SECRETS
@@ -27,6 +27,38 @@ def backend_customer():
 
 
 class BackendManifestTests(unittest.TestCase):
+    def test_local_runtime_signature_uses_explicit_customer_public_key(self):
+        config = backend_customer()
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.backend_manifest.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps({"loginServer": "customerregistry.azurecr.io", "accessToken": "synthetic-acr-token"}))), patch("scripts.migration_runtime.run_command") as command:
+            path = Path(directory)
+            public_key = path / "cosign.pub"
+            public_key.write_text("public")
+            verify_runtime_image(config, "a" * 40, path, config["application"]["backendImage"], "azure", public_key=public_key)
+            arguments = command.call_args.args[0]
+        self.assertIn("--key", arguments)
+        self.assertIn(str(public_key), arguments)
+        self.assertNotIn("--certificate-identity", arguments)
+
+    def test_local_application_plan_binds_cosign_public_key_contents(self):
+        config = backend_customer()
+        documents = [
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "litellm"}},
+            {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "litellm", "namespace": "litellm", "uid": "synthetic"}, "spec": {"replicas": 2}},
+        ]
+        def command(_arguments, _directory, label, **_kwargs):
+            return "{}" if label == "server-dry-run" else ""
+
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl"]), patch("scripts.backend_manifest.prepare_backend_documents", return_value=documents), patch("scripts.migration_runtime.check_application"), patch("scripts.migration_runtime.run_command", side_effect=command):
+            path = Path(directory)
+            public_key = path / "cosign.pub"
+            public_key.write_text("public-one")
+            publish(config, 6, "application", "plan", "a" * 40, path, "", image_public_key=public_key)
+            first = json.loads((path / "runtime-summary.json").read_text())["planSha256"]
+            public_key.write_text("public-two")
+            publish(config, 6, "application", "plan", "a" * 40, path, "", image_public_key=public_key)
+            second = json.loads((path / "runtime-summary.json").read_text())["planSha256"]
+        self.assertNotEqual(first, second)
+
     def test_native_logging_is_explicit_retained_and_does_not_mutate_stage6(self):
         config = backend_customer()
         config["proxy"] = {"bindings": []}

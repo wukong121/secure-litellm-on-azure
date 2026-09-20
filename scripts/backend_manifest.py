@@ -4,10 +4,12 @@ import copy
 import hashlib
 import ipaddress
 import json
+from pathlib import Path
 import re
 import os
 import base64
 import subprocess
+import tempfile
 from urllib.parse import urlencode, urlunsplit
 
 import yaml
@@ -81,7 +83,7 @@ def render_backend_manifest(config, platform, versions, host, endpoint_subnet):
     return documents
 
 
-def prepare_backend_documents(config, revision, directory, azure):
+def prepare_backend_documents(config, revision, directory, azure, image_public_key=None):
     from scripts.migration_deploy import deployment_name, group_id
 
     application_settings(config)
@@ -106,30 +108,40 @@ def prepare_backend_documents(config, revision, directory, azure):
     foundation = config["parameters"].get("network", config["parameters"].get("backup", {}))
     if "privateEndpointSubnetPrefix" in foundation:
         require(subnet == foundation["privateEndpointSubnetPrefix"], "Deployed private endpoint subnet differs from approved configuration")
-    verify_runtime_image(config, revision, directory, config["application"]["backendImage"], "azure")
+    verify_runtime_image(config, revision, directory, config["application"]["backendImage"], "azure", public_key=image_public_key)
     return render_backend_manifest(config, platform, receipts["backend-secrets"]["secrets"], server["host"], subnet)
 
 
-def verify_runtime_image(config, revision, directory, image, runtime):
+def verify_runtime_image(config, revision, directory, image, runtime, *, public_key=None):
     from scripts.migration_runtime import run_command
 
-    require(runtime in {"azure", "auth-proxy"}, "Unapproved runtime signature type")
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    branch = os.environ.get("GITHUB_REF", "")
-    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None and branch.startswith("refs/heads/"), "Managed backend publishing requires its protected GitHub repository identity")
-    identity = "https://github.com/" + repository + "/.github/workflows/promote-litellm-image.yml@" + branch
+    require(runtime in {"azure", "auth-proxy", "collector"}, "Unapproved runtime signature type")
+    if public_key is not None:
+        supplied_key = Path(public_key)
+        require(not supplied_key.is_symlink(), "Local image verification does not accept a symlinked Cosign public key")
+        key_path = supplied_key.resolve()
+        require(key_path.is_file(), "Local image verification requires a regular Cosign public key")
+        verification = ["--key", str(key_path)]
+    else:
+        repository = os.environ.get("GITHUB_REPOSITORY", "")
+        branch = os.environ.get("GITHUB_REF", "")
+        require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None and branch.startswith("refs/heads/"), "Managed backend publishing requires its protected GitHub repository identity")
+        identity = "https://github.com/" + repository + "/.github/workflows/promote-litellm-image.yml@" + branch
+        verification = ["--certificate-identity", identity, "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com"]
     registry = config["parameters"]["platform"]["containerRegistryName"]
     token = subprocess.run(["az", "acr", "login", "--name", registry, "--expose-token", "--subscription", config["azure"]["subscriptionId"], "--output", "json", "--only-show-errors"], capture_output=True, text=True, check=False, timeout=120)
     require(token.returncode == 0, "Cannot obtain scoped ACR authentication for image verification")
     credentials = json.loads(token.stdout)
     require(credentials["loginServer"].lower() == (registry + ".azurecr.io").lower(), "Unexpected ACR login server")
-    auth_directory = directory / "backend-acr-auth"
-    auth_directory.mkdir(mode=0o700, exist_ok=True)
+    runtime_parent = Path("/dev/shm") if Path("/dev/shm").is_dir() else Path(tempfile.gettempdir())
+    credential_directory = tempfile.TemporaryDirectory(prefix="llmgw-acr-verify-", dir=runtime_parent)
+    auth_directory = Path(credential_directory.name)
     auth_directory.chmod(0o700)
     auth_file = auth_directory / "config.json"
     encoded = base64.b64encode(("00000000-0000-0000-0000-000000000000:" + credentials["accessToken"]).encode()).decode()
     private_write(auth_file, json.dumps({"auths": {credentials["loginServer"]: {"auth": encoded}}}))
     try:
-        run_command(["cosign", "verify", "--certificate-identity", identity, "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", "-a", "llmgw.runtime=" + runtime, "-a", "llmgw.revision=" + revision, "-a", "llmgw.environment=" + config["environment"], image], directory, runtime + "-image-signature", environment={**os.environ, "DOCKER_CONFIG": str(auth_directory)})
+        run_command(["cosign", "verify", *verification, "-a", "llmgw.runtime=" + runtime, "-a", "llmgw.revision=" + revision, "-a", "llmgw.environment=" + config["environment"], image], directory, runtime + "-image-signature", environment={**os.environ, "DOCKER_CONFIG": str(auth_directory)})
     finally:
         auth_file.unlink(missing_ok=True)
+        credential_directory.cleanup()

@@ -40,7 +40,7 @@ API客户端 -> llm-api.<客户域名> -> Front Door / WAF -> 私有API入口
 ## 客户从这里开始
 
 1. 阅读[客户部署与验收指南](docs/customer-deployment-workflows-zh.md)，选择已有网关迁移或从零部署；迁移细节另见[客户迁移指南](docs/customer-migration-guide-zh.md)。
-    客户无法运行GitHub Actions时，仅Stage0–1可使用独立的[本地手工执行包](local_execution/README_ZH.md)；该路径不会自动覆盖后续阶段。
+    既有网关迁移客户无法运行GitHub Actions时，可使用受限的[Stage0–9本地手工执行包](local_execution/README_ZH.md)；当前不支持greenfield模式。Stage7可延期，Stage9流量在独立发布条件满足前保持阻断。
 2. fork本仓库，公开fork也可使用；保护默认分支，创建所选Environment并配置Azure OIDC身份。客户操作仅手动运行，不让外部PR使用私网runner。
 3. 使用[迁移配置模板](config/customer.example.json)或[新建配置模板](config/customer.greenfield.example.json)填写`CUSTOMER_CONFIG_JSON` Environment Secret，并添加用于附件加密的独立`WORKFLOW_ARTIFACT_KEY` Secret；新建不填写`legacy`。按指南配置OIDC及[私网runner](docs/customer-private-runner-preparation-zh.md)，无需自动建机平台。
 4. 先运行 **Customer staged migration**：阶段`0`、模式`config-check`、组件`none`；再运行 **Customer private runner checks**，`check_target=false`。审核解密结果后再操作资源；单人运维使用`draft → confirm`逐项人工确认，不再手写报告JSON。

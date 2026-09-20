@@ -97,7 +97,7 @@ def render_observability(config, source, receipt, subnet):
     return result
 
 
-def prepare_observability(config, documents, azure, subnet):
+def prepare_observability(config, documents, azure, subnet, image_public_key=None, revision=None, directory=None):
     output = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 8, "observability"), "--query", "{state:properties.provisioningState,receipt:properties.outputs.observability.value}"])
     require(output.get("state") == "Succeeded", "Deploy the private observability component first")
     receipt = output["receipt"]
@@ -113,4 +113,8 @@ def prepare_observability(config, documents, azure, subnet):
     cluster = azure.scoped(["aks", "show", "--resource-group", config["target"]["resourceGroup"], "--name", config["parameters"]["platform"]["stage4Aks"]["name"]])
     federation = azure.scoped(["identity", "federated-credential", "list", "--resource-group", config["target"]["resourceGroup"], "--identity-name", identity["name"]])
     require(len(federation) == 1 and federation[0].get("issuer") == cluster["oidcIssuerProfile"]["issuerUrl"] and federation[0].get("subject") == "system:serviceaccount:litellm:otel-collector" and federation[0].get("audiences") == ["api://AzureADTokenExchange"], "Collector federation mismatch")
+    if image_public_key is not None:
+        from scripts.backend_manifest import verify_runtime_image
+        require(revision is not None and directory is not None, "Local collector verification requires the reviewed revision and operation directory")
+        verify_runtime_image(config, revision, directory, telemetry_settings(config)["collectorImage"], "collector", public_key=image_public_key)
     return render_observability(config, documents, receipt, subnet)

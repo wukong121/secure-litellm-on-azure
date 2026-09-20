@@ -4,6 +4,16 @@
   "environment": "test",
   "localExecution": {
     "postgresRestoreImage": "postgres@sha256:REPLACE_APPROVED_64_HEX_DIGEST",
+    "authentication": {
+      "default": {
+        "method": "existing"
+      }
+    },
+    "features": {
+      "entraMode": "deferred",
+      "allowTrafficRelease": false
+    },
+    "runtimeInputs": {},
     "executionHost": {
       "virtualNetworkId": "REPLACE_EXISTING_EXECUTION_HOST_VNET_RESOURCE_ID",
       "managePeering": true,

@@ -10,6 +10,8 @@
 
 阅读顺序：第1节辨认workflow → 第2节准备配置/身份/Runner → 第3节学会plan批准与附件审核 → 第4节逐Stage执行 → 第5节最终迁移 → 第6节排错。资源实现细节和可选增强流程见[部署参考](customer-deployment-workflows-zh.md)，机器准备见[Runner指南](customer-private-runner-preparation-zh.md)。客户资源值、日志正文和现场记录只保存在受控位置，不填进本文或公共Git。
 
+客户无法运行GitHub Actions时，不混用本手册的run ID、Environment和artifact步骤；既有网关迁移可改走独立的[Stage0–9本地手工执行包](../local_execution/README_ZH.md)。本地路径使用自己的plan哈希、UAMI/现有Azure会话及客户Cosign密钥，当前不支持greenfield；Stage7可延期，但延期期间不能发布Stage8应用或启用Stage9流量。
+
 ## 1. 迁移原则与入口
 
 采用并行新建、隔离验证、批准客户端试点、最终切流。旧网关、数据库、密钥/Salt和VMSS业务身份在回退窗口结束前保留。不得让1.98新版本自动迁移旧生产数据库；新旧网关不能无计划地同时写一个数据库。

@@ -65,7 +65,7 @@ def render_native_services(config, source):
     return documents
 
 
-def prepare_native_audit(config, source, directory, azure, kube):
+def prepare_native_audit(config, source, directory, azure, kube, image_public_key=None, revision=None):
     from scripts.audit_runtime import AuditCluster
 
     native_audit_settings(config)
@@ -84,5 +84,5 @@ def prepare_native_audit(config, source, directory, azure, kube):
         from scripts.observability import prepare_observability
         network = config["parameters"]["platform"]["stage4Network"]
         subnet = azure.scoped(["network", "vnet", "subnet", "show", "--resource-group", config["target"]["resourceGroup"], "--vnet-name", network["virtualNetworkName"], "--name", network["privateEndpointSubnetName"], "--query", "addressPrefix"])
-        documents = prepare_observability(config, documents, azure, subnet)
+        documents = prepare_observability(config, documents, azure, subnet, image_public_key=image_public_key, revision=revision, directory=directory)
     return documents

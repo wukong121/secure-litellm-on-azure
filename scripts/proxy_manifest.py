@@ -65,7 +65,7 @@ def render_proxy_documents(config, foundation, applications, admin_credentials, 
     return documents
 
 
-def prepare_proxy_documents(config, revision, directory, azure):
+def prepare_proxy_documents(config, revision, directory, azure, image_public_key=None):
     require("privateIngress" in config, "Managed Stage7 generation requires the verified file-provider private ingress")
     output = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 7, "proxy-foundation"), "--query", "{state:properties.provisioningState,foundation:properties.outputs.proxyFoundation.value}"])
     require(output.get("state") == "Succeeded", "Deploy proxy-foundation first")
@@ -79,5 +79,5 @@ def prepare_proxy_documents(config, revision, directory, azure):
     require(receipts["entra-access"].get("directoryVerified") is True and receipts["entra-access"].get("applications") == receipts["entra-apps"]["applications"], "Access grant receipt does not match the verified Entra applications")
     image = proxy_settings(config).get("image")
     require(image, "Signed proxy image is required")
-    verify_runtime_image(config, revision, directory, image, "auth-proxy")
+    verify_runtime_image(config, revision, directory, image, "auth-proxy", public_key=image_public_key)
     return render_proxy_documents(config, output["foundation"], receipts["entra-apps"]["applications"], receipts["admin-credentials"], receipts["proxy-credentials"])

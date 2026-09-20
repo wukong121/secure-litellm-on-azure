@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 from uuid import uuid4
@@ -13,12 +14,52 @@ import yaml
 
 from scripts.audit_manifest import render_audit_documents
 from scripts.native_audit import render_native_services
-from scripts.customer_migration import validate_config, stage_fingerprint
-from scripts.observability import COLLECTOR_DIGEST, COLLECTOR_SOURCE, collector_config, connection_fields, render_observability
+from scripts.customer_migration import ROOT, validate_config, stage_fingerprint
+from scripts.migration_deploy import group_id
+from scripts.observability import COLLECTOR_DIGEST, COLLECTOR_SOURCE, collector_config, connection_fields, prepare_observability, render_observability
 from tests.test_audit_manifest import fixture
 
 
 class ObservabilityTests(unittest.TestCase):
+    def test_local_collector_publication_verifies_customer_signature(self):
+        config, source, foundation, storage = fixture()
+        config["observability"] = {"collectorImage": "customerregistry.azurecr.io/collector@" + COLLECTOR_DIGEST}
+        source = render_audit_documents(config, source, foundation, storage, "10.30.8.0/24")
+        identity = {
+            "id": group_id(config) + "/providers/Microsoft.ManagedIdentity/userAssignedIdentities/collector",
+            "name": "collector",
+            "clientId": "88888888-8888-4888-8888-888888888888",
+            "principalId": "99999999-9999-4999-8999-999999999999",
+            "serviceAccountName": "otel-collector",
+            "kubernetesNamespace": "litellm",
+        }
+        receipt = {
+            "applicationId": group_id(config) + "/providers/Microsoft.Insights/components/collector",
+            "connectionString": "InstrumentationKey=55555555-5555-4555-8555-555555555555;IngestionEndpoint=https://westus-0.in.applicationinsights.azure.com/",
+            "identity": identity,
+        }
+
+        def cloud(arguments):
+            if arguments[:3] == ["deployment", "group", "show"]:
+                return {"state": "Succeeded", "receipt": receipt}
+            if arguments[:2] == ["resource", "show"]:
+                return {"properties": {"DisableLocalAuth": True, "publicNetworkAccessForIngestion": "Disabled", "publicNetworkAccessForQuery": "Disabled", "ConnectionString": receipt["connectionString"]}}
+            if arguments[:2] == ["identity", "show"]:
+                return identity
+            if arguments[:2] == ["aks", "show"]:
+                return {"oidcIssuerProfile": {"issuerUrl": "https://issuer.invalid/"}}
+            return [{"issuer": "https://issuer.invalid/", "subject": "system:serviceaccount:litellm:otel-collector", "audiences": ["api://AzureADTokenExchange"]}]
+
+        azure = Mock()
+        azure.scoped.side_effect = cloud
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.backend_manifest.verify_runtime_image") as verify:
+            path = Path(directory)
+            public_key = path / "cosign.pub"
+            public_key.write_text("public")
+            result = prepare_observability(config, source, azure, "10.30.8.0/24", image_public_key=public_key, revision="a" * 40, directory=path)
+        self.assertTrue(any(item["kind"] == "Deployment" and item["metadata"]["name"] == "otel-collector" for item in result))
+        verify.assert_called_once_with(config, "a" * 40, path, config["observability"]["collectorImage"], "collector", public_key=public_key)
+
     def test_native_telemetry_does_not_require_blob_or_l3_identity(self):
         config, source, _, _ = fixture()
         config.pop("auditRuntime")

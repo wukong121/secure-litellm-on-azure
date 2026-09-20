@@ -1,17 +1,20 @@
-# Stage0–1 本地手工执行包
+# Stage0–9 本地手工执行包
 
-> 核对日期：2026-09-16
+> 核对日期：2026-09-17
 >
-> 适用：客户无法运行GitHub Actions，但已取得本仓库受审核代码，并需要完成Stage0可恢复备份和Stage1旧集群最小加固。
+> 适用：客户无法运行GitHub Actions，但已取得本仓库受审核代码，需要从本地完成Stage0–9。本文件详细覆盖已验证的Stage0–1；后续按[Stage2–9本地手工部署指南](stage2-9-guide-zh.md)执行。
 
 本目录是一套独立入口：
 
 ```text
 local_execution/
-├── README_ZH.md          # 本指南
-├── customer.example.json # Stage0–1最小配置模板
-├── __main__.py           # python -m local_execution入口
-└── runner.py             # 本地顺序执行器
+├── README_ZH.md                # Stage0–1及公共准备
+├── stage2-9-guide-zh.md        # Stage2–9顺序、Entra和发布边界
+├── customer.example.json       # 可逐Stage扩展的最小配置
+├── image_supply_chain.py       # 本地镜像SBOM/扫描/签名
+├── requirements.txt            # 本地全部Python依赖
+├── __main__.py                 # python -m local_execution入口
+└── runner.py                   # 本地顺序执行器
 ```
 
 维护者可独立验证本包，不运行GitHub Actions工作流测试：
@@ -20,9 +23,9 @@ local_execution/
 make validate-local-execution
 ```
 
-它不读取GitHub Environment Variables/Secrets，不需要run ID、artifact、evidence ledger或人工计划哈希。每个变更步骤会先实时预览，再在同一次命令中直接执行。底层继续复用仓库现有Azure/Kubernetes实现，以保持资源范围、私网目标、恢复校验和幂等行为一致。
+它不读取GitHub Environment Variables/Secrets，不需要run ID、artifact或evidence ledger。已验证的Stage0–1继续在同一命令中预览并执行；Stage2–9默认只生成plan，审核后须用plan SHA256另行execute。底层继续复用仓库现有Azure/Kubernetes实现，以保持资源范围、私网目标、恢复校验和幂等行为一致。
 
-本路径只覆盖Stage0–1，不部署Stage2以后资源，不迁移目标数据库，不切换流量，也不停用旧集群。
+Stage2–9入口已提供，但不会自动签发人工验收、最终停写、最终数据对账或停旧。Stage9默认禁止启流量；Entra延期时禁止Stage7、Stage8应用发布及全部Stage9流量动作。
 
 ## 1. 执行拓扑
 
@@ -45,6 +48,8 @@ sudo bash -c 'cd /srv/runner/agent && ./svc.sh status' || true
 在GitHub仓库Settings → Actions → Runners确认该机器显示Offline。VM尚未注册GitHub时跳过此项，且不要执行注册命令。手工执行期间不得重新启动服务或派发作业。
 
 ### 1.2 Azure登录
+
+本节是Stage0–1已验证的人工登录方式。Stage2–9也可在`localExecution.authentication`中为deploy/runtime/database/certificate/Entra分别选择现有会话或UAMI，见[后续指南第2节](stage2-9-guide-zh.md#2-azure登录方式)。
 
 优先在VM内使用实名客户管理员登录，设备码在客户合规电脑完成：
 
@@ -197,7 +202,7 @@ git --no-pager show --no-patch --format='commit=%H%nsubject=%s' HEAD
 
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r local_execution/requirements.txt
 ```
 
 创建本地配置：
@@ -222,6 +227,8 @@ chmod 600 local_execution/customer.json
 | `legacyAccess` | 可选来源限制；只有真实CIDR和影响已批准时才加入 |
 | `localExecution.postgresRestoreImage` | 与旧PG大版本匹配的完整`postgres@sha256:...` |
 | `localExecution.executionHost.virtualNetworkId` | Runner部署输出`managementVnetId`；复用子网模式从`runnerSubnetId`去掉`/subnets/<名称>` |
+| `localExecution.authentication` | 默认复用现有`az login`；Stage2–9可按动作选择UAMI Client ID |
+| `localExecution.features` | `entraMode`决定启用或延期Stage7；`allowTrafficRelease`默认false |
 
 ### 4.2 旧日志Workspace怎样填写
 
@@ -291,7 +298,7 @@ docker run --rm --network none --read-only --entrypoint pg_restore \
   --step REPLACE_STEP
 ```
 
-每个变更步骤会读取配置、记录Git提交、生成实时预览并立即执行。结果写入`temp/local-stage01/`。出现Delete、Unsupported、越界资源、配置漂移或底层校验失败时仍会停止，这些是目标安全校验，不是GitHub审批门禁。
+Stage0–1变更步骤会读取配置、记录Git提交、生成实时预览并立即执行；Stage2–9的两阶段命令见后续指南。结果写入`temp/local-stage09/`。出现Delete、Unsupported、越界资源、配置漂移或底层校验失败时仍会停止，这些是目标安全校验，不是GitHub审批门禁。
 
 执行器会在成功或失败后删除输出目录中的`kubeconfig`、`database.dump`和`downloaded.dump`；Azure Blob正式备份不会删除。
 
@@ -430,7 +437,7 @@ getent ahostsv4 "$AKS_FQDN"
   --config local_execution/customer.json --step monitoring
 ```
 
-触发批准的测试条件并确认通知真实送达。
+触发批准的测试条件并确认通知真实送达。需要把Action Group接入飞书群时，按独立的[Azure Monitor告警转发飞书操作指南](feishu-alert-notification-zh.md)配置Logic App；不要把飞书Webhook写入customer.json。
 
 ### S1-L04 Deployment加固
 
@@ -462,6 +469,8 @@ getent ahostsv4 "$AKS_FQDN"
 ### S1-L06 人工核验
 
 确认旧服务健康、告警真实送达、回退快照可用；启用来源限制时另核对正反向来源测试。Stage1完成后继续保留旧集群、PVC、备份及密钥材料。
+
+完成后转到[Stage2–9本地手工部署指南](stage2-9-guide-zh.md)。不要直接跳到Stage3资源部署；Stage2必须先冻结网络、身份、数据库、正文审计和协议决策。
 
 ## 8. 失败与重跑
 

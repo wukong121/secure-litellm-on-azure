@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 from local_execution.runner import (
     STEPS,
+    authenticate_azure,
     check_configuration,
+    enforce_local_policy,
     execute_infrastructure_plan,
     load_config,
     main,
@@ -20,6 +22,7 @@ from local_execution.runner import (
     run_connectivity_check,
     run_infrastructure,
     run_runtime,
+    run_target_connectivity_check,
     require_legacy_cluster_running,
 )
 from scripts.customer_migration import ROOT, validate_config
@@ -71,14 +74,27 @@ class LocalExecutionTests(unittest.TestCase):
             path.write_text(json.dumps(source))
             config, settings = load_config(path)
         self.assertNotIn("localExecution", config)
-        self.assertEqual(settings, source["localExecution"])
+        self.assertEqual(settings["postgresRestoreImage"], source["localExecution"]["postgresRestoreImage"])
+        self.assertEqual(settings["executionHost"], source["localExecution"]["executionHost"])
+        self.assertEqual(settings["authentication"], {"default": {"method": "existing"}})
+        self.assertEqual(settings["features"], {"entraMode": "deferred", "allowTrafficRelease": False})
         self.assertEqual(config["parameters"]["runner-connectivity"]["runnerVirtualNetworkId"], settings["executionHost"]["virtualNetworkId"])
+
+    def test_local_configuration_rejects_symlinks(self):
+        source = self.configuration()
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            real = Path(folder) / "real.json"
+            link = Path(folder) / "customer.json"
+            real.write_text(json.dumps(source))
+            link.symlink_to(real)
+            with self.assertRaisesRegex(ValueError, "cannot be a symlink"):
+                load_config(link)
 
     def test_local_settings_require_pinned_image_and_execution_host(self):
         for update, message in (
             ({"postgresRestoreImage": "postgres:16"}, "full image digest"),
             ({"executionHost": {}}, "unexpected or missing"),
-            ({"unexpected": True}, "requires postgresRestoreImage"),
+            ({"unexpected": True}, "unexpected or missing"),
         ):
             source = self.configuration()
             source["localExecution"].update(update)
@@ -129,6 +145,30 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertEqual(calls[1][:3], ["deployment", "sub", "create"])
         self.assertIn(str(plan_directory / "template.json"), calls[1])
 
+    def test_target_connectivity_deployment_is_reverified(self):
+        config, _settings = self.prepared()
+        plan = {"planSha256": "b" * 64, "revision": "c" * 40, "configSha256": "d" * 64}
+        context = {"apiHostname": "target.private", "privateEndpointIps": ["10.0.0.4"]}
+
+        class FakeAzure:
+            def run(self, _arguments):
+                return {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}
+
+            def scoped(self, _arguments):
+                return {"id": "/synthetic/deployment", "properties": {"provisioningState": "Succeeded", "outputs": {}}}
+
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch("local_execution.runner.AzureCommands", return_value=FakeAzure()), patch("scripts.runner_target_connectivity.inspect_target_connectivity", return_value=context) as inspect:
+            base = Path(folder)
+            plan_directory = base / "plan"
+            execute_directory = base / "execute"
+            plan_directory.mkdir()
+            (plan_directory / "template.json").write_text("{}")
+            (plan_directory / "parameters.json").write_text("{}")
+            (plan_directory / "connectivity-review.json").write_text(json.dumps(context))
+            execute_infrastructure_plan(config, 4, "runner-target-connectivity", plan, plan_directory, execute_directory)
+        inspect.assert_called_once()
+        self.assertTrue(inspect.call_args.kwargs["require_link"])
+
     def test_config_check_cli_reads_only_standalone_customer_file(self):
         source = self.configuration()
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch("local_execution.runner.reviewed_revision", return_value="a" * 40), patch("sys.stdout", new_callable=io.StringIO) as output:
@@ -147,7 +187,7 @@ class LocalExecutionTests(unittest.TestCase):
             config_path = base / "customer.json"
             config_path.write_text(json.dumps(source))
 
-            def fail(_config, _settings, _revision, _step, destination):
+            def fail(_config, _settings, _revision, _step, destination, _operation, _approved_plan):
                 (destination / "database.dump").write_text("sensitive")
                 raise RuntimeError("synthetic failure")
 
@@ -220,6 +260,177 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertEqual(result, {"planSha256": plan_sha})
         self.assertEqual(calls[-1][-1], plan_sha)
 
+    def test_later_runtime_actions_use_immediate_plan_hash(self):
+        config, _settings = self.prepared()
+        plan_sha = "9" * 64
+        calls = []
+
+        def invoke(_config, _revision, stage, action, operation, directory, approved, image_public_key=None):
+            calls.append((stage, action, operation, approved, image_public_key))
+            if operation == "plan":
+                (directory / "runtime-summary.json").write_text(json.dumps({"planSha256": plan_sha}))
+
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch("local_execution.runner.invoke_runtime_action", side_effect=invoke):
+            result = run_runtime(config, "e" * 40, 5, "schema-migrate", Path(folder))
+        self.assertEqual(result, {"planSha256": plan_sha})
+        self.assertEqual(calls, [(5, "schema-migrate", "plan", "", None), (5, "schema-migrate", "execute", plan_sha, None)])
+
+    def test_later_runtime_defaults_to_plan_and_requires_matching_approval(self):
+        from local_execution.runner import local_operation
+
+        config, _settings = self.prepared()
+        plan_sha = "8" * 64
+        calls = []
+
+        def invoke(_config, _revision, stage, action, operation, directory, approved, image_public_key=None):
+            calls.append((stage, action, operation, approved))
+            if operation == "plan":
+                (directory / "runtime-summary.json").write_text(json.dumps({"planSha256": plan_sha}))
+
+        self.assertEqual(local_operation("stage5-schema-migrate", "auto"), "plan")
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch("local_execution.runner.invoke_runtime_action", side_effect=invoke):
+            planned = run_runtime(config, "e" * 40, 5, "schema-migrate", Path(folder), operation="plan")
+        self.assertEqual(planned, {"planSha256": plan_sha, "executionPerformed": False})
+        self.assertEqual(calls, [(5, "schema-migrate", "plan", "")])
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch("local_execution.runner.invoke_runtime_action", side_effect=invoke), self.assertRaisesRegex(ValueError, "changed since approval"):
+            run_runtime(config, "e" * 40, 5, "schema-migrate", Path(folder), operation="execute", approved_plan="7" * 64)
+
+    def test_managed_identity_authentication_selects_client_and_scope(self):
+        config, settings = self.prepared()
+        client_id = "33333333-3333-4333-8333-333333333333"
+        settings["authentication"] = {"runtime": {"method": "managed-identity", "clientId": client_id}}
+        calls = []
+
+        def run(arguments, **_kwargs):
+            calls.append(arguments)
+            if arguments[1:3] == ["account", "show"]:
+                output = json.dumps({"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]})
+            elif arguments[1:3] == ["account", "get-access-token"]:
+                payload = json.dumps({"appid": client_id}).encode()
+                output = "header." + __import__("base64").urlsafe_b64encode(payload).decode().rstrip("=") + ".signature"
+            else:
+                output = ""
+            return subprocess.CompletedProcess(arguments, 0, output, "")
+
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            profile = authenticate_azure(config, settings, "runtime", Path(folder), run=run)
+            summary = json.loads((Path(folder) / "azure-auth.json").read_text())
+        self.assertEqual(profile["clientId"], client_id)
+        self.assertEqual(calls[0][:6], ["az", "login", "--identity", "--client-id", client_id, "--output"])
+        self.assertEqual(summary["method"], "managed-identity")
+        self.assertTrue(summary["clientIdentityVerified"])
+
+    def test_stage2_to_9_cannot_use_immediate_apply(self):
+        from local_execution.runner import local_operation
+
+        with self.assertRaisesRegex(ValueError, "limited to the validated Stage0-1"):
+            local_operation("stage9-edge-release", "apply")
+        self.assertEqual(local_operation("monitoring", "apply"), "apply")
+
+    def test_entra_deferral_blocks_identity_and_traffic_not_preparation(self):
+        _config, settings = self.prepared()
+        settings["features"] = {"entraMode": "deferred", "allowTrafficRelease": False}
+        for step in ("stage7-entra-apps", "stage8-application", "stage9-edge-release", "stage9-dns-publish"):
+            with self.subTest(step=step), self.assertRaisesRegex(ValueError, "Entra is deferred"):
+                enforce_local_policy(settings, step)
+        enforce_local_policy(settings, "stage9-edge-prepare")
+        enforce_local_policy(settings, "stage7-promote-proxy-image")
+        enforce_local_policy(settings, "stage9-dns-rollback")
+
+    def test_local_operation_sanitizes_ambient_manifest_and_ingress_overrides(self):
+        from local_execution.runner import local_operation_environment
+
+        config, settings = self.prepared()
+        ambient = {
+            "MIGRATION_MANIFEST_YAML": "unreviewed",
+            "PRIVATE_API_INGRESS_CLASS": "ambient-api",
+            "PRIVATE_ADMIN_INGRESS_CLASS": "ambient-admin",
+        }
+        with patch.dict(os.environ, ambient, clear=False):
+            with local_operation_environment(config, settings, "stage6-application", {"method": "existing"}):
+                self.assertEqual(os.environ["MIGRATION_MANIFEST_YAML"], "")
+                self.assertEqual(os.environ["PRIVATE_API_INGRESS_CLASS"], "")
+                self.assertEqual(os.environ["PRIVATE_ADMIN_INGRESS_CLASS"], "")
+            self.assertEqual({name: os.environ[name] for name in ambient}, ambient)
+
+    def test_image_promotion_requires_explicit_execute(self):
+        from local_execution.runner import local_operation
+
+        with self.assertRaisesRegex(ValueError, "requires explicit --operation execute"):
+            local_operation("stage4-promote-backend-image", "auto")
+        self.assertEqual(local_operation("stage4-promote-backend-image", "execute"), "execute")
+
+    def test_target_connectivity_check_binds_dns_tls_and_cluster_read(self):
+        config, _settings = self.prepared()
+        target = {
+            "apiHostname": "target.privatelink.westus.azmk8s.io",
+            "privateEndpointIps": ["10.30.1.4"],
+            "acrLoginServer": "customerregistry.azurecr.io",
+            "acrPrivateEndpointIps": ["10.30.8.4"],
+        }
+
+        def run(arguments, **_kwargs):
+            if arguments[0] == "getent":
+                address = "10.30.1.4" if arguments[-1] == target["apiHostname"] else "10.30.8.4"
+                output = address + " STREAM " + arguments[-1]
+            elif arguments[0] == "curl":
+                address = "10.30.1.4" if target["apiHostname"] in arguments[-1] else "10.30.8.4"
+                output = address + " 401"
+            else:
+                output = "deployment/litellm"
+            return subprocess.CompletedProcess(arguments, 0, output, "")
+
+        config, settings = self.prepared()
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch("scripts.runner_target_connectivity.inspect_target_connectivity", return_value=target), patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl"]), patch("local_execution.runner.AzureCommands"), patch("local_execution.runner.authenticate_azure") as authenticate:
+            directory = Path(folder)
+            result = run_target_connectivity_check(config, settings, "a" * 40, directory, run=run)
+            report = json.loads((directory / "target-readiness.json").read_text())
+        self.assertEqual(result, {"status": "passed"})
+        self.assertEqual([item["name"] for item in report["checks"]], ["target-aks-private", "target-acr-private", "target-cluster-read"])
+        self.assertEqual([call.args[2] for call in authenticate.call_args_list], ["deploy", "runtime"])
+
+    def test_local_image_promotion_signs_and_removes_registry_token(self):
+        from local_execution.image_supply_chain import promote_image
+
+        config, settings = self.prepared()
+        config["parameters"]["platform"] = {"containerRegistryName": "customerregistry"}
+        calls = []
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            directory = Path(folder)
+            private_key = directory / "cosign.key"
+            public_key = directory / "cosign.pub"
+            private_key.write_text("private")
+            private_key.chmod(0o600)
+            public_key.write_text("public")
+            settings["imageSigning"] = {
+                "privateKeyPath": str(private_key),
+                "publicKeyPath": str(public_key),
+                "backendTargetTag": "litellm-azure:test",
+            }
+
+            def run(arguments, **kwargs):
+                calls.append((arguments, kwargs.get("env")))
+                output = ""
+                if arguments[:3] == ["az", "acr", "login"]:
+                    output = json.dumps({"loginServer": "customerregistry.azurecr.io", "accessToken": "private-token"})
+                elif arguments[:4] == ["az", "acr", "manifest", "list-metadata"]:
+                    output = "sha256:" + "a" * 64 + "\n"
+                elif arguments[0] == "syft":
+                    Path(arguments[arguments.index("--output") + 1].split("=", 1)[1]).write_text(json.dumps({"spdxVersion": "SPDX-2.3"}))
+                elif arguments[0] == "trivy":
+                    Path(arguments[arguments.index("--output") + 1]).write_text(json.dumps({"Results": []}))
+                elif arguments[:2] == ["cosign", "verify"]:
+                    output = json.dumps([{"critical": {"identity": {"docker-reference": "customerregistry.azurecr.io/litellm-azure"}}}])
+                return subprocess.CompletedProcess(arguments, 0, output, "")
+
+            with patch.dict(os.environ, {"COSIGN_PASSWORD": "not-recorded"}):
+                summary = promote_image(config, settings, "f" * 40, "backend", directory, run=run)
+            self.assertTrue(summary["signatureVerified"])
+            self.assertFalse((directory / "docker-config/config.json").exists())
+            self.assertNotIn("private-token", str(calls))
+            self.assertNotIn("not-recorded", str(calls[:-2]))
+            self.assertEqual(calls[-1][1]["COSIGN_PASSWORD"], "not-recorded")
+
     def test_backup_restore_reads_image_from_local_settings(self):
         config, settings = self.prepared()
         observed = []
@@ -235,8 +446,17 @@ class LocalExecutionTests(unittest.TestCase):
 
     def test_guide_and_example_match_steps(self):
         guide = (ROOT / "local_execution/README_ZH.md").read_text()
+        later_guide = (ROOT / "local_execution/stage2-9-guide-zh.md").read_text()
+        all_guides = guide + later_guide
+        requirements = (ROOT / "local_execution/requirements.txt").read_text()
+        feishu = (ROOT / "local_execution/feishu-alert-notification-zh.md").read_text()
         example = json.loads((ROOT / "local_execution/customer.example.json").read_text())
-        self.assertEqual(set(example["localExecution"]), {"postgresRestoreImage", "executionHost"})
+        self.assertEqual(set(example["localExecution"]), {"postgresRestoreImage", "executionHost", "authentication", "features", "runtimeInputs"})
+        self.assertEqual(example["localExecution"]["authentication"], {"default": {"method": "existing"}})
+        self.assertEqual(example["localExecution"]["features"], {"entraMode": "deferred", "allowTrafficRelease": False})
+        for dependency in ("-r ../requirements.txt", "acme==5.8.0", "dnspython==2.8.0", "josepy==2.2.0"):
+            self.assertIn(dependency, requirements)
+        self.assertIn("local_execution/requirements.txt", guide)
         self.assertNotIn("runner-connectivity", example["parameters"])
         self.assertIn("在线Runner VM绝不能挂载高权限UAMI", guide)
         self.assertIn("可以复用客户现有的deploy/runtime UAMI", guide)
@@ -248,10 +468,13 @@ class LocalExecutionTests(unittest.TestCase):
             self.assertIn(value, guide)
         for value in ("database system is shutting down", "容器PID 1已经切换为`postgres`", "restore-container-state.json", "restore-container.log", "本次失败不会生成正式`backupBlob`"):
             self.assertIn(value, guide)
+        self.assertIn("feishu-alert-notification-zh.md", guide)
+        for value in ("ag-litellm-stage1-owner", "Common alert schema", "Send_to_Feishu", "Secure Inputs", "FeishuRejected", "code=0", "19024", "重跑monitoring后飞书Action消失"):
+            self.assertIn(value, feishu)
         for value in ("没有`legacy-monitoring`字段", "workspaceMode", "只能是`create`或`existing`", "REPLACE_EXISTING_LEGACY_WORKSPACE_NAME", "REPLACE_NEW_LEGACY_WORKSPACE_NAME", "不能用`create`试探资源是否存在", "az monitor log-analytics workspace list"):
             self.assertIn(value, guide)
         for step in STEPS:
-            self.assertIn(f"--step {step}", guide)
+            self.assertIn(f"--step {step}", all_guides)
         ordered = ["config-check", "bootstrap", "backup", "execution-host-connectivity", "connectivity-check", "backup-restore", "legacy-logging", "monitoring-onboard", "monitoring", "legacy-hardening", "legacy-access-restrict"]
         self.assertEqual([guide.index(f"--step {step}") for step in ordered], sorted(guide.index(f"--step {step}") for step in ordered))
 
