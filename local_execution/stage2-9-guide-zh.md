@@ -258,6 +258,7 @@ chmod 600 "local_execution/stage-REPLACE_STAGE-values.local.json"
 | --- | --- | --- |
 | 2 | `single-validation-identity` | 配置单一local-operator UAMI；客户直接登录不选 |
 | 4 | `automatic-api-certificate` | 启用自动API证书；手工导入不选 |
+| 5 | `database-admin-identity` | 使用独立database UAMI作为PG管理员；无管理员组时选择 |
 | 8 | `observability` | 加入可选collector |
 | 8 | `enhanced-l3` | 删除原生`contentAudit`并切换增强L3；不能与observability在同一次合并 |
 | 9 | `azure-dns` | 使用仓库自动发布Azure DNS |
@@ -290,7 +291,39 @@ chmod 600 "local_execution/stage-REPLACE_STAGE-values.local.json"
 
 ### 4.1 Stage5恢复输入
 
-从同一个成功Stage0备份报告取得Blob名和SHA256：
+从**当前Runner本地执行Stage0**时生成的同一个成功备份报告取得Blob名和SHA256；不要使用Actions artifact、开发机`temp/reviewed-backup-*`或另一台机器保存的旧报告。先在Runner仓库根目录定位并核验报告：
+
+```bash
+set -euo pipefail
+mapfile -t BACKUP_REPORTS < <(
+  find temp -mindepth 3 -maxdepth 3 -type f \
+    -path 'temp/local-stage*/*-backup-restore-*/acceptance-report.json' -printf '%T@ %p\n' \
+    | sort -nr | cut -d' ' -f2-
+)
+BACKUP_REPORT=
+for candidate in "${BACKUP_REPORTS[@]}"; do
+  run_dir="${candidate%/acceptance-report.json}"
+  if jq -e '.step == "backup-restore" and .result.status == "completed"' \
+      "$run_dir/local-execution.json" >/dev/null \
+    && jq -e '.observations.fullRestoreSucceeded == true
+      and (.observations.backupBlob | test("^pre-change/[0-9a-f]{32}\\.dump$"))
+      and (.observations.backupSha256 | test("^[0-9a-f]{64}$"))
+      and .observations.backupBytes > 0
+      and .observations.publicTableCount > 0' "$candidate" >/dev/null; then
+    BACKUP_REPORT="$candidate"
+    break
+  fi
+done
+[[ -n "$BACKUP_REPORT" ]] || {
+  echo 'No successful local Stage0 backup report found on this Runner' >&2
+  false
+}
+printf 'Using local Stage0 report: %s\n' "$BACKUP_REPORT"
+jq '.observations | {backupBlob,backupSha256,backupBytes,publicTableCount,fullRestoreSucceeded}' \
+  "$BACKUP_REPORT"
+```
+
+只有上述命令找到成功报告时才继续。将输出的完整`backupBlob`和`backupSha256`原样用于Stage5；values文件中的`REPLACE_32_HEX`只填写`pre-change/`与`.dump`之间的32位标识：
 
 ```json
 "runtimeInputs": {
@@ -635,7 +668,12 @@ unset COSIGN_PASSWORD
 10. Runner VM验证资源和工作负载：
 
 ```bash
+set -euo pipefail
+SUBSCRIPTION_ID="$(jq -er '.azure.subscriptionId' local_execution/customer.json)"
+TARGET_RG="$(jq -er '.target.resourceGroup' local_execution/customer.json)"
+TARGET_AKS="$(jq -er '.parameters.platform.stage4Aks.name' local_execution/customer.json)"
 VERIFY_KUBECONFIG="$(mktemp)"
+trap 'rm -f "$VERIFY_KUBECONFIG"' EXIT
 az aks get-credentials --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
   --name "$TARGET_AKS" --file "$VERIFY_KUBECONFIG" --overwrite-existing
 kubelogin convert-kubeconfig --kubeconfig "$VERIFY_KUBECONFIG" -l azurecli
@@ -645,7 +683,6 @@ kubectl --kubeconfig "$VERIFY_KUBECONFIG" get pods,service \
   -n llm-api-ingress
 kubectl --kubeconfig "$VERIFY_KUBECONFIG" get pods,service \
   -n llm-admin-ingress
-rm -f "$VERIFY_KUBECONFIG"
 ```
 
 通过条件：三个namespace存在；两套入口Pod Ready、内部LoadBalancer有不同私网IP；证书域名/指纹正确；错误Host和未批准来源被拒绝；AKS、ACR和证书Vault公网均关闭。此时仍不切业务流量。
@@ -660,6 +697,29 @@ rm -f "$VERIFY_KUBECONFIG"
 - `runtimeInputs.backupBlob`和`backupSha256`来自同一个成功Stage0报告。
 - deploy仍有目标RG Contributor、Lock Writer和受约束角色分配权限。
 
+验证模式中，`REPLACE_LOCAL_OPERATOR_UAMI_PRINCIPAL_ID`填写operator UAMI的Principal ID；两个`REPLACE_PG_ADMIN_GROUP_*`字段必须填写另一个真实Entra安全组的显示名和Object ID，不能重复填写UAMI名称/Principal ID。这个组不是另一个UAMI：它没有Client ID、凭据或VM挂载，只把现有operator列为成员。不能用Azure RBAC角色分配代替Entra组成员关系，也不能把同一个operator Principal ID直接同时配置成PG管理员和`migrationPrincipalId`；执行器会阻止该权限合并。若客户尚无批准的PG管理员组，由Entra组管理员在客户外部管理终端创建专用安全组并加入operator服务主体：
+
+```bash
+PG_ADMIN_GROUP_NAME="llmgw-test-pg-admins"
+OPERATOR_OBJECT_ID="REPLACE_LOCAL_OPERATOR_UAMI_PRINCIPAL_ID"
+
+PG_ADMIN_GROUP_OBJECT_ID="$(az ad group create \
+  --display-name "$PG_ADMIN_GROUP_NAME" \
+  --mail-nickname "$PG_ADMIN_GROUP_NAME" \
+  --query id --output tsv)"
+az ad group member add --group "$PG_ADMIN_GROUP_OBJECT_ID" \
+  --member-id "$OPERATOR_OBJECT_ID"
+
+az ad group show --group "$PG_ADMIN_GROUP_OBJECT_ID" \
+  --query '{name:displayName,objectId:id,securityEnabled:securityEnabled}' --output json
+az ad group member check --group "$PG_ADMIN_GROUP_OBJECT_ID" \
+  --member-id "$OPERATOR_OBJECT_ID" --output json
+```
+
+已有批准组时只查询并复用，不重复运行`group create`；先核对`securityEnabled=true`和成员检查`value=true`。组Object ID填`REPLACE_PG_ADMIN_GROUP_OBJECT_ID`，显示名填`REPLACE_PG_ADMIN_GROUP_NAME`。新组成员关系及托管身份Token可能延迟生效，以实际PG Entra登录为准；失败时等待传播并重新登录，不把PG管理员改成migration UAMI绕过分离检查。
+
+没有组管理权限但已有独立database UAMI时，外部管理员把该UAMI挂载到Runner，并确认它在目标RG具有Reader或等效读取权限。values文件不再填写两个`REPLACE_PG_ADMIN_GROUP_*`，改填`REPLACE_DATABASE_ADMIN_UAMI_NAME`、`REPLACE_DATABASE_ADMIN_UAMI_CLIENT_ID`和`REPLACE_DATABASE_ADMIN_UAMI_PRINCIPAL_ID`；两条Stage5合并命令都追加`--option database-admin-identity`。该选项固定使用`ServicePrincipal`作为PG管理员，并只让`stage5-database-roles`使用`authentication.database`；platform和后续secrets/restore/schema仍使用operator。database UAMI与`databaseAccess.migrationPrincipalId`必须是两个不同Principal ID。
+
 先合并Stage5配置和Stage0备份引用：
 
 ```bash
@@ -669,6 +729,12 @@ rm -f "$VERIFY_KUBECONFIG"
 .venv/bin/python -m local_execution.merge_config \
   --config local_execution/customer.json --stage 5 --operation apply \
   --values local_execution/stage-5-values.local.json
+```
+
+独立database UAMI路径在两条命令末尾追加：
+
+```bash
+  --option database-admin-identity
 ```
 
 1. 客户模式使用当前Azure部署账号，验证模式使用operator，创建Stage5私有数据资源：
