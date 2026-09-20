@@ -503,6 +503,7 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertIn("stage5Data", stage5["customerConfig"]["parameters"]["platform"])
         self.assertIn("databaseAccess", stage5["customerConfig"])
         self.assertEqual(set(stage5["localExecutionMerge"]["runtimeInputs"]), {"backupBlob", "backupSha256", "postgresMigrationUser"})
+        self.assertIn("separateDatabaseAdminIdentity", stage5)
         self.assertIn("application", staged["stages"]["6"]["customerConfig"])
         self.assertEqual(set(staged["stages"]["7"]["customerConfig"]), {"entra", "proxy"})
         self.assertEqual(staged["stages"]["7"]["localExecutionMerge"]["features"]["entraMode"], "enabled")
@@ -567,6 +568,9 @@ class LocalExecutionTests(unittest.TestCase):
             "REPLACE_SUPPORTED_PG_SKU": "Standard_D2s_v3",
             "REPLACE_PG_ADMIN_GROUP_OBJECT_ID": "66666666-6666-4666-8666-666666666666",
             "REPLACE_PG_ADMIN_GROUP_NAME": "database-bootstrap-group",
+            "REPLACE_DATABASE_ADMIN_UAMI_CLIENT_ID": "10000000-0000-4000-8000-000000000007",
+            "REPLACE_DATABASE_ADMIN_UAMI_PRINCIPAL_ID": "67676767-6767-4676-8676-676767676767",
+            "REPLACE_DATABASE_ADMIN_UAMI_NAME": "database-bootstrap-identity",
             "REPLACE_32_HEX": "1" * 32,
             "REPLACE_64_HEX_SHA256": "2" * 64,
             "REPLACE_BUILT_64_HEX_DIGEST": "3" * 64,
@@ -624,10 +628,21 @@ class LocalExecutionTests(unittest.TestCase):
         merge(automatic_certificate, replace(catalog["4"]["optionalAutomaticApiCertificate"]["customerConfig"]))
         validated(automatic_certificate)
 
+        stage4_source = copy.deepcopy(source)
         merge(source, replace(catalog["5"]["customerConfig"]))
         merge(source["localExecution"], replace(catalog["5"]["localExecutionMerge"]))
         config = validated(source)
         parameters_for(config, 5, "platform")
+
+        database_identity = stage4_source
+        merge(database_identity, replace(catalog["5"]["customerConfig"]))
+        merge(database_identity["localExecution"], replace(catalog["5"]["localExecutionMerge"]))
+        merge(database_identity, replace(catalog["5"]["separateDatabaseAdminIdentity"]["customerConfig"]))
+        merge(database_identity["localExecution"], replace(catalog["5"]["separateDatabaseAdminIdentity"]["localExecutionMerge"]))
+        database_identity_config = validated(database_identity)
+        parameters_for(database_identity_config, 5, "platform")
+        self.assertEqual(database_identity_config["parameters"]["platform"]["stage5Data"]["postgresqlEntraAdministratorPrincipalType"], "ServicePrincipal")
+        self.assertEqual(database_identity["localExecution"]["authentication"]["database"]["method"], "managed-identity")
 
         merge(source, replace(catalog["6"]["customerConfig"]))
         validated(source)
@@ -716,6 +731,12 @@ class LocalExecutionTests(unittest.TestCase):
         catalog = {
             "catalogVersion": 1,
             "stages": {
+                "5": {
+                    "customerConfig": {},
+                    "separateDatabaseAdminIdentity": {
+                        "localExecutionMerge": {"authentication": {"database": {"method": "managed-identity", "clientId": "10000000-0000-4000-8000-000000000007"}}},
+                    },
+                },
                 "8": {
                     "enhancedL3Alternative": {
                         "removeCustomerConfigKeysBeforeMerge": ["contentAudit"],
@@ -734,6 +755,9 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertFalse(missing)
         self.assertNotIn("contentAudit", merged)
         self.assertIn("auditRuntime", merged)
+        database_identity, missing = merge_stage(source, catalog, 5, options=("database-admin-identity",))
+        self.assertFalse(missing)
+        self.assertEqual(database_identity["localExecution"]["authentication"]["database"]["clientId"], "10000000-0000-4000-8000-000000000007")
         with self.assertRaisesRegex(ValueError, "not both"):
             merge_stage(source, catalog, 8, options=("enhanced-l3", "observability"))
         prepared, _ = merge_stage(source, catalog, 9)

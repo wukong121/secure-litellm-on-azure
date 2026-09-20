@@ -157,6 +157,27 @@
           "backupSha256": "REPLACE_64_HEX_SHA256",
           "postgresMigrationUser": "llmgw_migrator"
         }
+      },
+      "separateDatabaseAdminIdentity": {
+        "customerConfig": {
+          "parameters": {
+            "platform": {
+              "stage5Data": {
+                "postgresqlEntraAdministratorObjectId": "REPLACE_DATABASE_ADMIN_UAMI_PRINCIPAL_ID",
+                "postgresqlEntraAdministratorPrincipalName": "REPLACE_DATABASE_ADMIN_UAMI_NAME",
+                "postgresqlEntraAdministratorPrincipalType": "ServicePrincipal"
+              }
+            }
+          }
+        },
+        "localExecutionMerge": {
+          "authentication": {
+            "database": {
+              "method": "managed-identity",
+              "clientId": "REPLACE_DATABASE_ADMIN_UAMI_CLIENT_ID"
+            }
+          }
+        }
       }
     },
     "6": {
