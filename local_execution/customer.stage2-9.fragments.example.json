@@ -1,0 +1,339 @@
+{
+  "catalogVersion": 1,
+  "stages": {
+    "2": {
+      "customerConfig": {
+        "governance": {
+          "approvalMode": "single-operator",
+          "approverObjectIds": [
+            "REPLACE_APPROVED_OPERATOR_USER_OBJECT_ID"
+          ],
+          "singleOperatorRiskAccepted": true,
+          "githubLogin": "REPLACE_APPROVED_GITHUB_LOGIN"
+        },
+        "contentAudit": {
+          "mode": "native",
+          "retentionDays": 7,
+          "contentPolicyAccepted": true
+        }
+      },
+      "localExecutionMerge": {
+        "features": {
+          "entraMode": "deferred",
+          "allowTrafficRelease": false
+        }
+      },
+      "singleValidationIdentityAlternative": {
+        "authentication": {
+          "default": {
+            "method": "managed-identity",
+            "clientId": "REPLACE_LOCAL_OPERATOR_UAMI_CLIENT_ID"
+          }
+        }
+      }
+    },
+    "3": {
+      "customerConfig": {
+        "parameters": {
+          "platform": {
+            "containerRegistryName": "REPLACE_GLOBALLY_UNIQUE_ACR_NAME",
+            "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
+            "stage4Network": {
+              "virtualNetworkName": "REPLACE_TARGET_VNET",
+              "privateEndpointSubnetName": "snet-private-endpoints",
+              "firewallSubnetPrefix": "10.30.0.0/26",
+              "systemSubnetName": "snet-aks-system",
+              "systemSubnetPrefix": "10.30.1.0/24",
+              "userSubnetName": "snet-aks-user",
+              "userSubnetPrefix": "10.30.2.0/23",
+              "ingressSubnetName": "snet-private-ingress",
+              "ingressSubnetPrefix": "10.30.4.0/24",
+              "podCidr": "10.244.0.0/16",
+              "serviceCidr": "10.31.0.0/16",
+              "dnsServiceIp": "10.31.0.10"
+            },
+            "stage4Aks": {
+              "name": "REPLACE_NEW_PRIVATE_AKS_NAME",
+              "dnsPrefix": "REPLACE_NEW_AKS_DNS_PREFIX",
+              "kubernetesVersion": "REPLACE_SUPPORTED_K8S_VERSION",
+              "systemNodeVmSize": "REPLACE_SUPPORTED_VM_SKU",
+              "systemNodeCount": 2,
+              "userNodeVmSize": "REPLACE_SUPPORTED_VM_SKU",
+              "userNodeCount": 2
+            }
+          }
+        }
+      }
+    },
+    "4": {
+      "customerConfig": {
+        "parameters": {
+          "platform": {
+            "stage4RoleAssignmentNaming": "resource-id",
+            "azureOpenAIConnections": [
+              {
+                "alias": "primary",
+                "accountResourceId": "/subscriptions/REPLACE_MODEL_SUBSCRIPTION_ID/resourceGroups/REPLACE_MODEL_RESOURCE_GROUP/providers/Microsoft.CognitiveServices/accounts/REPLACE_MODEL_ACCOUNT_NAME",
+                "subscriptionId": "REPLACE_MODEL_SUBSCRIPTION_ID",
+                "resourceGroupName": "REPLACE_MODEL_RESOURCE_GROUP",
+                "accountName": "REPLACE_MODEL_ACCOUNT_NAME"
+              }
+            ]
+          },
+          "certificate-vault": {
+            "vaultName": "REPLACE_GLOBALLY_UNIQUE_CERTIFICATE_VAULT_NAME",
+            "ingressReaderPrincipalId": "REPLACE_LOCAL_OPERATOR_UAMI_PRINCIPAL_ID",
+            "certificateImporterPrincipalId": "REPLACE_APPROVED_CERTIFICATE_IMPORTER_OBJECT_ID",
+            "certificateImporterPrincipalType": "User",
+            "runnerVirtualNetworkId": "REPLACE_RUNNER_VNET_RESOURCE_ID",
+            "createPrivateDnsZone": true,
+            "manageTargetDnsLink": true,
+            "manageRunnerDnsLink": true
+          },
+          "runner-target-connectivity": {
+            "runnerVirtualNetworkId": "REPLACE_RUNNER_VNET_RESOURCE_ID",
+            "manageDnsLink": true
+          }
+        },
+        "privateIngress": {
+          "api": {
+            "tlsSecretId": "https://REPLACE_CERTIFICATE_VAULT_NAME.vault.azure.net/secrets/api-tls",
+            "allowedCidrs": [
+              "10.50.0.0/24"
+            ]
+          },
+          "admin": {
+            "tlsSecretId": "https://REPLACE_CERTIFICATE_VAULT_NAME.vault.azure.net/secrets/admin-tls",
+            "allowedCidrs": [
+              "10.50.0.0/24"
+            ]
+          }
+        }
+      },
+      "localExecutionMerge": {
+        "imageSigning": {
+          "privateKeyPath": "/srv/runner/manual/keys/cosign.key",
+          "publicKeyPath": "/srv/runner/manual/keys/cosign.pub",
+          "backendTargetTag": "litellm-azure:rehearsal-1",
+          "proxyTargetTag": "auth-proxy:rehearsal-1",
+          "collectorTargetTag": "otel-collector:0.148.0"
+        }
+      },
+      "optionalAutomaticApiCertificate": {
+        "customerConfig": {
+          "certificates": {
+            "zoneResourceId": "/subscriptions/REPLACE_SUBSCRIPTION_ID/resourceGroups/REPLACE_DNS_RESOURCE_GROUP/providers/Microsoft.Network/dnsZones/REPLACE_CUSTOMER_BASE_DOMAIN",
+            "termsAccepted": true,
+            "publicApiHostnameAccepted": true
+          }
+        }
+      }
+    },
+    "5": {
+      "customerConfig": {
+        "parameters": {
+          "platform": {
+            "stage5Data": {
+              "postgresqlDatabaseName": "litellm",
+              "postgresqlSkuName": "REPLACE_SUPPORTED_PG_SKU",
+              "postgresqlHighAvailabilityMode": "Disabled",
+              "postgresqlEntraAdministratorObjectId": "REPLACE_PG_ADMIN_GROUP_OBJECT_ID",
+              "postgresqlEntraAdministratorPrincipalName": "REPLACE_PG_ADMIN_GROUP_NAME",
+              "postgresqlEntraAdministratorPrincipalType": "Group",
+              "redisSkuName": "Balanced_B0"
+            },
+            "createStage5KeyVaultPrivateDnsZone": false,
+            "createStage5PostgresqlPrivateDnsZone": true,
+            "createStage5ManagedRedisPrivateDnsZone": true
+          }
+        },
+        "databaseAccess": {
+          "migrationPrincipalId": "REPLACE_LOCAL_OPERATOR_UAMI_PRINCIPAL_ID"
+        }
+      },
+      "localExecutionMerge": {
+        "runtimeInputs": {
+          "backupBlob": "pre-change/REPLACE_32_HEX.dump",
+          "backupSha256": "REPLACE_64_HEX_SHA256",
+          "postgresMigrationUser": "llmgw_migrator"
+        }
+      }
+    },
+    "6": {
+      "customerConfig": {
+        "application": {
+          "backendImage": "REPLACE_GLOBALLY_UNIQUE_ACR_NAME.azurecr.io/litellm-azure@sha256:REPLACE_BUILT_64_HEX_DIGEST",
+          "models": [
+            {
+              "modelGroup": "coding",
+              "connectionAlias": "primary",
+              "deploymentName": "REPLACE_EXISTING_MODEL_DEPLOYMENT_NAME",
+              "id": "primary-coding",
+              "apiVersion": "v1"
+            }
+          ]
+        }
+      }
+    },
+    "7": {
+      "customerConfig": {
+        "entra": {
+          "bootstrapPrincipalId": "REPLACE_ENTRA_BOOTSTRAP_SERVICE_PRINCIPAL_OBJECT_ID",
+          "accessPrincipalId": "REPLACE_ENTRA_ACCESS_SERVICE_PRINCIPAL_OBJECT_ID",
+          "credentialLifetimeDays": 90
+        },
+        "proxy": {
+          "image": "REPLACE_GLOBALLY_UNIQUE_ACR_NAME.azurecr.io/auth-proxy@sha256:REPLACE_BUILT_64_HEX_DIGEST",
+          "nativeUi": true,
+          "apiClientIds": [
+            "REPLACE_CALLING_APPLICATION_CLIENT_ID"
+          ],
+          "bindings": [
+            {
+              "oid": "REPLACE_API_USER_OBJECT_ID",
+              "principalType": "User",
+              "plane": "api",
+              "role": "internal_user"
+            },
+            {
+              "oid": "REPLACE_ADMIN_USER_OBJECT_ID",
+              "principalType": "User",
+              "plane": "admin",
+              "role": "proxy_admin_viewer",
+              "models": [
+                "coding"
+              ],
+              "nativeAuditRead": true
+            }
+          ]
+        }
+      },
+      "localExecutionMerge": {
+        "authentication": {
+          "entraBootstrap": {
+            "method": "managed-identity",
+            "clientId": "REPLACE_ENTRA_BOOTSTRAP_UAMI_CLIENT_ID"
+          },
+          "entraAccess": {
+            "method": "managed-identity",
+            "clientId": "REPLACE_ENTRA_ACCESS_UAMI_CLIENT_ID"
+          }
+        },
+        "features": {
+          "entraMode": "enabled",
+          "allowTrafficRelease": false
+        }
+      }
+    },
+    "8": {
+      "nativeAuditOptionalObservability": {
+        "customerConfig": {
+          "observability": {
+            "collectorImage": "REPLACE_GLOBALLY_UNIQUE_ACR_NAME.azurecr.io/otel-collector@sha256:8164eab2e6bca9c9b0837a8d2f118a6618489008a839db7f9d6510e66be3923c"
+          }
+        }
+      },
+      "enhancedL3Alternative": {
+        "removeCustomerConfigKeysBeforeMerge": [
+          "contentAudit"
+        ],
+        "customerConfig": {
+          "parameters": {
+            "audit": {
+              "virtualNetworkName": "REPLACE_TARGET_VNET",
+              "privateEndpointSubnetName": "snet-private-endpoints",
+              "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
+              "cmkVaultName": "REPLACE_AUDIT_CMK_VAULT",
+              "cmkKeyName": "REPLACE_AUDIT_CMK_KEY",
+              "writerPrincipalId": "auto",
+              "readerPrincipalId": "auto",
+              "retentionPrincipalId": "auto",
+              "recoveryPrincipalId": "auto"
+            }
+          },
+          "auditRuntime": {
+            "retentionDays": 7,
+            "captureEnabled": true,
+            "retentionEnabled": true,
+            "deliveryPolicyAccepted": true
+          },
+          "proxy": {
+            "image": "REPLACE_GLOBALLY_UNIQUE_ACR_NAME.azurecr.io/auth-proxy@sha256:REPLACE_BUILT_64_HEX_DIGEST",
+            "nativeUi": true,
+            "apiClientIds": [
+              "REPLACE_CALLING_APPLICATION_CLIENT_ID"
+            ],
+            "bindings": [
+              {
+                "oid": "REPLACE_API_USER_OBJECT_ID",
+                "principalType": "User",
+                "plane": "api",
+                "role": "internal_user",
+                "auditTeamId": "REPLACE_APPROVED_AUDIT_TEAM_ID"
+              },
+              {
+                "oid": "REPLACE_ADMIN_USER_OBJECT_ID",
+                "principalType": "User",
+                "plane": "admin",
+                "role": "proxy_admin_viewer",
+                "models": [
+                  "coding"
+                ]
+              },
+              {
+                "oid": "REPLACE_AUDIT_READER_USER_OBJECT_ID",
+                "principalType": "User",
+                "plane": "admin",
+                "role": "audit_reader"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "9": {
+      "customerConfig": {
+        "parameters": {
+          "origin": {
+            "virtualNetworkName": "REPLACE_TARGET_VNET",
+            "ingressSubnetName": "snet-private-ingress",
+            "apiLoadBalancer": {
+              "resourceGroupName": "auto",
+              "name": "auto",
+              "frontendName": "auto"
+            }
+          },
+          "edge": {
+            "privateOrigin": {
+              "privateLinkServiceId": "auto",
+              "privateLinkLocation": "REPLACE_AZURE_REGION"
+            },
+            "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
+            "rateLimitPerMinute": 600
+          }
+        }
+      },
+      "optionalAzureDns": {
+        "customerConfig": {
+          "dns": {
+            "zoneResourceId": "/subscriptions/REPLACE_SUBSCRIPTION_ID/resourceGroups/REPLACE_DNS_RESOURCE_GROUP/providers/Microsoft.Network/dnsZones/REPLACE_CUSTOMER_BASE_DOMAIN",
+            "ttl": 300
+          }
+        }
+      },
+      "localExecutionForPrepare": {
+        "features": {
+          "entraMode": "enabled",
+          "allowTrafficRelease": false
+        }
+      },
+      "localExecutionForApprovedRelease": {
+        "features": {
+          "entraMode": "enabled",
+          "allowTrafficRelease": true
+        },
+        "releaseReportPath": "temp/customer-private/stage9-release.json"
+      }
+    }
+  }
+}
