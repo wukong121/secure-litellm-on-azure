@@ -48,7 +48,7 @@ def signing_settings(settings, kind):
     target_tag = value.get(tag_field)
     require(isinstance(target_tag, str) and TARGET_TAG.fullmatch(target_tag), f"Invalid localExecution.imageSigning.{tag_field}")
     password = os.environ.get("COSIGN_PASSWORD")
-    require(bool(password), "Set COSIGN_PASSWORD interactively for the encrypted local Cosign key")
+    require(bool(password), "Set a nonempty COSIGN_PASSWORD interactively; replace keys generated with an empty passphrase before image promotion")
     return {"privateKey": private_key, "publicKey": public_key, "targetTag": target_tag, "password": password, **IMAGE_KINDS[kind]}
 
 

@@ -315,6 +315,8 @@ chmod 644 cosign.pub
 cd /srv/runner/manual/secure-litellm-on-azure
 ```
 
+`cosign generate-key-pair`提示输入和确认私钥口令时，必须设置客户批准的**非空口令**，不能直接回车。执行器拒绝空口令密钥。若误生成空口令密钥且尚未签过任何镜像，先从工作路径移走该密钥对，再重新生成；若已用于签名，按客户密钥轮换流程保留旧公钥和历史验证证据，不直接覆盖。
+
 在customer.json加入路径和目标tag。tag不是最终digest；每次步骤成功后从`target-image-summary.json`取完整`ACR/repository@sha256:...`回填业务配置。
 
 ```json
@@ -330,8 +332,12 @@ cd /srv/runner/manual/secure-litellm-on-azure
 每次镜像步骤前在当前shell安全输入口令，命令结束后清除：
 
 ```bash
-read -r -s -p 'Cosign key password: ' COSIGN_PASSWORD
-printf '\n'
+COSIGN_PASSWORD=
+while [[ -z "$COSIGN_PASSWORD" ]]; do
+  read -r -s -p 'Cosign key password: ' COSIGN_PASSWORD
+  printf '\n'
+  [[ -n "$COSIGN_PASSWORD" ]] || echo 'Cosign key password must not be empty' >&2
+done
 export COSIGN_PASSWORD
 # 执行一个镜像步骤
 unset COSIGN_PASSWORD
