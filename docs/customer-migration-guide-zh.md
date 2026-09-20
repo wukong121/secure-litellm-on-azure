@@ -27,7 +27,7 @@
 | [Customer infrastructure deployment](../.github/workflows/customer-deploy.yml) | Azure资源plan/deploy，GitHub托管Runner | environment、stage、component、operation、release、approved_run_id、approved_plan_sha256、confirm_environment |
 | [Customer private runtime operations](../.github/workflows/customer-runtime.yml) | 私网备份/恢复、Kubernetes发布、身份/证书动作，自托管Runner | environment、stage、action、operation、approved_run_id、approved_plan_sha256、audit_continue_run_id、confirm_environment |
 | [Customer stage acceptance](../.github/workflows/customer-acceptance.yml) | 检查清单与验收记录，GitHub托管Runner | environment、stage、operation、reviewed_run_id、checked_items、evidence_notes、confirm_environment |
-| [Check public source image](../.github/workflows/source-image-checks.yml) | 固定公共源镜像SBOM/扫描，GitHub托管Runner | 只选分支，没有stage或environment |
+| [Check public source image](../.github/workflows/source-image-checks.yml) | 固定公共基线构建及派生运行镜像SBOM/扫描，GitHub托管Runner | 只选分支，没有stage或environment |
 | [Promote LiteLLM image](../.github/workflows/promote-litellm-image.yml) | 向私有ACR晋级/构建、扫描及签名，自托管Runner | environment、acr_name、source_image、target_tag、build_azure_runtime、build_auth_proxy；没有stage/plan/deploy |
 | [Customer gateway isolation checks](../.github/workflows/customer-gateway-checks.yml) | 私网DNS/TLS/匿名拒绝检查，自托管Runner | 只有environment，没有stage |
 

@@ -1,4 +1,4 @@
-"""Check the locked public source image without Azure or target registry access."""
+"""Build and check the hardened runtime without Azure or target registry access."""
 
 import argparse
 import hashlib
@@ -9,14 +9,49 @@ import subprocess
 from datetime import datetime, timezone
 
 from scripts.customer_migration import ROOT, MigrationError, private_write, require
-from scripts.workflow_diagnostics import exception_diagnostic, format_diagnostic
+from scripts.workflow_diagnostics import command_failure_summary, exception_diagnostic, format_diagnostic
+
+
+RUNTIME_DOCKERFILE = ROOT / "LiteLLM/runtime/Dockerfile"
+HARDENING_REQUIREMENTS = ROOT / "LiteLLM/runtime/security-requirements.txt"
 
 
 def source_image():
-    dockerfile = (ROOT / "LiteLLM/runtime/Dockerfile").read_text()
+    dockerfile = RUNTIME_DOCKERFILE.read_text()
     matches = re.findall(r"^FROM (docker\.litellm\.ai/berriai/litellm@sha256:[0-9a-f]{64})$", dockerfile, re.M)
     require(len(matches) == 1, "Expected one digest-locked public LiteLLM source")
     return matches[0]
+
+
+def hardened_runtime_image(revision):
+    require(re.fullmatch(r"[0-9a-f]{40}", revision or ""), "A full source revision is required")
+    return f"litellm-azure-source-check:{revision[:12]}"
+
+
+def runtime_build_inputs_sha256():
+    return hashlib.sha256(RUNTIME_DOCKERFILE.read_bytes() + HARDENING_REQUIREMENTS.read_bytes()).hexdigest()
+
+
+def runtime_build_command(revision):
+    return ["docker", "build", "--network", "none", "-f", str(RUNTIME_DOCKERFILE), "-t", hardened_runtime_image(revision), str(ROOT)]
+
+
+def build_hardened_runtime(revision, run=subprocess.run):
+    image = hardened_runtime_image(revision)
+    try:
+        result = run(runtime_build_command(revision), capture_output=True, text=True, check=False, timeout=1200)
+    except OSError:
+        raise MigrationError("Docker is unavailable for the hardened runtime build") from None
+    except subprocess.SubprocessError:
+        raise MigrationError("Hardened runtime build timed out") from None
+    require(result.returncode == 0, "Hardened runtime build failed: " + command_failure_summary(result.stdout, result.stderr, result.returncode))
+    try:
+        inspected = run(["docker", "image", "inspect", "--format", "{{.Id}}", image], capture_output=True, text=True, check=False, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        raise MigrationError("Unable to inspect the hardened runtime image") from None
+    image_id = inspected.stdout.strip()
+    require(inspected.returncode == 0 and re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is not None, "Hardened runtime image ID is unavailable")
+    return {"reference": image, "id": image_id, "buildInputsSha256": runtime_build_inputs_sha256(), "source": source_image(), "stderr": result.stderr}
 
 
 def check_source(directory, revision, run=subprocess.run):
@@ -26,13 +61,30 @@ def check_source(directory, revision, run=subprocess.run):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory.chmod(0o700)
     image = source_image()
+    evaluated_image = hardened_runtime_image(revision)
+    build_inputs_sha256 = runtime_build_inputs_sha256()
     report = {"schemaVersion": 1, "check": "source_image_sbom_scan", "revision": revision, "sourceImage": image,
+              "evaluatedImage": evaluated_image, "buildInputsSha256": build_inputs_sha256,
               "observedAt": datetime.now(timezone.utc).isoformat(), "status": "failed", "stageAccepted": False,
               "policy": {"severity": ["CRITICAL"], "ignoreUnfixed": True}, "results": [],
               "notCovered": ["upstream publisher identity", "target ACR signature and private pull", "customer stage approval"]}
+    build_entry = {"name": "build", "status": "failed", "sha256": build_inputs_sha256}
+    try:
+        built = build_hardened_runtime(revision, run)
+        private_write(directory / "source-build.stderr.txt", built["stderr"])
+        build_entry.update(status="passed", exitCode=0, imageId=built["id"])
+        report["evaluatedImageId"] = built["id"]
+    except MigrationError as error:
+        build_entry["reason"] = str(error)
+        build_entry["diagnostic"] = exception_diagnostic(error, "source-supply-chain")
+    report["results"].append(build_entry)
+    if build_entry["status"] != "passed":
+        private_write(directory / "source-summary.json", json.dumps(report, indent=2))
+        return report
+    evaluated_reference = report["evaluatedImageId"]
     operations = (
-        ("sbom", ["syft", "registry:" + image, "--output", "spdx-json"], "source-sbom.spdx.json"),
-        ("scan", ["trivy", "image", "--exit-code", "1", "--severity", "CRITICAL", "--ignore-unfixed", "--format", "json", image], "source-scan.json"),
+        ("sbom", ["syft", evaluated_reference, "--output", "spdx-json"], "source-sbom.spdx.json"),
+        ("scan", ["trivy", "image", "--exit-code", "1", "--severity", "CRITICAL", "--ignore-unfixed", "--format", "json", evaluated_reference], "source-scan.json"),
     )
     for name, command, filename in operations:
         path = directory / filename
@@ -45,7 +97,7 @@ def check_source(directory, revision, run=subprocess.run):
             if name == "sbom":
                 require(document.get("spdxVersion") and isinstance(document.get("packages"), list) and document["packages"], "Incomplete SPDX inventory")
             else:
-                require(document.get("ArtifactName") == image and isinstance(document.get("Results"), list) and document["Results"], "Scan output is not bound to the locked source")
+                require(document.get("ArtifactName") == evaluated_reference and isinstance(document.get("Results"), list) and document["Results"], "Scan output is not bound to the hardened runtime")
             content = json.dumps(document, sort_keys=True)
             private_write(path, content)
             entry.update(status="passed" if result.returncode == 0 else "failed", exitCode=result.returncode,

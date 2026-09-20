@@ -483,7 +483,8 @@ def run_source_check(revision, destination):
     from scripts.source_supply_chain import check_source
 
     report = check_source(destination, revision)
-    require(report["status"] == "passed", "Stage3 source image checks failed")
+    failures = [f"{item['name']}: {item.get('reason', 'failed')}" for item in report["results"] if item["status"] != "passed"]
+    require(report["status"] == "passed", "Stage3 source image checks failed: " + "; ".join(failures))
     return {"status": "passed", "sourceImage": report["sourceImage"]}
 
 

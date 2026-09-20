@@ -45,13 +45,16 @@ class SchemaRuntimeTests(unittest.TestCase):
         observed = {"assets": {"schemaSha256": "a" * 64}, "state": {}, "pending": ["first"], "stateSha256": "b" * 64}
         calls = []
 
-        def container(config, directory, template, token_path, operation, state=""):
+        runtime_image = {"reference": "litellm-azure-source-check:" + "a" * 12, "id": "sha256:" + "d" * 64, "buildInputsSha256": "e" * 64, "source": "synthetic"}
+
+        def container(config, directory, template, token_path, operation, state="", image=""):
             self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(image, runtime_image["id"])
             calls.append(operation)
             return observed if operation == "inspect" else {"schemaVerified": True, "assets": observed["assets"], "stateSha256": "c" * 64}
 
         azure.scoped.side_effect = cloud
-        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.schema_runtime.AzureCommands", return_value=azure), patch("scripts.schema_runtime.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps({"accessToken": "synthetic-sensitive-token", "expires_on": int(time.time()) + 3600}))), patch("scripts.schema_runtime.run_schema_container", side_effect=container):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.schema_runtime.AzureCommands", return_value=azure), patch("scripts.schema_runtime.build_hardened_runtime", return_value={**runtime_image, "stderr": ""}), patch("scripts.schema_runtime.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps({"accessToken": "synthetic-sensitive-token", "expires_on": int(time.time()) + 3600}))), patch("scripts.schema_runtime.run_schema_container", side_effect=container):
             path = Path(directory)
             plan = migrate_schema(config, "plan", "a" * 40, path, "")
             self.assertEqual(calls, ["inspect"])

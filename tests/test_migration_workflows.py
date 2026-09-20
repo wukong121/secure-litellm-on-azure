@@ -54,18 +54,21 @@ class MigrationWorkflowTests(unittest.TestCase):
             commands = []
             def run(command, **kwargs):
                 commands.append(command)
-                document = {"spdxVersion": "SPDX-2.3", "packages": [{"name": "synthetic"}]} if command[0] == "syft" else {"ArtifactName": source_image(), "Results": [{"Target": "synthetic"}]}
+                if command[0] == "docker":
+                    output = "sha256:" + "b" * 64 if command[1:3] == ["image", "inspect"] else ""
+                    return subprocess.CompletedProcess(command, 0, output, "not-for-artifact")
+                document = {"spdxVersion": "SPDX-2.3", "packages": [{"name": "synthetic"}]} if command[0] == "syft" else {"ArtifactName": "sha256:" + "b" * 64, "Results": [{"Target": "synthetic"}]}
                 return subprocess.CompletedProcess(command, 0 if command[0] == "syft" else scan_code, json.dumps(document), "not-for-artifact")
             with self.subTest(scan_code=scan_code), tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
                 report = check_source(Path(folder), "a" * 40, run)
                 self.assertEqual(report["status"], "passed" if scan_code == 0 else "failed")
                 self.assertFalse(report["stageAccepted"])
-                self.assertEqual([command[0] for command in commands], ["syft", "trivy"])
-                self.assertEqual(len(report["results"]), 2)
+                self.assertEqual([command[0] for command in commands], ["docker", "docker", "syft", "trivy"])
+                self.assertEqual(len(report["results"]), 3)
                 self.assertNotIn("not-for-artifact", (Path(folder) / "source-summary.json").read_text())
                 self.assertTrue(all("sha256" in item for item in report["results"]))
                 if scan_code:
-                    self.assertEqual(report["results"][1]["reason"], "Fixable CRITICAL vulnerabilities matched policy")
+                    self.assertEqual(report["results"][2]["reason"], "Fixable CRITICAL vulnerabilities matched policy")
 
     def test_missing_source_tool_is_a_failed_check(self):
         def unavailable(*args, **kwargs):
@@ -74,7 +77,7 @@ class MigrationWorkflowTests(unittest.TestCase):
             report = check_source(Path(folder), "a" * 40, unavailable)
             self.assertEqual(report["status"], "failed")
             self.assertNotIn("private environment details", json.dumps(report))
-            self.assertTrue(all(item["diagnostic"]["code"] == "operating-system-error" for item in report["results"]))
+            self.assertTrue(all(item["diagnostic"]["code"] == "validation-failed" for item in report["results"]))
 
     def test_workflow_components_match_controller_including_network(self):
         for name, extra in (("customer-deploy.yml", set()), ("customer-migration.yml", {"none"})):

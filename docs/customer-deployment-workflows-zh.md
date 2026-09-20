@@ -83,7 +83,7 @@ Stage8要求`native_spend_logs`、`native_audit_access`、`native_retention_reco
 
 #### 源镜像与目标ACR检查分阶段
 
-Stage3的`source_image_sbom_scan`由新增`Check public source image` workflow在GitHub托管runner执行，只检查仓库锁定的公共源镜像，不需要Azure登录或目标私网runner。失败也发布`source-image-<run_id>`中的摘要、SBOM和扫描结果，保留7天。当前策略仅阻断可修复CRITICAL，不能描述为零漏洞或已经验证上游发布者签名。
+Stage3的`source_image_sbom_scan`由`Check public source image` workflow在GitHub托管runner执行：从仓库锁定的公共基线构建当前派生运行镜像，再检查派生镜像的SBOM和漏洞，不需要Azure登录或目标私网runner。失败也发布`source-image-<run_id>`中的摘要、SBOM和扫描结果，保留7天。当前策略仅阻断可修复CRITICAL，不能描述为零漏洞或已经验证上游发布者签名。
 
 Stage4建立私网连接后，才验收`target_image_signature_sbom`，继续使用既有镜像晋级和实际签名/拉取检查。旧Stage3/4检查集合不直接满足新契约；此拆分不是省略目标签名，也不解决尚未闭环的runner安装与授权。
 

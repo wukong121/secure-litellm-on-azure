@@ -11,6 +11,7 @@ from oss_callback_probe import INPUT_MARKER, OUTPUT_MARKER, ProbeLogger
 
 async def main():
     assert importlib.metadata.version("litellm") == "1.98.0"
+    assert importlib.metadata.version("anyio") == "4.14.2"
     logger = ProbeLogger()
     litellm.callbacks = [logger]
     litellm.telemetry = False
