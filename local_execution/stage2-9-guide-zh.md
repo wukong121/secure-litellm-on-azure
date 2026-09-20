@@ -198,7 +198,7 @@ Stage5的PG/Redis Entra-only和应用Workload Identity不属于可跳过的Stage
 除Stage0–1工具外，还需要：
 
 ```bash
-command -v jq psql pg_restore openssl skopeo syft trivy cosign
+command -v docker jq psql pg_restore openssl skopeo syft trivy cosign
 az bicep install
 ```
 
@@ -411,6 +411,18 @@ execute会重新生成实时plan；代码、配置、云状态或发布报告变
 ```bash
 .venv/bin/python -m local_execution --config local_execution/customer.json --step stage3-source-check
 ```
+
+该步骤先从固定LiteLLM `1.98.0`上游digest构建当前仓库的派生运行镜像，再对派生镜像生成SBOM并执行Trivy门禁；不会推送ACR。派生构建通过SHA256固定的`security-requirements.txt`把AnyIO升级到`4.14.2`，用于修复上游层中的`CVE-2026-63374`，但不改变LiteLLM或Prisma版本。不要把上游层单独作为最终应用镜像部署。
+
+失败时查看本次三项结果；`build`、`sbom`和`scan`必须全部为`passed`：
+
+```bash
+RUN_DIR="$(ls -1dt temp/local-stage09/*-stage3-source-check-* | head -n 1)"
+jq '{sourceImage,evaluatedImage,evaluatedImageId,buildInputsSha256,status,results}' \
+  "$RUN_DIR/source-summary.json"
+```
+
+发现新的可修复CRITICAL时停在Stage3，更新受审查的安全覆盖或选择通过完整兼容验证的新稳定LiteLLM版本；不得改报告、降低严重级别或改用RC/dev镜像绕过。
 
 3. 计划并真正部署Stage3 platform：
 

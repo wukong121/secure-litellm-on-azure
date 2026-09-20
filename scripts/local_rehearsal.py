@@ -68,7 +68,7 @@ def checks(profile, revision):
             {"id": "oss-callbacks", "command": ["bash", "scripts/validate-oss-callbacks.sh"], "tools": ["docker"]},
             {"id": "azure-runtime-build", "command": ["docker", "build", "--network", "none", "-f", "LiteLLM/runtime/Dockerfile", "-t", "litellm-azure-runtime:local-rehearsal", "."], "tools": ["docker"]},
             {"id": "auth-proxy-build", "command": ["docker", "build", "-f", "auth-proxy/Dockerfile", "-t", "llmgw-auth-proxy:local-rehearsal", "auth-proxy"], "tools": ["docker"]},
-            {"id": "source-supply-chain", "command": [sys.executable, "-m", "scripts.source_supply_chain", "--revision", revision], "tools": ["syft", "trivy"]},
+            {"id": "source-supply-chain", "command": [sys.executable, "-m", "scripts.source_supply_chain", "--revision", revision], "tools": ["docker", "syft", "trivy"]},
         ])
     return result
 

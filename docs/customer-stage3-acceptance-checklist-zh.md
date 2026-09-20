@@ -4,7 +4,7 @@
 >
 > 三项检查：`oidc_scope`、`source_image_sbom_scan`、`target_isolation`。本文指导人工审核实际证据，没有新增workflow，不自动签发passed，不代表新环境业务已经可用。
 
-阅读顺序：准备 → OIDC及授权范围 → 公开源镜像报告 → 目标资源隔离 → draft/confirm。先完成Check public source image及主手册S3-01/02的platform计划、审核和部署；draft可提前生成，但三项全部实际核验后才能confirm。
+阅读顺序：准备 → OIDC及授权范围 → 派生运行镜像报告 → 目标资源隔离 → draft/confirm。先完成Check public source image及主手册S3-01/02的platform计划、审核和部署；draft可提前生成，但三项全部实际核验后才能confirm。
 
 ## 1. 准备与执行位置
 
@@ -126,7 +126,7 @@ Actions → Check public source image → 本次成功运行 → Summary → Art
 
 ```bash
 SOURCE_DIR="$PWD/temp/REPLACE_SOURCE_REVIEW_DIRECTORY"
-jq '{schemaVersion,check,revision,sourceImage,observedAt,status,policy,stageAccepted,results,notCovered}' \
+jq '{schemaVersion,check,revision,sourceImage,evaluatedImage,evaluatedImageId,buildInputsSha256,observedAt,status,policy,stageAccepted,results,notCovered}' \
   "$SOURCE_DIR/source-summary.json"
 ```
 
@@ -135,14 +135,15 @@ jq '{schemaVersion,check,revision,sourceImage,observedAt,status,policy,stageAcce
 | schemaVersion / check | 1 / source_image_sbom_scan |
 | revision | 本次GitHub运行的完整40位Git SHA；与用于本次Stage3审核的代码一致，不只比较分支名 |
 | sourceImage | 与该SHA版本的LiteLLM/runtime/Dockerfile中FROM完整引用一致，包含repo@sha256:digest，不是镜像tag或Docker IMAGE ID |
+| evaluatedImage / evaluatedImageId / buildInputsSha256 | 本次本地派生镜像tag、实际扫描的不可变Docker image ID，以及Dockerfile和安全覆盖清单的绑定哈希；不能拿另一次构建结果替换 |
 | observedAt | 本次检查时间，明确时区及所用运行尝试，近期证据仍适用 |
 | status | passed |
 | policy | severity为["CRITICAL"]，ignoreUnfixed为true；若实际政策不同须重新审核 |
-| results | 恰好sbom和scan两项，各自status=passed、exitCode=0，有对应artifact与64位sha256 |
+| results | 恰好build、sbom和scan三项，各自status=passed、exitCode=0及64位sha256；sbom和scan另有对应artifact |
 | stageAccepted | false是正常值：工具未自动验收整个Stage3 |
 | notCovered | 保留上游发布者身份、目标ACR签名/私网拉取、客户阶段批准等未覆盖项 |
 
-固定源来自[源检查脚本](../scripts/source_supply_chain.py)读取的[派生镜像Dockerfile](../LiteLLM/runtime/Dockerfile)。在GitHub运行页面点击commit SHA，再打开该版本文件取得FROM；不要使用另一个分支或后来改变的本地文件来比较。代码/digest不匹配时核对版本并重新生成适用报告，不手改摘要以求一致。
+固定公共基线来自[源检查脚本](../scripts/source_supply_chain.py)读取的[派生镜像Dockerfile](../LiteLLM/runtime/Dockerfile)。检查会先构建该Dockerfile，再扫描实际派生镜像。当前派生层使用带SHA256的`security-requirements.txt`把AnyIO固定为`4.14.2`，修复基线层的`CVE-2026-63374`，同时保持LiteLLM `1.98.0`及其Prisma合同不变。在GitHub运行页面点击commit SHA，再打开该版本文件核对FROM和安全覆盖；不要使用另一个分支或后来改变的本地文件来比较。代码/digest不匹配时重新生成适用报告，不手改摘要以求一致。
 
 ### S-3 核对SBOM、扫描内容与策略边界
 
@@ -152,7 +153,7 @@ jq '{ArtifactName,targets:[.Results[] | {Target,Class,Type,vulnerabilityCount:((
   "$SOURCE_DIR/source-scan.json"
 ```
 
-SBOM应有spdxVersion及非空packages，检查包名/版本等组成信息是否符合该镜像，而非空壳报告；不要求把每个包手工逐行验收。扫描ArtifactName须与摘要sourceImage完全一致，Results有实际扫描目标，查询/文件损坏不等于零漏洞。
+SBOM应有spdxVersion及非空packages，检查LiteLLM仍为`1.98.0`、AnyIO为`4.14.2`且其他组成符合该派生镜像，而非空壳报告；不要求把每个包手工逐行验收。扫描ArtifactName须与摘要evaluatedImageId完全一致，Results有实际扫描目标，查询/文件损坏不等于零漏洞。sourceImage只是不可变上游基线，不是允许直接部署的最终镜像。
 
 查看发现项时关注VulnerabilityID、PkgName、InstalledVersion、FixedVersion和Severity。当前调用Trivy使用`--severity CRITICAL --ignore-unfixed --exit-code 1`，只有在工具正常完成且符合此策略时才通过：没有可修复CRITICAL阻断不等于零漏洞，HIGH/MEDIUM、未修复漏洞可能被过滤。SBOM不是恶意代码检测或上游发布者签名证明。
 
@@ -165,9 +166,10 @@ SBOM应有spdxVersion及非空packages，检查包名/版本等组成信息是�
 ```bash
 pushd "$SOURCE_DIR" > /dev/null &&
 jq -er '
-  if ([.results[].artifact] | sort) == ["source-sbom.spdx.json", "source-scan.json"]
+  if ([.results[].name] | sort) == ["build", "sbom", "scan"]
+     and ([.results[] | select(.artifact) | .artifact] | sort) == ["source-sbom.spdx.json", "source-scan.json"]
      and all(.results[]; (.sha256 | test("^[0-9a-f]{64}$")))
-  then .results[] | "\(.sha256)  \(.artifact)"
+  then .results[] | select(.artifact) | "\(.sha256)  \(.artifact)"
   else error("Unexpected source evidence entries") end
 ' source-summary.json | sha256sum --check -
 popd > /dev/null

@@ -36,6 +36,7 @@ class LocalRehearsalTests(unittest.TestCase):
         selected = {item["id"]: item for item in checks("full", "a" * 40)}
         self.assertTrue({"isolated-runtime", "locked-prisma", "source-supply-chain", "oss-callbacks", "stage3-to-stage9"}.issubset(selected))
         self.assertIn("none", selected["locked-prisma"]["command"])
+        self.assertIn("docker", selected["source-supply-chain"]["tools"])
         for item in selected.values():
             self.assertNotIn("deploy", item["command"])
             self.assertNotIn("apply", item["command"])
