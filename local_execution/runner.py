@@ -14,6 +14,8 @@ import subprocess
 import sys
 from uuid import uuid4
 
+import yaml
+
 from scripts.customer_migration import (
     ROOT,
     MigrationError,
@@ -488,6 +490,35 @@ def run_source_check(revision, destination):
     return {"status": "passed", "sourceImage": report["sourceImage"]}
 
 
+def cluster_ca_from_kubeconfig(kube, directory):
+    require("--kubeconfig" in kube, "Target cluster command is missing its kubeconfig")
+    index = kube.index("--kubeconfig")
+    require(index + 1 < len(kube), "Target cluster command has an invalid kubeconfig argument")
+    kubeconfig = Path(kube[index + 1]).resolve()
+    require(kubeconfig == (directory / "kubeconfig").resolve() and kubeconfig.is_file(), "Target kubeconfig is outside the runtime directory")
+    try:
+        document = yaml.safe_load(kubeconfig.read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        raise MigrationError("Unable to read the target kubeconfig CA") from None
+    require(isinstance(document, dict), "Target kubeconfig must contain an object")
+    current = document.get("current-context")
+    contexts = [item.get("context") for item in document.get("contexts", []) if isinstance(item, dict) and item.get("name") == current]
+    require(len(contexts) == 1 and isinstance(contexts[0], dict), "Target kubeconfig current context is invalid")
+    cluster_name = contexts[0].get("cluster")
+    clusters = [item.get("cluster") for item in document.get("clusters", []) if isinstance(item, dict) and item.get("name") == cluster_name]
+    require(len(clusters) == 1 and isinstance(clusters[0], dict), "Target kubeconfig cluster is invalid")
+    encoded = clusters[0].get("certificate-authority-data")
+    require(isinstance(encoded, str) and encoded, "Target kubeconfig requires inline certificate authority data")
+    try:
+        certificate = base64.b64decode(encoded, validate=True).decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        raise MigrationError("Target kubeconfig CA is not valid base64 PEM") from None
+    require(certificate.startswith("-----BEGIN CERTIFICATE-----\n") and certificate.rstrip().endswith("-----END CERTIFICATE-----") and "\x00" not in certificate, "Target kubeconfig CA is not a PEM certificate")
+    path = directory / "aks-ca.crt"
+    private_write(path, certificate)
+    return path
+
+
 def run_target_connectivity_check(config, settings, revision, destination, run=subprocess.run):
     from scripts.migration_runtime import connect_cluster
     from scripts.runner_target_connectivity import inspect_target_connectivity
@@ -500,6 +531,8 @@ def run_target_connectivity_check(config, settings, revision, destination, run=s
     azure = AzureCommands(config, management_directory)
     target = inspect_target_connectivity(config, azure, require_link=True)
     authenticate_azure(config, settings, "runtime", runtime_directory, run=run)
+    kube = connect_cluster(config, runtime_directory, legacy=False)
+    cluster_ca = cluster_ca_from_kubeconfig(kube, runtime_directory)
     checks = []
 
     def execute(arguments):
@@ -507,21 +540,22 @@ def run_target_connectivity_check(config, settings, revision, destination, run=s
         require(completed.returncode == 0, f"Target connectivity command failed: {command_failure_summary(completed.stdout, completed.stderr, completed.returncode)}")
         return completed.stdout
 
-    def private_endpoint(name, host, expected):
+    def private_endpoint(name, host, expected, ca_path=None):
         output = execute(["getent", "ahostsv4", host])
         addresses = {line.split()[0] for line in output.splitlines() if line.split()}
         require(addresses and addresses.issubset(set(expected)), f"{name} DNS does not resolve exclusively to its approved private endpoint")
-        response = execute([
+        arguments = [
             "curl", "--noproxy", "*", "--connect-timeout", "5", "--max-time", "15",
             "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{remote_ip} %{http_code}",
-            "https://" + host + "/",
-        ]).split()
+        ]
+        if ca_path is not None:
+            arguments.extend(["--cacert", str(ca_path)])
+        response = execute([*arguments, "https://" + host + "/"]).split()
         require(len(response) == 2 and response[0] in expected and re.fullmatch(r"[1-5][0-9]{2}", response[1]), f"{name} HTTPS did not reach its approved private endpoint")
         checks.append({"name": name, "status": "passed", "hostname": host, "privateEndpointIps": expected})
 
-    private_endpoint("target-aks-private", target["apiHostname"], target["privateEndpointIps"])
+    private_endpoint("target-aks-private", target["apiHostname"], target["privateEndpointIps"], cluster_ca)
     private_endpoint("target-acr-private", target["acrLoginServer"], target["acrPrivateEndpointIps"])
-    kube = connect_cluster(config, runtime_directory, legacy=False)
     execute([*kube, "get", "deployments", "-o", "name"])
     checks.append({"name": "target-cluster-read", "status": "passed"})
     report = {
@@ -672,7 +706,7 @@ def check_configuration(config):
 
 def remove_sensitive_runtime_files(destination):
     for path in destination.rglob("*"):
-        if path.is_file() and not path.is_symlink() and path.name in {"kubeconfig", "database.dump", "downloaded.dump"}:
+        if path.is_file() and not path.is_symlink() and path.name in {"kubeconfig", "aks-ca.crt", "database.dump", "downloaded.dump"}:
             path.unlink()
 
 

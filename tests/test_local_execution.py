@@ -1,3 +1,4 @@
+import base64
 import copy
 import inspect
 import io
@@ -8,6 +9,8 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+
+import yaml
 
 from local_execution.runner import (
     IMAGE_STEPS,
@@ -208,10 +211,10 @@ class LocalExecutionTests(unittest.TestCase):
     def test_sensitive_cleanup_preserves_reports(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
             directory = Path(folder)
-            for name in ("kubeconfig", "database.dump", "downloaded.dump", "runtime-summary.json"):
+            for name in ("kubeconfig", "aks-ca.crt", "database.dump", "downloaded.dump", "runtime-summary.json"):
                 (directory / name).write_text("synthetic")
             remove_sensitive_runtime_files(directory)
-            self.assertFalse(any((directory / name).exists() for name in ("kubeconfig", "database.dump", "downloaded.dump")))
+            self.assertFalse(any((directory / name).exists() for name in ("kubeconfig", "aks-ca.crt", "database.dump", "downloaded.dump")))
             self.assertTrue((directory / "runtime-summary.json").exists())
 
     def test_connectivity_check_is_local_and_does_not_use_actions_readiness(self):
@@ -376,7 +379,10 @@ class LocalExecutionTests(unittest.TestCase):
             "acrPrivateEndpointIps": ["10.30.8.4"],
         }
 
+        calls = []
+
         def run(arguments, **_kwargs):
+            calls.append(arguments)
             if arguments[0] == "getent":
                 address = "10.30.1.4" if arguments[-1] == target["apiHostname"] else "10.30.8.4"
                 output = address + " STREAM " + arguments[-1]
@@ -387,11 +393,27 @@ class LocalExecutionTests(unittest.TestCase):
                 output = "deployment/litellm"
             return subprocess.CompletedProcess(arguments, 0, output, "")
 
+        def connect_cluster(_config, runtime_directory, legacy):
+            self.assertFalse(legacy)
+            certificate = "-----BEGIN CERTIFICATE-----\nSYNTHETIC\n-----END CERTIFICATE-----\n"
+            kubeconfig = {
+                "current-context": "target",
+                "contexts": [{"name": "target", "context": {"cluster": "target-cluster"}}],
+                "clusters": [{"name": "target-cluster", "cluster": {"certificate-authority-data": base64.b64encode(certificate.encode()).decode()}}],
+            }
+            path = runtime_directory / "kubeconfig"
+            path.write_text(yaml.safe_dump(kubeconfig))
+            return ["kubectl", "--kubeconfig", str(path), "--namespace", "litellm"]
+
         config, settings = self.prepared()
-        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch("scripts.runner_target_connectivity.inspect_target_connectivity", return_value=target), patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl"]), patch("local_execution.runner.AzureCommands"), patch("local_execution.runner.authenticate_azure") as authenticate:
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder, patch("scripts.runner_target_connectivity.inspect_target_connectivity", return_value=target), patch("scripts.migration_runtime.connect_cluster", side_effect=connect_cluster), patch("local_execution.runner.AzureCommands"), patch("local_execution.runner.authenticate_azure") as authenticate:
             directory = Path(folder)
             result = run_target_connectivity_check(config, settings, "a" * 40, directory, run=run)
             report = json.loads((directory / "target-readiness.json").read_text())
+            curl_calls = [arguments for arguments in calls if arguments[0] == "curl"]
+            self.assertIn("--cacert", curl_calls[0])
+            self.assertNotIn("--cacert", curl_calls[1])
+            self.assertTrue((directory / "runtime/aks-ca.crt").is_file())
         self.assertEqual(result, {"status": "passed"})
         self.assertEqual([item["name"] for item in report["checks"]], ["target-aks-private", "target-acr-private", "target-cluster-read"])
         self.assertEqual([call.args[2] for call in authenticate.call_args_list], ["deploy", "runtime"])

@@ -557,6 +557,8 @@ az role assignment create --assignee-object-id "$OPERATOR_OBJECT_ID" \
 
 通过条件：AKS API和ACR域名只解析到已发现的Private Endpoint IP、TLS命中相同私网IP、runtime身份能读取新AKS Deployment。失败时修DNS/路由/NSG或RBAC，不开放AKS/ACR公网。
 
+AKS私有API证书由集群CA签发，检查器会从本次生成的kubeconfig提取当前context的`certificate-authority-data`，写入0600临时文件并仅给AKS的curl使用；ACR仍使用系统CA。若看到curl 60，先确认Runner已拉取包含该逻辑的版本，不使用`-k`、不关闭证书校验，也不把集群CA永久加入系统信任库。执行器退出时会删除kubeconfig和临时`aks-ca.crt`。
+
 6. 创建三个namespace并接入Container Insights：
 
 ```bash
