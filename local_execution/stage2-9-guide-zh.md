@@ -718,9 +718,36 @@ az ad group member check --group "$PG_ADMIN_GROUP_OBJECT_ID" \
 
 已有批准组时只查询并复用，不重复运行`group create`；先核对`securityEnabled=true`和成员检查`value=true`。组Object ID填`REPLACE_PG_ADMIN_GROUP_OBJECT_ID`，显示名填`REPLACE_PG_ADMIN_GROUP_NAME`。新组成员关系及托管身份Token可能延迟生效，以实际PG Entra登录为准；失败时等待传播并重新登录，不把PG管理员改成migration UAMI绕过分离检查。
 
-没有组管理权限但已有独立database UAMI时，外部管理员把该UAMI挂载到Runner，并确认它在目标RG具有Reader或等效读取权限。values文件不再填写两个`REPLACE_PG_ADMIN_GROUP_*`，改填`REPLACE_DATABASE_ADMIN_UAMI_NAME`、`REPLACE_DATABASE_ADMIN_UAMI_CLIENT_ID`和`REPLACE_DATABASE_ADMIN_UAMI_PRINCIPAL_ID`；两条Stage5合并命令都追加`--option database-admin-identity`。该选项固定使用`ServicePrincipal`作为PG管理员，并只让`stage5-database-roles`使用`authentication.database`；platform和后续secrets/restore/schema仍使用operator。database UAMI与`databaseAccess.migrationPrincipalId`必须是两个不同Principal ID。
+没有组管理权限但已有独立database UAMI时，外部管理员把该UAMI挂载到Runner，并确认它在目标RG具有Reader或等效读取权限。该选项固定使用`ServicePrincipal`作为PG管理员，并只让`stage5-database-roles`使用`authentication.database`；platform和后续secrets/restore/schema仍使用operator。database UAMI与`databaseAccess.migrationPrincipalId`必须是两个不同Principal ID。
 
-先合并Stage5配置和Stage0备份引用：
+选择此路径后，先带option重新生成required文件；不能沿用之前未带option生成、仍包含两个`REPLACE_PG_ADMIN_GROUP_*`字段的文件：
+
+```bash
+STAGE5_DISCOVERY="$(
+  .venv/bin/python -m local_execution.merge_config \
+    --config local_execution/customer.json --stage 5 --operation plan \
+    --option database-admin-identity
+)"
+printf '%s\n' "$STAGE5_DISCOVERY" | jq .
+STAGE5_REQUIRED_VALUES="$(jq -er '.requiredValues' <<<"$STAGE5_DISCOVERY")"
+cp "$STAGE5_REQUIRED_VALUES" local_execution/stage-5-values.local.json
+chmod 600 local_execution/stage-5-values.local.json
+```
+
+新文件应包含`REPLACE_DATABASE_ADMIN_UAMI_NAME`、`REPLACE_DATABASE_ADMIN_UAMI_CLIENT_ID`和`REPLACE_DATABASE_ADMIN_UAMI_PRINCIPAL_ID`，且不再包含两个组占位符。填写备份引用、operator Principal ID、database UAMI三项标识和PG SKU后，执行完整的预览及应用命令：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 5 --operation plan \
+  --values local_execution/stage-5-values.local.json \
+  --option database-admin-identity
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 5 --operation apply \
+  --values local_execution/stage-5-values.local.json \
+  --option database-admin-identity
+```
+
+使用PG管理员组的默认路径才运行以下不带option的命令：
 
 ```bash
 .venv/bin/python -m local_execution.merge_config \
@@ -729,12 +756,6 @@ az ad group member check --group "$PG_ADMIN_GROUP_OBJECT_ID" \
 .venv/bin/python -m local_execution.merge_config \
   --config local_execution/customer.json --stage 5 --operation apply \
   --values local_execution/stage-5-values.local.json
-```
-
-独立database UAMI路径在两条命令末尾追加：
-
-```bash
-  --option database-admin-identity
 ```
 
 1. 客户模式使用当前Azure部署账号，验证模式使用operator，创建Stage5私有数据资源：
