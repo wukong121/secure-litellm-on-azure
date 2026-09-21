@@ -19,7 +19,11 @@ from LiteLLM.runtime.azure_postgresql import DatabaseAuthError, database_url_tem
 SCHEMA_PATH = Path("/app/litellm-proxy-extras/litellm_proxy_extras/schema.prisma")
 SCHEMA_SHA256 = "af3ffb1dace4333f67bbd10518eaab013b132ac456328552aa80af556c6a72d0"
 VIEWS_SHA256 = "a68e3ced155fd3613477f274900764f2d05092ac7a612441cfef86119f0a5375"
-SUPPORTED_SOURCE_HISTORIES = {"0a730273fd745521b36008b01816142d92294792667a6a5c046147e0821e0dbb": 141}
+# SHA256 of ordered, active {name, sha256} rows from reviewed source databases.
+SUPPORTED_SOURCE_HISTORIES = {
+    "0a730273fd745521b36008b01816142d92294792667a6a5c046147e0821e0dbb": 141,
+    "3263a9bd2b458c8e78fa35af9378a21500bb11b7fdfdff74970a5a2bd3973958": 141,
+}
 
 
 @contextmanager
@@ -49,35 +53,51 @@ def migration_assets():
 
 def check_history(assets, history, tables, mode):
     expected = {item["name"]: item["sha256"] for item in assets["migrations"]}
-    finished = []
+    active = []
     for item in history:
         if item.get("rolledBack"):
             continue
         if not item.get("finished"):
             raise DatabaseAuthError("Unfinished migration requires investigation; automatic resolve/reset is forbidden")
-        if item["name"] not in expected or item["checksum"] != expected[item["name"]] or item["name"] in finished:
-            raise DatabaseAuthError("Database migration history differs from the approved image")
-        finished.append(item["name"])
+        active.append(item)
     ordered = [item["name"] for item in assets["migrations"]]
     if mode == "migration":
         for source_hash, count in SUPPORTED_SOURCE_HISTORIES.items():
-            if len(finished) < count:
+            if len(active) < count:
                 continue
-            source = [{"name": name, "sha256": expected[name]} for name in finished[:count]]
+            source = [{"name": item["name"], "sha256": item["checksum"]} for item in active[:count]]
             digest = hashlib.sha256(json.dumps(source, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             if digest == source_hash:
-                inherited = finished[:count]
-                ordered = inherited + [name for name in ordered if name not in inherited]
+                inherited = [item["name"] for item in active[:count]]
+                if len(set(inherited)) != len(inherited) or any(name not in expected for name in inherited):
+                    raise DatabaseAuthError("Approved source migration history contains unsupported names")
+                remaining = [name for name in ordered if name not in inherited]
+                tail = active[count:]
+                for index, item in enumerate(tail):
+                    if index >= len(remaining) or item["name"] != remaining[index] or item["checksum"] != expected.get(item["name"]):
+                        raise DatabaseAuthError("Database migrations after the approved source history differ from the target image")
+                pending = remaining[len(tail):]
                 break
-    if finished != ordered[:len(finished)]:
-        raise DatabaseAuthError("Migration history must be an ordered prefix of the approved release or a verified source upgrade")
-    if tables and not finished:
+        else:
+            pending = None
+    else:
+        pending = None
+    if pending is None:
+        finished = []
+        for item in active:
+            if item["name"] not in expected or item["checksum"] != expected[item["name"]] or item["name"] in finished:
+                raise DatabaseAuthError("Database migration history differs from the approved image")
+            finished.append(item["name"])
+        if finished != ordered[:len(finished)]:
+            raise DatabaseAuthError("Migration history must be an ordered prefix of the approved release or a verified source upgrade")
+        pending = ordered[len(finished):]
+    if tables and not active:
         raise DatabaseAuthError("Existing database has no compatible migration history; automatic baseline is forbidden")
     if mode == "migration" and not tables:
         raise DatabaseAuthError("Restore and verify the legacy database before migrating its schema")
     if mode not in {"migration", "greenfield"}:
         raise DatabaseAuthError("Unknown deployment mode")
-    return ordered[len(finished):]
+    return pending
 
 
 async def database_state(client):
