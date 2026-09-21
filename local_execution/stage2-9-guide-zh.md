@@ -259,6 +259,7 @@ chmod 600 "local_execution/stage-REPLACE_STAGE-values.local.json"
 | 2 | `single-validation-identity` | 配置单一local-operator UAMI；客户直接登录不选 |
 | 4 | `automatic-api-certificate` | 启用自动API证书；手工导入不选 |
 | 5 | `database-admin-identity` | 使用独立database UAMI作为PG管理员；无管理员组时选择 |
+| 5 | `legacy-master-key-salt` | 旧环境无显式Salt且已批准复用Master Key兼容路径时选择 |
 | 8 | `observability` | 加入可选collector |
 | 8 | `enhanced-l3` | 删除原生`contentAudit`并切换增强L3；不能与observability在同一次合并 |
 | 9 | `azure-dns` | 使用仓库自动发布Azure DNS |
@@ -329,11 +330,12 @@ jq '.observations | {backupBlob,backupSha256,backupBytes,publicTableCount,fullRe
 "runtimeInputs": {
   "backupBlob": "pre-change/REPLACE_32_HEX.dump",
   "backupSha256": "REPLACE_64_HEX_SHA256",
-  "postgresMigrationUser": "llmgw_migrator"
+  "postgresMigrationUser": "llmgw_migrator",
+  "legacySaltSource": "secret"
 }
 ```
 
-配置了`databaseAccess`时，`postgresMigrationUser`可省略，执行器固定使用`llmgw_migrator`。两项备份值不是Blob URL、SAS、镜像digest或任意旧备份。
+配置了`databaseAccess`时，`postgresMigrationUser`可省略，执行器固定使用`llmgw_migrator`。两项备份值不是Blob URL、SAS、镜像digest或任意旧备份。旧`litellm-env`已有独立`LITELLM_SALT_KEY`时，`legacySaltSource`填写`secret`；只有旧Salt明确不存在、且客户已批准并验证“当前Master Key作为永久Salt”的兼容路径时才填写`master-key`。该字段不包含秘密值。
 
 ### 4.2 本地镜像签名
 
@@ -892,9 +894,47 @@ az account set --subscription "$SUBSCRIPTION_ID"
 该身份从旧`litellm-env`读取原Master Key/Salt并写入新后台Vault。执行前先确认同一身份能读取旧Secret，但不要打印内容：
 
 ```bash
-kubectl --kubeconfig "REPLACE_LEGACY_RUNTIME_KUBECONFIG" \
-  -n "REPLACE_LEGACY_NAMESPACE" auth can-i get secret/litellm-env
+SUBSCRIPTION_ID="$(jq -er '.azure.subscriptionId' local_execution/customer.json)"
+LEGACY_RG="$(jq -er '.legacy.resourceGroup' local_execution/customer.json)"
+LEGACY_AKS="$(jq -er '.legacy.aksClusterName' local_execution/customer.json)"
+LEGACY_NAMESPACE="$(jq -er '.legacy.namespace' local_execution/customer.json)"
+LEGACY_KUBECONFIG_DIR="$(mktemp -d "$PWD/temp/legacy-runtime-kubeconfig.XXXXXX")"
+chmod 700 "$LEGACY_KUBECONFIG_DIR"
+LEGACY_RUNTIME_KUBECONFIG="$LEGACY_KUBECONFIG_DIR/config"
+trap 'rm -rf "$LEGACY_KUBECONFIG_DIR"' EXIT
 
+az aks get-credentials --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$LEGACY_RG" --name "$LEGACY_AKS" \
+  --file "$LEGACY_RUNTIME_KUBECONFIG"
+chmod 600 "$LEGACY_RUNTIME_KUBECONFIG"
+kubelogin convert-kubeconfig --kubeconfig "$LEGACY_RUNTIME_KUBECONFIG" -l azurecli
+kubectl --kubeconfig "$LEGACY_RUNTIME_KUBECONFIG" -n "$LEGACY_NAMESPACE" \
+  auth can-i get secret/litellm-env
+kubectl --kubeconfig "$LEGACY_RUNTIME_KUBECONFIG" -n "$LEGACY_NAMESPACE" \
+  get secret litellm-env -o json \
+  | jq '{hasMaster:(.data|has("LITELLM_MASTER_KEY")),hasSalt:(.data|has("LITELLM_SALT_KEY"))}'
+```
+
+若`auth can-i`不是`yes`，由旧AKS管理员按[主手册Stage5旧Secret读取步骤](../docs/customer-migration-guide-zh.md#5-migration模式核对旧aks-secret读取)授予精确读取权；不要把Secret正文复制到customer.json或终端日志。
+
+若旧Secret没有`LITELLM_SALT_KEY`，不要修改旧Secret或生成随机Salt。本项目已批准路径A的环境把`localExecution.runtimeInputs.legacySaltSource`设置为`master-key`；执行器只在确认旧Salt键确实不存在后，才在内存中复用旧Master Key并把该非秘密来源写入plan。其他客户必须先完成自己的兼容性验证与批准；默认`secret`会继续拒绝缺失Salt。
+
+本项目环境重新合并Stage5时，在原有命令上同时追加`--option legacy-master-key-salt`；使用独立database UAMI时两个选项都要保留：
+
+```bash
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 5 --operation plan \
+  --values local_execution/stage-5-values.local.json \
+  --option database-admin-identity --option legacy-master-key-salt
+.venv/bin/python -m local_execution.merge_config \
+  --config local_execution/customer.json --stage 5 --operation apply \
+  --values local_execution/stage-5-values.local.json \
+  --option database-admin-identity --option legacy-master-key-salt
+```
+
+确认`customer.json`中的`legacySaltSource`为获批值后，再生成backend-secrets计划；execute必须使用本次新计划哈希：
+
+```bash
 .venv/bin/python -m local_execution \
   --config local_execution/customer.json \
   --step stage5-backend-secrets --operation plan
@@ -903,8 +943,6 @@ kubectl --kubeconfig "REPLACE_LEGACY_RUNTIME_KUBECONFIG" \
   --step stage5-backend-secrets --operation execute \
   --approved-plan-sha256 "REPLACE_STAGE5_BACKEND_SECRETS_PLAN_SHA256"
 ```
-
-若`auth can-i`不是`yes`，由旧AKS管理员按[主手册Stage5旧Secret读取步骤](../docs/customer-migration-guide-zh.md#5-migration模式核对旧aks-secret读取)授予精确读取权；不要把Secret正文复制到customer.json或终端日志。
 
 4. 保持上述迁移服务身份登录，下载Stage0备份、核对SHA256，并只恢复到绑定的空目标库：
 

@@ -353,15 +353,29 @@ class LocalExecutionTests(unittest.TestCase):
         config, settings = self.prepared()
         ambient = {
             "MIGRATION_MANIFEST_YAML": "unreviewed",
+            "MIGRATION_LEGACY_SALT_SOURCE": "master-key",
             "PRIVATE_API_INGRESS_CLASS": "ambient-api",
             "PRIVATE_ADMIN_INGRESS_CLASS": "ambient-admin",
         }
         with patch.dict(os.environ, ambient, clear=False):
             with local_operation_environment(config, settings, "stage6-application", {"method": "existing"}):
                 self.assertEqual(os.environ["MIGRATION_MANIFEST_YAML"], "")
+                self.assertEqual(os.environ["MIGRATION_LEGACY_SALT_SOURCE"], "")
                 self.assertEqual(os.environ["PRIVATE_API_INGRESS_CLASS"], "")
                 self.assertEqual(os.environ["PRIVATE_ADMIN_INGRESS_CLASS"], "")
             self.assertEqual({name: os.environ[name] for name in ambient}, ambient)
+
+    def test_backend_secret_salt_source_comes_from_local_config(self):
+        from local_execution.runner import local_operation_environment
+
+        config, settings = self.prepared()
+        with local_operation_environment(config, settings, "stage5-backend-secrets", {"method": "existing"}):
+            self.assertEqual(os.environ["MIGRATION_LEGACY_SALT_SOURCE"], "secret")
+        settings.setdefault("runtimeInputs", {})["legacySaltSource"] = "master-key"
+        with patch.dict(os.environ, {"MIGRATION_LEGACY_SALT_SOURCE": "secret"}, clear=False):
+            with local_operation_environment(config, settings, "stage5-backend-secrets", {"method": "existing"}):
+                self.assertEqual(os.environ["MIGRATION_LEGACY_SALT_SOURCE"], "master-key")
+            self.assertEqual(os.environ["MIGRATION_LEGACY_SALT_SOURCE"], "secret")
 
     def test_image_promotion_requires_explicit_execute(self):
         from local_execution.runner import local_operation
@@ -502,7 +516,9 @@ class LocalExecutionTests(unittest.TestCase):
         stage5 = staged["stages"]["5"]
         self.assertIn("stage5Data", stage5["customerConfig"]["parameters"]["platform"])
         self.assertIn("databaseAccess", stage5["customerConfig"])
-        self.assertEqual(set(stage5["localExecutionMerge"]["runtimeInputs"]), {"backupBlob", "backupSha256", "postgresMigrationUser"})
+        self.assertEqual(set(stage5["localExecutionMerge"]["runtimeInputs"]), {"backupBlob", "backupSha256", "postgresMigrationUser", "legacySaltSource"})
+        self.assertEqual(stage5["localExecutionMerge"]["runtimeInputs"]["legacySaltSource"], "secret")
+        self.assertIn("legacyMasterKeySaltCompatibility", stage5)
         self.assertIn("separateDatabaseAdminIdentity", stage5)
         self.assertIn("application", staged["stages"]["6"]["customerConfig"])
         self.assertEqual(set(staged["stages"]["7"]["customerConfig"]), {"entra", "proxy"})
@@ -643,6 +659,10 @@ class LocalExecutionTests(unittest.TestCase):
         parameters_for(database_identity_config, 5, "platform")
         self.assertEqual(database_identity_config["parameters"]["platform"]["stage5Data"]["postgresqlEntraAdministratorPrincipalType"], "ServicePrincipal")
         self.assertEqual(database_identity["localExecution"]["authentication"]["database"]["method"], "managed-identity")
+
+        master_key_salt, missing = merge_stage(stage4_source, {"catalogVersion": 1, "stages": catalog}, 5, ("database-admin-identity", "legacy-master-key-salt"), replacements)
+        self.assertEqual(missing, [])
+        self.assertEqual(master_key_salt["localExecution"]["runtimeInputs"]["legacySaltSource"], "master-key")
 
         merge(source, replace(catalog["6"]["customerConfig"]))
         validated(source)
