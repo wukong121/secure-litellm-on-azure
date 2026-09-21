@@ -141,7 +141,8 @@ def local_settings(document):
     require(isinstance(features, dict) and set(features) == {"entraMode", "allowTrafficRelease"}, "localExecution.features requires entraMode and allowTrafficRelease")
     require(features["entraMode"] in {"enabled", "deferred"} and type(features["allowTrafficRelease"]) is bool, "Invalid local feature decision")
     runtime_inputs = settings.setdefault("runtimeInputs", {})
-    require(isinstance(runtime_inputs, dict) and not set(runtime_inputs) - {"backupBlob", "backupSha256", "postgresMigrationUser", "privateApiIngressClass", "privateAdminIngressClass", "auditRecoveryCursor"}, "localExecution.runtimeInputs contains unknown fields")
+    require(isinstance(runtime_inputs, dict) and not set(runtime_inputs) - {"backupBlob", "backupSha256", "postgresMigrationUser", "legacySaltSource", "privateApiIngressClass", "privateAdminIngressClass", "auditRecoveryCursor"}, "localExecution.runtimeInputs contains unknown fields")
+    require("legacySaltSource" not in runtime_inputs or runtime_inputs["legacySaltSource"] in {"secret", "master-key"}, "localExecution.runtimeInputs.legacySaltSource must be secret or master-key")
     for field in ("releaseReportPath", "imageSigning"):
         require(field not in settings or settings[field] is not None, f"localExecution.{field} cannot be null")
     if "releaseReportPath" in settings:
@@ -423,11 +424,14 @@ def local_operation_environment(config, settings, step, profile):
         "AZURE_TENANT_ID": config["azure"]["tenantId"],
         "AZURE_SUBSCRIPTION_ID": config["azure"]["subscriptionId"],
         "MIGRATION_MANIFEST_YAML": "",
+        "MIGRATION_LEGACY_SALT_SOURCE": "",
         "PRIVATE_API_INGRESS_CLASS": "",
         "PRIVATE_ADMIN_INGRESS_CLASS": "",
     }
     inputs = settings.get("runtimeInputs", {})
     action = RUNTIME_STEPS.get(step, (None, None))[1]
+    if action == "backend-secrets":
+        updates["MIGRATION_LEGACY_SALT_SOURCE"] = inputs.get("legacySaltSource", "secret")
     if action == "restore-target":
         updates["POSTGRES_MIGRATION_USER"] = ""
         for setting, environment in (("backupBlob", "MIGRATION_RESTORE_BLOB"), ("backupSha256", "MIGRATION_BACKUP_SHA256")):

@@ -81,6 +81,47 @@ class RuntimeSecretTests(unittest.TestCase):
         _template, parameters = parameters_for(config, 5, "platform")
         self.assertEqual(parameters["parameters"]["bootstrapPrincipalId"]["value"], config["databaseAccess"]["migrationPrincipalId"])
 
+    def test_legacy_salt_source_is_bound_to_the_plan_hash(self):
+        config = customer_config()
+        config["databaseAccess"] = {"migrationPrincipalId": "33333333-3333-4333-8333-333333333333"}
+        config["parameters"]["platform"]["stage5Data"] = {"postgresqlDatabaseName": "litellm"}
+        azure = Mock()
+        azure.run.return_value = {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}
+
+        def cloud(arguments):
+            if arguments[:3] == ["deployment", "group", "show"]:
+                return {"state": "Succeeded", "platform": {"stage5Deployed": True, "keyVaultName": "synthetic-backend", "postgresqlServerName": "target", "workloadIdentityClientId": "44444444-4444-4444-8444-444444444444", "workloadIdentityPrincipalId": "55555555-5555-4555-8555-555555555555"}}
+            if arguments[0] == "keyvault":
+                return {"id": group_id(config) + "/providers/Microsoft.KeyVault/vaults/synthetic-backend", "uri": "https://synthetic-backend.vault.azure.net/", "rbac": True, "public": "Disabled", "purge": True}
+            if arguments[0] == "postgres":
+                return {"host": "synthetic.postgres.database.azure.com", "auth": {"activeDirectoryAuth": "Enabled", "passwordAuth": "Disabled"}, "network": {"publicNetworkAccess": "Disabled"}}
+            raise AssertionError(arguments)
+
+        azure.scoped.side_effect = cloud
+        legacy = {"LITELLM_MASTER_KEY": "old-key", "LITELLM_SALT_KEY": "old-key"}
+        hashes = {}
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, ExitStack() as stack:
+            stack.enter_context(patch("scripts.runtime_secrets.AzureCommands", return_value=azure))
+            stack.enter_context(patch("azure.identity.AzureCliCredential"))
+            stack.enter_context(patch("azure.keyvault.secrets.SecretClient"))
+            connection = stack.enter_context(patch("psycopg.connect"))
+            connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value.fetchone.return_value = (False,)
+            stack.enter_context(patch("scripts.runtime_secrets.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="synthetic-db-token")))
+            stack.enter_context(patch("scripts.runtime_secrets.inspect_backend_secrets", return_value=({}, {name: None for name in BACKEND_SECRETS})))
+            read = stack.enter_context(patch("scripts.runtime_secrets.read_legacy_keys"))
+            for source in ("secret", "master-key"):
+                target = Path(directory) / source
+                target.mkdir()
+                read.return_value = (legacy, {"name": "litellm-env", "uid": "source", "resourceVersion": "42", "saltSource": source})
+                with patch.dict("os.environ", {"MIGRATION_LEGACY_SALT_SOURCE": source}, clear=False):
+                    result = initialize_backend_secrets(config, "plan", "a" * 40, target, "")
+                hashes[source] = result["planSha256"]
+                review = json.loads((target / "runtime-review.json").read_text())
+                self.assertEqual(review["source"]["saltSource"], source)
+                self.assertNotIn("old-key", json.dumps(review))
+                self.assertEqual(read.call_args.args[2], source)
+        self.assertNotEqual(hashes["secret"], hashes["master-key"])
+
     def test_sdk_initialization_reuses_existing_values_after_partial_failure(self):
         from azure.core.exceptions import ResourceNotFoundError
 
@@ -150,8 +191,24 @@ class RuntimeSecretTests(unittest.TestCase):
             values, metadata = read_legacy_keys(config, Path(directory))
             self.assertEqual(values["LITELLM_SALT_KEY"], "old-salt")
             self.assertEqual(metadata["resourceVersion"], "42")
+            self.assertEqual(metadata["saltSource"], "secret")
             self.assertEqual(command.call_args.args[0][1:4], ["get", "secret", "litellm-env"])
             self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_master_key_salt_source_requires_an_absent_explicit_salt(self):
+        config = customer_config()
+        metadata = {"name": "litellm-env", "namespace": "litellm", "uid": "source", "resourceVersion": "42"}
+        master_only = {"metadata": metadata, "data": {"LITELLM_MASTER_KEY": base64.b64encode(b"old-master").decode()}}
+        explicit = {"metadata": metadata, "data": {**master_only["data"], "LITELLM_SALT_KEY": base64.b64encode(b"old-salt").decode()}}
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl"]), patch("scripts.runtime_secrets.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(master_only))):
+            with self.assertRaisesRegex(ValueError, "Salt is absent"):
+                read_legacy_keys(config, Path(directory))
+            values, source = read_legacy_keys(config, Path(directory), "master-key")
+            self.assertEqual(values["LITELLM_SALT_KEY"], values["LITELLM_MASTER_KEY"])
+            self.assertEqual(source["saltSource"], "master-key")
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl"]), patch("scripts.runtime_secrets.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps(explicit))):
+            with self.assertRaisesRegex(ValueError, "already contains an explicit Salt"):
+                read_legacy_keys(config, Path(directory), "master-key")
 
     def test_new_keys_are_distinct_and_existing_values_are_never_rotated(self):
         values = backend_secret_values("greenfield", {})

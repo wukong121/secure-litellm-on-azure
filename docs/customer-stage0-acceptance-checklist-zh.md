@@ -263,7 +263,7 @@ S0-08的临时恢复容器已清理；有额外抽验要求时，由DBA单独批
 
 本仓库旧部署通过`litellm-env`提供`LITELLM_MASTER_KEY`；原部署脚本不会自动创建`LITELLM_SALT_KEY`，只在更新Secret时保留已经存在的Salt，见[旧部署脚本](../LiteLLM/deploy_mi_aks_litellm.py)。因此旧环境可能没有显式Salt，不能假定每个客户都有两个独立的值。后续Stage5代码要求读取这两个字段，见[read_legacy_keys](../scripts/runtime_secrets.py)。这两个值与`WORKFLOW_ARTIFACT_KEY`、普通用户vkey、数据库密码不同。
 
-请旧环境Owner确认真实的配置来源、当前运行版本以及是否有覆盖/回退规则。没有显式Salt时，**不能假设等于Master、随便生成Salt或把空值算通过**，须按旧版本实际行为制定并验证兼容方案；当前Stage5读取器会拒绝缺失值。
+请旧环境Owner确认真实的配置来源、当前运行版本以及是否有覆盖/回退规则。没有显式Salt时，**不能假设等于Master、随便生成Salt或把空值算通过**，须按旧版本实际行为制定并验证兼容方案。Stage5默认`legacySaltSource=secret`会拒绝缺失值；只有已批准并验证“当前Master Key作为永久Salt”兼容路径的环境，才能显式选择`legacy-master-key-salt`选项。
 
 `ABSENT`仅表示所查Pod进程环境没有该变量，不证明应用未使用其他加密材料，也不证明数据库无法解密。遇到这种情况，停止反复输入所谓Salt：由实施人员核对实际运行镜像版本、加密函数及配置回退规则，再用获准隔离副本验证历史密文与拟定迁移材料。不能仅为满足检查而给旧Secret增加新Salt或重启Pod；本指南不自动实施兼容迁移。
 

@@ -155,7 +155,15 @@
         "runtimeInputs": {
           "backupBlob": "pre-change/REPLACE_32_HEX.dump",
           "backupSha256": "REPLACE_64_HEX_SHA256",
-          "postgresMigrationUser": "llmgw_migrator"
+          "postgresMigrationUser": "llmgw_migrator",
+          "legacySaltSource": "secret"
+        }
+      },
+      "legacyMasterKeySaltCompatibility": {
+        "localExecutionMerge": {
+          "runtimeInputs": {
+            "legacySaltSource": "master-key"
+          }
         }
       },
       "separateDatabaseAdminIdentity": {

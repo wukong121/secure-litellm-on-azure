@@ -3,6 +3,7 @@
 import hmac
 import base64
 import json
+import os
 import secrets
 import subprocess
 from datetime import datetime, timezone
@@ -43,22 +44,30 @@ def backend_secret_values(mode, existing, legacy=None):
     return {name: value for name, value in desired.items() if name not in existing}
 
 
-def read_legacy_keys(config, directory):
+def read_legacy_keys(config, directory, salt_source="secret"):
     from scripts.migration_runtime import connect_cluster
 
     require(deployment_mode(config) == "migration", "Greenfield cannot read legacy keys")
+    require(salt_source in {"secret", "master-key"}, "Legacy Salt source must be secret or master-key")
     kube = connect_cluster(config, directory, legacy=True)
     response = subprocess.run([*kube, "get", "secret", "litellm-env", "-o", "json"], capture_output=True, text=True, check=False, timeout=60)
     require(response.returncode == 0, "Unable to read the approved legacy litellm-env Secret")
     document = json.loads(response.stdout)
-    values = {}
-    for environment in BACKEND_SECRETS.values():
-        encoded = document.get("data", {}).get(environment)
-        require(isinstance(encoded, str), "Legacy Master Key or Salt is absent; validate its compatibility strategy before migration")
-        values[environment] = secret_value(base64.b64decode(encoded, validate=True).decode("utf-8"))
+    data = document.get("data", {})
+    encoded_master = data.get("LITELLM_MASTER_KEY")
+    require(isinstance(encoded_master, str), "Legacy Master Key is absent")
+    master = secret_value(base64.b64decode(encoded_master, validate=True).decode("utf-8"))
+    encoded_salt = data.get("LITELLM_SALT_KEY")
+    if salt_source == "secret":
+        require(isinstance(encoded_salt, str), "Legacy Salt is absent; select master-key only after approving and validating that compatibility strategy")
+        salt = secret_value(base64.b64decode(encoded_salt, validate=True).decode("utf-8"))
+    else:
+        require(encoded_salt is None, "Legacy Secret already contains an explicit Salt; select the secret source")
+        salt = master
+    values = {"LITELLM_MASTER_KEY": master, "LITELLM_SALT_KEY": salt}
     metadata = document["metadata"]
     require(metadata["name"] == "litellm-env" and metadata["namespace"] == config["legacy"]["namespace"], "Legacy secret scope mismatch")
-    return values, {"name": metadata["name"], "uid": metadata["uid"], "resourceVersion": metadata["resourceVersion"]}
+    return values, {"name": metadata["name"], "uid": metadata["uid"], "resourceVersion": metadata["resourceVersion"], "saltSource": salt_source}
 
 
 def inspect_backend_secrets(client, mode):
@@ -126,12 +135,13 @@ def initialize_backend_secrets(config, operation, revision, directory, approved)
     token = subprocess.run(["az", "account", "get-access-token", "--subscription", config["azure"]["subscriptionId"], "--resource-type", "oss-rdbms", "--query", "accessToken", "--output", "tsv"], capture_output=True, text=True, check=False, timeout=120)
     require(token.returncode == 0 and token.stdout.strip(), "Unable to acquire the migration identity database token")
     mode = deployment_mode(config)
+    legacy_salt_source = os.environ.get("MIGRATION_LEGACY_SALT_SOURCE", "secret")
     credential = AzureCliCredential(tenant_id=config["azure"]["tenantId"])
     try:
         with isolated_postgres_environment(), psycopg.connect(host=server["host"], port=5432, dbname=database, user="llmgw_migrator", password=token.stdout.strip(), sslmode="verify-full", sslrootcert=postgres_ca_bundle(), connect_timeout=15, options="-c statement_timeout=30000") as lock, SecretClient(vault_url=vault["uri"], credential=credential) as client:
             with lock.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_lock(hashtext(%s), 7)", (vault["id"].lower(),))
-            legacy, source = read_legacy_keys(config, directory) if mode == "migration" else (None, None)
+            legacy, source = read_legacy_keys(config, directory, legacy_salt_source) if mode == "migration" else (None, None)
             existing, metadata = inspect_backend_secrets(client, mode)
             with lock.cursor() as cursor:
                 cursor.execute("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') AND table_type = 'BASE TABLE')")
