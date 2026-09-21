@@ -6,10 +6,17 @@ import unittest
 import yaml
 
 from scripts.customer_migration import COMPONENTS, ROOT
-from scripts.source_supply_chain import check_source, source_image
+from scripts.source_supply_chain import check_source, image_content_sha256, source_image
 
 
 class MigrationWorkflowTests(unittest.TestCase):
+    def test_runtime_image_content_hash_ignores_metadata_but_binds_rootfs_and_config(self):
+        image = {"Id": "sha256:" + "a" * 64, "Created": "first", "Architecture": "amd64", "Os": "linux", "RootFS": {"Type": "layers", "Layers": ["sha256:" + "b" * 64]}, "Config": {"User": "10001:10001", "Env": ["PYTHONDONTWRITEBYTECODE=1"]}}
+        expected = image_content_sha256(image)
+        self.assertEqual(expected, image_content_sha256({**image, "Id": "sha256:" + "c" * 64, "Created": "second"}))
+        self.assertNotEqual(expected, image_content_sha256({**image, "RootFS": {"Type": "layers", "Layers": ["sha256:" + "d" * 64]}}))
+        self.assertNotEqual(expected, image_content_sha256({**image, "Config": {**image["Config"], "User": "0"}}))
+
     def test_manual_confirmation_and_read_only_runner_entrypoints(self):
         acceptance = yaml.load((ROOT / ".github/workflows/customer-acceptance.yml").read_text(), Loader=yaml.BaseLoader)
         inputs = acceptance["on"]["workflow_dispatch"]["inputs"]
@@ -55,7 +62,7 @@ class MigrationWorkflowTests(unittest.TestCase):
             def run(command, **kwargs):
                 commands.append(command)
                 if command[0] == "docker":
-                    output = "sha256:" + "b" * 64 if command[1:3] == ["image", "inspect"] else ""
+                    output = json.dumps({"Id": "sha256:" + "b" * 64, "Architecture": "amd64", "Os": "linux", "RootFS": {"Type": "layers", "Layers": ["sha256:" + "c" * 64]}, "Config": {"User": "10001:10001"}}) if command[1:3] == ["image", "inspect"] else ""
                     return subprocess.CompletedProcess(command, 0, output, "not-for-artifact")
                 document = {"spdxVersion": "SPDX-2.3", "packages": [{"name": "synthetic"}]} if command[0] == "syft" else {"ArtifactName": "sha256:" + "b" * 64, "Results": [{"Target": "synthetic"}]}
                 return subprocess.CompletedProcess(command, 0 if command[0] == "syft" else scan_code, json.dumps(document), "not-for-artifact")
@@ -65,6 +72,7 @@ class MigrationWorkflowTests(unittest.TestCase):
                 self.assertFalse(report["stageAccepted"])
                 self.assertEqual([command[0] for command in commands], ["docker", "docker", "syft", "trivy"])
                 self.assertEqual(len(report["results"]), 3)
+                self.assertRegex(report["evaluatedImageContentSha256"], r"^[0-9a-f]{64}$")
                 self.assertNotIn("not-for-artifact", (Path(folder) / "source-summary.json").read_text())
                 self.assertTrue(all("sha256" in item for item in report["results"]))
                 if scan_code:

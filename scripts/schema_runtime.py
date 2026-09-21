@@ -1,6 +1,5 @@
 """Plan and execute isolated schema migrations against the deployed target database."""
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,8 +27,7 @@ def migration_template(host, database):
 def run_schema_container(config, directory, template, token_path, operation, state="", image=""):
     require(isinstance(image, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", image) is not None, "Schema migration requires the immutable hardened runtime image ID")
     container = "llmgw-schema-" + uuid4().hex
-    code = ROOT / "LiteLLM/runtime"
-    arguments = ["docker", "run", "--rm", "--name", container, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", f"{os.getuid()}:{os.getgid()}", "--tmpfs", "/tmp:rw,nosuid,size=512m", "--env", "HOME=/tmp", "--env", "PYTHONPATH=/code", "--env", "PYTHONDONTWRITEBYTECODE=1", "--env", "LITELLM_LOCAL_MODEL_COST_MAP=True", "--env", "AZURE_DATABASE_URL_TEMPLATE=" + template, "--env", "LLMGW_DATABASE_TOKEN_FILE=/run/db-token", "--mount", f"type=bind,src={code},dst=/code/LiteLLM/runtime,readonly", "--mount", f"type=bind,src={token_path},dst=/run/db-token,readonly", "--workdir", "/tmp", "--entrypoint", "/app/.venv/bin/python", image, "-m", "LiteLLM.runtime.schema_migration", "--operation", operation, "--mode", deployment_mode(config)]
+    arguments = ["docker", "run", "--rm", "--name", container, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", f"{os.getuid()}:{os.getgid()}", "--tmpfs", "/tmp:rw,nosuid,size=512m", "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1", "--env", "LITELLM_LOCAL_MODEL_COST_MAP=True", "--env", "AZURE_DATABASE_URL_TEMPLATE=" + template, "--env", "LLMGW_DATABASE_TOKEN_FILE=/run/db-token", "--mount", f"type=bind,src={token_path},dst=/run/db-token,readonly", "--workdir", "/tmp", "--entrypoint", "/app/.venv/bin/python", image, "-m", "LiteLLM.runtime.schema_migration", "--operation", operation, "--mode", deployment_mode(config)]
     if operation == "execute":
         arguments.extend(["--expected-state", state])
     try:
@@ -56,7 +54,9 @@ def migrate_schema(config, operation, revision, directory, approved):
     template = migration_template(server["host"], database)
     built_image = build_hardened_runtime(revision)
     private_write(directory / "schema-image-build.stderr.txt", built_image["stderr"])
-    runtime_image = {key: value for key, value in built_image.items() if key != "stderr"}
+    execution_image_id = built_image["id"]
+    runtime_image = {key: value for key, value in built_image.items() if key not in {"stderr", "id"}}
+    private_write(directory / "schema-image-observation.json", json.dumps({**runtime_image, "executionImageId": execution_image_id}, indent=2) + "\n")
     token_result = subprocess.run(["az", "account", "get-access-token", "--subscription", config["azure"]["subscriptionId"], "--resource-type", "oss-rdbms", "--output", "json"], capture_output=True, text=True, check=False, timeout=120)
     require(token_result.returncode == 0, "Unable to acquire migration identity token")
     token = json.loads(token_result.stdout)
@@ -64,9 +64,8 @@ def migrate_schema(config, operation, revision, directory, approved):
     token_path = directory / "schema-db-token"
     private_write(token_path, token["accessToken"])
     try:
-        observed = run_schema_container(config, directory, template, token_path, "inspect", image=runtime_image["id"])
-        code_hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted((ROOT / "LiteLLM/runtime").glob("*.py"))}
-        plan = {"stage": 5, "action": "schema-migrate", "revision": revision, "configSha256": stage_fingerprint(config, 5), "image": runtime_image, "runtimeCode": code_hashes, "serverId": server["id"], "database": database, "migrationRole": "llmgw_migrator", **observed}
+        observed = run_schema_container(config, directory, template, token_path, "inspect", image=execution_image_id)
+        plan = {"stage": 5, "action": "schema-migrate", "revision": revision, "configSha256": stage_fingerprint(config, 5), "image": runtime_image, "serverId": server["id"], "database": database, "migrationRole": "llmgw_migrator", **observed}
         digest = fingerprint(plan)
         summary = {"stage": 5, "action": "schema-migrate", "planSha256": digest, "pendingMigrations": len(observed["pending"]), "stageAccepted": False}
         private_write(directory / "runtime-review.json", json.dumps(plan, indent=2) + "\n")
@@ -74,9 +73,9 @@ def migrate_schema(config, operation, revision, directory, approved):
         if operation == "execute":
             require(approved == digest, "Schema plan changed or was not approved")
             require(int(token["expires_on"]) > time.time() + 1900, "Token lifetime is insufficient after schema inspection; replan with a fresh token")
-            result = run_schema_container(config, directory, template, token_path, "execute", observed["stateSha256"], image=runtime_image["id"])
+            result = run_schema_container(config, directory, template, token_path, "execute", observed["stateSha256"], image=execution_image_id)
             require(result.get("schemaVerified") is True and result.get("assets") == observed["assets"], "Schema verification did not match the approved release")
-            receipt = {"revision": revision, "configSha256": stage_fingerprint(config, 5), "serverId": server["id"], "database": database, "image": runtime_image, "assets": result["assets"], "stateSha256": result["stateSha256"], "verifiedAt": datetime.now(timezone.utc).isoformat()}
+            receipt = {"revision": revision, "configSha256": stage_fingerprint(config, 5), "planSha256": digest, "serverId": server["id"], "database": database, "image": runtime_image, "executionImageId": execution_image_id, "assets": result["assets"], "stateSha256": result["stateSha256"], "verifiedAt": datetime.now(timezone.utc).isoformat()}
             receipt_template = {"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#", "contentVersion": "1.0.0.0", "resources": [], "outputs": {"databaseSchema": {"type": "object", "value": receipt}}}
             receipt_path = directory / "schema-receipt-template.json"
             private_write(receipt_path, json.dumps(receipt_template))

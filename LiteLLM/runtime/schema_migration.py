@@ -48,7 +48,8 @@ def migration_assets():
     files = sorted(SCHEMA_PATH.parent.glob("migrations/*/migration.sql"))
     if not files:
         raise DatabaseAuthError("Approved migration files are missing")
-    return {"schemaSha256": SCHEMA_SHA256, "viewsSha256": VIEWS_SHA256, "migrations": [{"name": path.parent.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for path in files]}
+    runtime = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(Path(__file__).parent.glob("*.py"))}
+    return {"schemaSha256": SCHEMA_SHA256, "viewsSha256": VIEWS_SHA256, "runtimeCode": runtime, "migrations": [{"name": path.parent.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for path in files]}
 
 
 def check_history(assets, history, tables, mode):

@@ -13,6 +13,7 @@ from scripts.workflow_diagnostics import command_failure_summary, exception_diag
 
 
 RUNTIME_DOCKERFILE = ROOT / "LiteLLM/runtime/Dockerfile"
+RUNTIME_DOCKERIGNORE = ROOT / "LiteLLM/runtime/Dockerfile.dockerignore"
 HARDENING_REQUIREMENTS = ROOT / "LiteLLM/runtime/security-requirements.txt"
 
 
@@ -29,11 +30,23 @@ def hardened_runtime_image(revision):
 
 
 def runtime_build_inputs_sha256():
-    return hashlib.sha256(RUNTIME_DOCKERFILE.read_bytes() + HARDENING_REQUIREMENTS.read_bytes()).hexdigest()
+    return hashlib.sha256(RUNTIME_DOCKERFILE.read_bytes() + RUNTIME_DOCKERIGNORE.read_bytes() + HARDENING_REQUIREMENTS.read_bytes()).hexdigest()
 
 
 def runtime_build_command(revision):
     return ["docker", "build", "--network", "none", "-f", str(RUNTIME_DOCKERFILE), "-t", hardened_runtime_image(revision), str(ROOT)]
+
+
+def image_content_sha256(document):
+    require(isinstance(document, dict) and isinstance(document.get("RootFS", {}).get("Layers"), list) and document["RootFS"]["Layers"], "Hardened runtime image filesystem is unavailable")
+    contract = {
+        "architecture": document.get("Architecture"),
+        "os": document.get("Os"),
+        "rootfs": document["RootFS"],
+        "config": document.get("Config"),
+    }
+    require(all(contract[key] for key in ("architecture", "os", "config")), "Hardened runtime image configuration is unavailable")
+    return hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def build_hardened_runtime(revision, run=subprocess.run):
@@ -46,12 +59,16 @@ def build_hardened_runtime(revision, run=subprocess.run):
         raise MigrationError("Hardened runtime build timed out") from None
     require(result.returncode == 0, "Hardened runtime build failed: " + command_failure_summary(result.stdout, result.stderr, result.returncode))
     try:
-        inspected = run(["docker", "image", "inspect", "--format", "{{.Id}}", image], capture_output=True, text=True, check=False, timeout=120)
+        inspected = run(["docker", "image", "inspect", "--format", "{{json .}}", image], capture_output=True, text=True, check=False, timeout=120)
     except (OSError, subprocess.SubprocessError):
         raise MigrationError("Unable to inspect the hardened runtime image") from None
-    image_id = inspected.stdout.strip()
+    try:
+        document = json.loads(inspected.stdout)
+    except json.JSONDecodeError:
+        document = {}
+    image_id = document.get("Id", "")
     require(inspected.returncode == 0 and re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is not None, "Hardened runtime image ID is unavailable")
-    return {"reference": image, "id": image_id, "buildInputsSha256": runtime_build_inputs_sha256(), "source": source_image(), "stderr": result.stderr}
+    return {"reference": image, "id": image_id, "contentSha256": image_content_sha256(document), "buildInputsSha256": runtime_build_inputs_sha256(), "source": source_image(), "stderr": result.stderr}
 
 
 def check_source(directory, revision, run=subprocess.run):
@@ -74,6 +91,7 @@ def check_source(directory, revision, run=subprocess.run):
         private_write(directory / "source-build.stderr.txt", built["stderr"])
         build_entry.update(status="passed", exitCode=0, imageId=built["id"])
         report["evaluatedImageId"] = built["id"]
+        report["evaluatedImageContentSha256"] = built["contentSha256"]
     except MigrationError as error:
         build_entry["reason"] = str(error)
         build_entry["diagnostic"] = exception_diagnostic(error, "source-supply-chain")
