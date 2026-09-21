@@ -32,7 +32,7 @@ from local_execution.runner import (
     run_target_connectivity_check,
     require_legacy_cluster_running,
 )
-from local_execution.merge_config import main as merge_config_main, merge_stage, operation_directory, read_json
+from local_execution.merge_config import changed_paths, main as merge_config_main, merge_stage, operation_directory, read_json
 from scripts.customer_migration import ROOT, parameters_for, validate_config
 from scripts.migration_deploy import deploy_component
 from tests.test_customer_migration import customer_config
@@ -650,6 +650,10 @@ class LocalExecutionTests(unittest.TestCase):
         config = validated(source)
         parameters_for(config, 5, "platform")
 
+        repeated_group, missing = merge_stage(source, {"catalogVersion": 1, "stages": catalog}, 5)
+        self.assertEqual(missing, [])
+        self.assertEqual(changed_paths(source, repeated_group), [])
+
         database_identity = stage4_source
         merge(database_identity, replace(catalog["5"]["customerConfig"]))
         merge(database_identity["localExecution"], replace(catalog["5"]["localExecutionMerge"]))
@@ -663,6 +667,15 @@ class LocalExecutionTests(unittest.TestCase):
         master_key_salt, missing = merge_stage(stage4_source, {"catalogVersion": 1, "stages": catalog}, 5, ("database-admin-identity", "legacy-master-key-salt"), replacements)
         self.assertEqual(missing, [])
         self.assertEqual(master_key_salt["localExecution"]["runtimeInputs"]["legacySaltSource"], "master-key")
+
+        repeated, missing = merge_stage(database_identity, {"catalogVersion": 1, "stages": catalog}, 5, ("database-admin-identity", "legacy-master-key-salt"))
+        self.assertEqual(missing, [])
+        self.assertEqual(changed_paths(database_identity, repeated), ["localExecution.runtimeInputs.legacySaltSource"])
+        self.assertEqual(repeated["databaseAccess"], database_identity["databaseAccess"])
+        self.assertEqual(repeated["parameters"]["platform"]["stage5Data"], database_identity["parameters"]["platform"]["stage5Data"])
+        self.assertEqual(repeated["localExecution"]["authentication"]["database"], database_identity["localExecution"]["authentication"]["database"])
+        self.assertEqual(repeated["localExecution"]["runtimeInputs"]["backupBlob"], database_identity["localExecution"]["runtimeInputs"]["backupBlob"])
+        self.assertEqual(repeated["localExecution"]["runtimeInputs"]["backupSha256"], database_identity["localExecution"]["runtimeInputs"]["backupSha256"])
 
         merge(source, replace(catalog["6"]["customerConfig"]))
         validated(source)
