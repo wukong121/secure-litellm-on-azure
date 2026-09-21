@@ -974,6 +974,8 @@ kubectl --kubeconfig "$LEGACY_RUNTIME_KUBECONFIG" -n "$LEGACY_NAMESPACE" \
 
 恢复成功后，长期升级形成的旧Prisma历史可能与“全新安装同版本”不同：迁移名称仍相同，但旧库保留当年执行时的checksum和顺序。迁移器只接受代码中已通过固定旧镜像、恢复副本和隔离升级验证的精确源历史指纹；匹配后只执行目标镜像中尚未出现的迁移，原141条历史不改写。若plan仍报`Database migration history differs from the approved image`，不得跳过plan、直接execute、运行`prisma migrate resolve/reset`或手工更新`_prisma_migrations`；保存只读的名称/checksum/完成状态供实施负责人新增受审查的兼容指纹，并重新完成隔离升级测试。
 
+schema plan绑定稳定的运行镜像内容指纹（RootFS层、完整镜像配置、固定源digest、构建输入和运行时代码），实际本地Docker image ID只记录在本次观察/执行回执中。相同内容因Docker创建时间元数据产生不同image ID时不应让plan漂移；RootFS、配置、迁移资产或数据库state任一变化仍会改变plan哈希并阻止execute。
+
 6. Runner VM核验Stage5部署输出及公网关闭状态：
 
 ```bash
