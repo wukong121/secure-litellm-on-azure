@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from scripts.customer_migration import ROOT, MigrationError, stage_fingerprint
 from scripts.migration_deploy import group_id, resolve_origin
 from scripts.migration_runtime import validate_action
-from scripts.private_ingress_runtime import deploy_private_ingress, read_certificate, require_private_registry_dns, scan_image
+from scripts.private_ingress_runtime import deploy_private_ingress, read_certificate, require_private_ingress_backends, require_private_registry_dns, scan_image, verify_private_ingress_backends
 from tests.test_customer_migration import customer_config
 
 
@@ -109,8 +109,35 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
         receipt = json.loads((self.path / "ingress-receipt-template.json").read_text())["outputs"]["privateIngress"]["value"]
         self.assertEqual(receipt["api"]["frontendName"], "api")
         self.assertEqual(receipt["admin"]["frontendName"], "admin")
+        self.assertEqual(receipt["authenticationMode"], "entra")
+        self.assertFalse(receipt["backendRoutesVerified"])
+        self.assertTrue(all(call.kwargs.get("native") is None for call in self.verify.call_args_list))
         self.assertNotIn("synthetic-private-material", json.dumps(receipt))
         self.assertFalse((self.path / "ingress-tls.json").exists())
+
+    def test_native_backend_routes_are_verified_after_stage6_and_bound_to_stage4(self):
+        self.config["application"] = {"backendImage": "synthetic.azurecr.io/litellm@sha256:" + "a" * 64, "models": [{"modelGroup": "coding", "connectionAlias": "primary", "deploymentName": "model", "id": "primary-coding", "apiVersion": "v1"}], "authentication": {"mode": "native", "adminUsername": "gateway-admin"}}
+        ingress = {
+            "revision": "a" * 40,
+            "configSha256": stage_fingerprint(self.config, 4),
+            "authenticationMode": "native",
+            "backendRoutesVerified": False,
+            "certificates": {"api": {"sha256": "a" * 64}, "admin": {"sha256": "b" * 64}},
+            "api": {"privateIpAddress": "10.30.4.10"},
+            "admin": {"privateIpAddress": "10.30.4.11"},
+        }
+        stage4 = {"state": "Succeeded", "ingress": ingress}
+        self.azure.scoped.side_effect = [stage4, {"properties": {"provisioningState": "Succeeded"}}]
+        result = verify_private_ingress_backends(self.config, "a" * 40, self.path, self.azure)
+        self.assertTrue(result["backendRoutesVerified"])
+        self.assertEqual(self.verify.call_count, 2)
+        self.assertTrue(all(call.kwargs["native"] is True for call in self.verify.call_args_list))
+        self.azure.scoped.side_effect = [stage4, {"state": "Succeeded", "verification": result}]
+        require_private_ingress_backends(self.config, "a" * 40, self.azure)
+        stale = {**ingress, "api": {"privateIpAddress": "10.30.4.12"}}
+        self.azure.scoped.side_effect = [{"state": "Succeeded", "ingress": stale}, {"state": "Succeeded", "verification": result}]
+        with self.assertRaisesRegex(ValueError, "Verify the current native private ingress"):
+            require_private_ingress_backends(self.config, "a" * 40, self.azure)
 
     def test_failed_tls_verification_never_records_success(self):
         result = self.plan()
@@ -140,6 +167,11 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
             resolve_origin(self.config, "origin", self.azure)
         ingress["configSha256"] = "f" * 64
         with self.assertRaisesRegex(ValueError, "Stage 4 configuration"):
+            resolve_origin(self.config, "origin", self.azure)
+        ingress["configSha256"] = stage_fingerprint(self.config, 4)
+        self.config["application"] = {"backendImage": "synthetic.azurecr.io/litellm@sha256:" + "a" * 64, "models": [{"modelGroup": "coding", "connectionAlias": "primary", "deploymentName": "model", "id": "primary-coding", "apiVersion": "v1"}], "authentication": {"mode": "native", "adminUsername": "gateway-admin"}}
+        ingress["configSha256"] = stage_fingerprint(self.config, 4)
+        with self.assertRaisesRegex(ValueError, "authentication mode"):
             resolve_origin(self.config, "origin", self.azure)
 
     def test_private_ingress_only_runs_at_stage4_in_both_modes(self):

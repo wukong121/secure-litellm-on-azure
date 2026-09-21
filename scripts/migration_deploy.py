@@ -138,6 +138,9 @@ def resolve_origin(config, component, azure):
             require(output.get("state") == "Succeeded", "Deploy and verify private-ingress before creating the origin")
             ingress = output["ingress"]
             require(ingress.get("configSha256") == stage_fingerprint(config, 4), "Private ingress outputs differ from the approved Stage 4 configuration")
+            from scripts.backend_manifest import application_authentication
+            expected_authentication = application_authentication(config)["mode"] if "application" in config else "entra"
+            require(ingress.get("authenticationMode", "entra") == expected_authentication, "Private ingress authentication mode differs from the application; replan and execute private-ingress")
             managed = ingress["api"]
             managed_address = managed["privateIpAddress"]
             require(managed_address != ingress["admin"]["privateIpAddress"], "API/admin private frontends must be separate")
@@ -231,6 +234,9 @@ def deploy_component(config, stage, component, revision, operation, previous, di
         require(stage == 9 and component == "edge", "Release operation only applies to Stage 9 edge")
         expected_audit = "native" if "contentAudit" in config else "l3"
         require(release.get("auditMode", "l3") == expected_audit, "Release audit mode differs from customer configuration")
+        from scripts.backend_manifest import application_authentication
+        expected_authentication = application_authentication(config)["mode"] if "application" in config else "entra"
+        require(release.get("authenticationMode", "entra") == expected_authentication, "Release authentication mode differs from customer configuration")
         if expected_audit == "native":
             require(release.get("telemetryEnabled") is ("observability" in config), "Release telemetry decision differs from customer configuration")
         mode, eligible = approval_policy(config)
@@ -244,8 +250,19 @@ def deploy_component(config, stage, component, revision, operation, previous, di
         require(previous_edge.get("state") == "Succeeded", "Provision the disabled edge before releasing traffic")
         require(release.get("frontDoorId") == previous_edge.get("edge", {}).get("profileId"), "Release Front Door identity differs from the provisioned edge")
         if release["phase"] != "prepare" and "application" in config:
+            if expected_authentication == "native":
+                from scripts.private_ingress_runtime import require_private_ingress_backends
+                require_private_ingress_backends(config, revision, azure)
             from scripts.edge_binding import require_edge_binding
-            require_edge_binding(config, revision, release["frontDoorId"], azure)
+            binding_client = None
+            if expected_authentication == "native":
+                from scripts.audit_runtime import AuditCluster
+                from scripts.migration_runtime import connect_cluster
+                kube = connect_cluster(config, directory, legacy=False)
+                if kube[-2:] == ["--namespace", "litellm"]:
+                    kube = kube[:-2]
+                binding_client = AuditCluster([*kube, "--namespace", "llm-api-ingress"], directory)
+            require_edge_binding(config, revision, release["frontDoorId"], azure, binding_client)
         document = json.loads(path.read_text())
         document["parameters"]["enableApiTraffic"] = {"value": release["phase"] != "prepare"}
         document["parameters"]["wafMode"] = {"value": release["wafMode"]}

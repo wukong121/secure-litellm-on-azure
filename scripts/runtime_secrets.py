@@ -14,10 +14,19 @@ from scripts.migration_deploy import AzureCommands, deployment_name, group_id
 
 
 BACKEND_SECRETS = {"litellm-master-key": "LITELLM_MASTER_KEY", "litellm-salt-key": "LITELLM_SALT_KEY"}
+NATIVE_UI_SECRET = {"litellm-ui-password": "UI_PASSWORD"}
 
 
-def ensure_key_creation_is_safe(mode, existing, has_tables):
-    require(mode != "greenfield" or set(existing) == set(BACKEND_SECRETS) or not has_tables, "Database already has tables but backend keys are missing; recover original keys instead of generating replacements")
+def backend_secrets(config=None):
+    result = dict(BACKEND_SECRETS)
+    if config is not None and config.get("application", {}).get("authentication", {}).get("mode") == "native":
+        result.update(NATIVE_UI_SECRET)
+    return result
+
+
+def ensure_key_creation_is_safe(mode, existing, has_tables, required=BACKEND_SECRETS):
+    missing_encryption = set(BACKEND_SECRETS) - set(existing)
+    require(mode != "greenfield" or not missing_encryption or not has_tables, "Database already has tables but backend encryption keys are missing; recover original keys instead of generating replacements")
 
 
 def secret_value(value):
@@ -25,22 +34,30 @@ def secret_value(value):
     return value
 
 
-def backend_secret_values(mode, existing, legacy=None):
+def backend_secret_values(mode, existing, legacy=None, required=BACKEND_SECRETS):
     require(mode in {"migration", "greenfield"}, "Unknown secret initialization mode")
-    require(isinstance(existing, dict) and not set(existing) - BACKEND_SECRETS.keys(), "Unknown backend secret")
+    require(isinstance(required, dict) and set(BACKEND_SECRETS).issubset(required) and not set(required) - (set(BACKEND_SECRETS) | set(NATIVE_UI_SECRET)), "Unknown required backend secret")
+    require(isinstance(existing, dict) and not set(existing) - required.keys(), "Unknown backend secret")
     for value in existing.values():
         secret_value(value)
     if mode == "migration":
         require(isinstance(legacy, dict) and set(legacy) == set(BACKEND_SECRETS.values()), "Read both existing Master Key and Salt before migrating; absent Salt requires an explicitly validated compatibility strategy")
         desired = {name: secret_value(legacy[environment]) for name, environment in BACKEND_SECRETS.items()}
         for name, value in existing.items():
-            require(hmac.compare_digest(value.encode(), desired[name].encode()), "Existing target encryption material differs from the legacy source; automatic overwrite is forbidden")
+            if name in BACKEND_SECRETS:
+                require(hmac.compare_digest(value.encode(), desired[name].encode()), "Existing target encryption material differs from the legacy source; automatic overwrite is forbidden")
+            else:
+                desired[name] = value
     else:
         require(legacy is None, "Greenfield secret initialization cannot import legacy credentials")
         desired = dict(existing)
-        for name in BACKEND_SECRETS:
+        for name in required:
             if name not in desired:
                 desired[name] = ("sk-" if name == "litellm-master-key" else "") + secrets.token_urlsafe(48)
+    if mode == "migration":
+        for name in required:
+            if name not in desired:
+                desired[name] = secrets.token_urlsafe(48)
     return {name: value for name, value in desired.items() if name not in existing}
 
 
@@ -70,11 +87,11 @@ def read_legacy_keys(config, directory, salt_source="secret"):
     return values, {"name": metadata["name"], "uid": metadata["uid"], "resourceVersion": metadata["resourceVersion"], "saltSource": salt_source}
 
 
-def inspect_backend_secrets(client, mode):
+def inspect_backend_secrets(client, mode, required=BACKEND_SECRETS):
     from azure.core.exceptions import ResourceNotFoundError
 
     existing, metadata = {}, {}
-    for name in BACKEND_SECRETS:
+    for name in required:
         try:
             item = client.get_secret(name)
         except ResourceNotFoundError:
@@ -89,19 +106,19 @@ def inspect_backend_secrets(client, mode):
     return existing, metadata
 
 
-def apply_backend_secrets(client, mode, existing, metadata, legacy):
-    values = backend_secret_values(mode, existing, legacy)
+def apply_backend_secrets(client, mode, existing, metadata, legacy, required=BACKEND_SECRETS):
+    values = backend_secret_values(mode, existing, legacy, required)
     for name, value in values.items():
-        _current, refreshed = inspect_backend_secrets(client, mode)
+        _current, refreshed = inspect_backend_secrets(client, mode, required)
         require(refreshed == metadata, "Vault secret versions changed during initialization; no overwrite allowed")
         created = client.set_secret(name, value, enabled=True, tags={"llmgw-bootstrap": "backend", "llmgw-mode": mode}, content_type="text/plain")
         metadata[name] = {"id": created.properties.id, "version": created.properties.version}
-    complete, verified = inspect_backend_secrets(client, mode)
-    require(set(complete) == set(BACKEND_SECRETS), "Backend secret initialization is incomplete")
+    complete, verified = inspect_backend_secrets(client, mode, required)
+    require(set(complete) == set(required), "Backend secret initialization is incomplete")
     require(verified == metadata, "Backend secret versions changed during final verification")
     for name, value in {**existing, **values}.items():
         require(hmac.compare_digest(complete[name].encode(), value.encode()), "Backend secret values did not match initialization results")
-    require(not backend_secret_values(mode, complete, legacy), "Backend secret verification failed")
+    require(not backend_secret_values(mode, complete, legacy, required), "Backend secret verification failed")
     return verified
 
 
@@ -135,6 +152,7 @@ def initialize_backend_secrets(config, operation, revision, directory, approved)
     token = subprocess.run(["az", "account", "get-access-token", "--subscription", config["azure"]["subscriptionId"], "--resource-type", "oss-rdbms", "--query", "accessToken", "--output", "tsv"], capture_output=True, text=True, check=False, timeout=120)
     require(token.returncode == 0 and token.stdout.strip(), "Unable to acquire the migration identity database token")
     mode = deployment_mode(config)
+    required_secrets = backend_secrets(config)
     legacy_salt_source = os.environ.get("MIGRATION_LEGACY_SALT_SOURCE", "secret")
     credential = AzureCliCredential(tenant_id=config["azure"]["tenantId"])
     try:
@@ -142,21 +160,21 @@ def initialize_backend_secrets(config, operation, revision, directory, approved)
             with lock.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_lock(hashtext(%s), 7)", (vault["id"].lower(),))
             legacy, source = read_legacy_keys(config, directory, legacy_salt_source) if mode == "migration" else (None, None)
-            existing, metadata = inspect_backend_secrets(client, mode)
+            existing, metadata = inspect_backend_secrets(client, mode, required_secrets)
             with lock.cursor() as cursor:
                 cursor.execute("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') AND table_type = 'BASE TABLE')")
                 has_tables = cursor.fetchone()[0]
-            ensure_key_creation_is_safe(mode, existing, has_tables)
+            ensure_key_creation_is_safe(mode, existing, has_tables, required_secrets)
             if mode == "migration":
-                backend_secret_values(mode, existing, legacy)
-            plan = {"stage": 5, "action": "backend-secrets", "revision": revision, "configSha256": stage_fingerprint(config, 5), "vaultId": vault["id"], "source": source, "before": metadata, "databaseHasTables": has_tables, "actions": {name: "keep" if name in existing else ("import" if mode == "migration" else "generate") for name in BACKEND_SECRETS}}
+                backend_secret_values(mode, existing, legacy, required_secrets)
+            plan = {"stage": 5, "action": "backend-secrets", "revision": revision, "configSha256": stage_fingerprint(config, 5), "vaultId": vault["id"], "source": source, "before": metadata, "databaseHasTables": has_tables, "actions": {name: "keep" if name in existing else ("import" if mode == "migration" and name in BACKEND_SECRETS else "generate") for name in required_secrets}}
             digest = fingerprint(plan)
             summary = {"stage": 5, "action": "backend-secrets", "planSha256": digest, "stageAccepted": False}
             private_write(directory / "runtime-review.json", json.dumps(plan, indent=2) + "\n")
             private_write(directory / "runtime-summary.json", json.dumps(summary, indent=2) + "\n")
             if operation == "execute":
                 require(approved == digest, "Backend secret plan changed or was not approved")
-                versions = apply_backend_secrets(client, mode, existing, metadata, legacy)
+                versions = apply_backend_secrets(client, mode, existing, metadata, legacy, required_secrets)
                 from scripts.backend_access import render_backend_access
 
                 access = render_backend_access(config, platform, versions)

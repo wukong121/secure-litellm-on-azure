@@ -177,10 +177,11 @@ az vm identity remove --ids "$RUNNER_VM_RESOURCE_ID" \
 - 风险登录策略和PIM等能力需要更高许可。
 - Security Defaults可能阻止设备码登录；UAMI不依赖人工设备码。
 
-客户应在Stage2决定以下二选一：
+客户应在Stage2决定以下三选一：
 
 1. `entraMode=enabled`：确认Free + Security Defaults满足本次范围，或先取得所需P1/P2能力，然后按Stage7执行。
 2. `entraMode=deferred`：先完成Stage2–6。执行器会阻止Stage7身份/代理、Stage8应用发布、Stage9 edge绑定、启流量和DNS变更；仍可创建Stage8观测基础设施，以及Stage9禁流量的origin/edge资源。
+3. Stage6选择`--option native-auth`：客户无法批准或验证Graph应用权限时，显式改用LiteLLM原生管理员登录和virtual key。该路径保留AKS、Workload Identity、Entra-only PG/Redis、Key Vault、私有API/admin LB、Front Door和原生Spend Logs，但删除用户侧Entra代理、MFA、Conditional Access、代理guardrail和增强L3。admin只允许从批准私网访问，API只允许固定推理路径；不能把它写成与Entra路径等价。原生管理员使用独立`litellm-ui-password`，不复用或分发Master Key。
 
 配置示例默认使用保守值：
 
@@ -191,7 +192,7 @@ az vm identity remove --ids "$RUNNER_VM_RESOURCE_ID" \
 }
 ```
 
-Stage5的PG/Redis Entra-only和应用Workload Identity不属于可跳过的Stage7用户认证。不要把`entraMode=deferred`解释为允许密码数据库、Redis Key或匿名公网API。也不要删除Stage7后直接启用edge；当前Stage9流量路径依赖Stage7代理和企业认证。
+Stage5的PG/Redis Entra-only和应用Workload Identity不属于用户侧Stage7认证，native-auth也继续保留它们。不要把普通`entraMode=deferred`解释为允许密码数据库、Redis Key或匿名公网API；未显式选择并验证Stage6 `native-auth`时，不得删除Stage7后直接启用edge。native路径使用独立UI密码和virtual key，不允许匿名API。
 
 ## 4. 执行主机和配置
 
@@ -260,6 +261,7 @@ chmod 600 "local_execution/stage-REPLACE_STAGE-values.local.json"
 | 4 | `automatic-api-certificate` | 启用自动API证书；手工导入不选 |
 | 5 | `database-admin-identity` | 使用独立database UAMI作为PG管理员；无管理员组时选择 |
 | 5 | `legacy-master-key-salt` | 旧环境无显式Salt且已批准复用Master Key兼容路径时选择 |
+| 6 | `native-auth` | 不部署Stage7 Entra代理；使用私网原生admin登录和virtual key API |
 | 8 | `observability` | 加入可选collector |
 | 8 | `enhanced-l3` | 删除原生`contentAudit`并切换增强L3；不能与observability在同一次合并 |
 | 9 | `azure-dns` | 使用仓库自动发布Azure DNS |
@@ -283,7 +285,7 @@ chmod 600 "local_execution/stage-REPLACE_STAGE-values.local.json"
 | 3 | `parameters.platform`的ACR、Workspace、目标网络和AKS |
 | 4 | 模型账号、稳定角色命名、证书Vault、Runner目标DNS、私有入口及本地Cosign配置；自动证书为可选块 |
 | 5 | `stage5Data`、数据库迁移身份、Private DNS归属及Stage0备份引用/SHA256 |
-| 6 | `application`后端镜像digest和模型部署映射 |
+| 6 | `application`后端镜像digest和模型部署映射；可选原生认证模式/管理员用户名 |
 | 7 | `entra`、`proxy`和`entraMode=enabled` |
 | 8 | 可选原生观测collector；增强L3是单独替代方案 |
 | 9 | origin、edge；Azure DNS和最终release开关均为可选/后置块 |
@@ -1053,7 +1055,25 @@ az postgres flexible-server show --subscription "$SUBSCRIPTION_ID" \
   --config local_execution/customer.json --stage 6 --operation apply \
   --values local_execution/stage-6-values.local.json
 ```
-2. 计划并发布后端：
+
+选择原生认证时，保持`localExecution.features.entraMode=deferred`，在Stage6 values文件同时填写`REPLACE_NATIVE_ADMIN_USERNAME`（例如`gateway-admin`），并给两条命令都追加`--option native-auth`。该用户名不是秘密。apply后、运行Stage6 application前，重新plan/execute `stage5-backend-secrets`：计划中原Master/Salt必须为`keep`，仅新增`litellm-ui-password=generate`。execute生成随机密码、固定版本并刷新Stage5回执，不输出正文；若计划尝试导入/替换Master或Salt就停止。随后还要按当前revision刷新`stage5-schema-migrate`回执，确认`pendingMigrations=0`。
+
+由客户Key Vault管理员在Portal中打开后台Vault的`litellm-ui-password`当前版本，直接转存到客户批准的密码库，不把值复制到终端、工单、聊天、values或customer.json。Master Key继续不向任何人工用户或API调用方分发。当前自动化不提供UI密码轮换步骤；轮换须另立变更并重新绑定固定Secret版本。
+2. native路径先为当前配置重新plan/execute `stage4-private-ingress`：
+
+```bash
+.venv/bin/python -m local_execution \
+  --config local_execution/customer.json \
+  --step stage4-private-ingress --operation plan
+.venv/bin/python -m local_execution \
+  --config local_execution/customer.json \
+  --step stage4-private-ingress --operation execute \
+  --approved-plan-sha256 "REPLACE_STAGE4_PRIVATE_INGRESS_PLAN_SHA256"
+```
+
+新计划必须把两套Traefik上游改为`litellm.litellm.svc.cluster.local:4000`；API只允许六个固定POST推理路径和`GET /readyz`，admin保留私网UI。此时后端尚未发布，execute只验证TLS、双平面Host隔离、私有LB和源地址策略，并记录`backendRoutesVerified=false`。不得手工删除代理、改NetworkPolicy或复用旧Stage4哈希。Entra路径无需在此重复Stage4。
+
+3. 计划并发布后端：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -1065,9 +1085,9 @@ az postgres flexible-server show --subscription "$SUBSCRIPTION_ID" \
   --approved-plan-sha256 "REPLACE_STAGE6_APPLICATION_PLAN_SHA256"
 ```
 
-该步骤再次用本地Cosign公钥验证镜像签名，生成无密码PG/Redis/CSI配置，发布双副本、PDB、HPA和NetworkPolicy；不发布API/admin代理，也不切流量。
+该步骤再次用本地Cosign公钥验证镜像签名，生成无密码PG/Redis/CSI配置，发布双副本、PDB、HPA和NetworkPolicy；不切流量。Entra路径此时仍等待Stage7代理；native路径在LiteLLM rollout完成后在线验证API健康、API拒绝admin登录路径、admin登录页可达，并把`backendRoutesVerified=true`及当前Stage4回执哈希保存为Stage6 Azure回执。任一路由检查失败都使Stage6 execute失败。
 
-3. Runner VM验证：
+4. Runner VM验证：
 
 ```bash
 VERIFY_KUBECONFIG="$(mktemp)"
@@ -1082,9 +1102,32 @@ kubectl --kubeconfig "$VERIFY_KUBECONFIG" -n litellm get pdb,hpa,networkpolicy
 rm -f "$VERIFY_KUBECONFIG"
 ```
 
-通过条件：Ready副本等于Desired且至少2个；镜像是批准digest；Pod重建后会话/Redis行为正常；应用身份只能DML不能DDL；新版没有连接旧PG。完成副本故障、容量和模型调用实测后进入Stage7。
+通过条件：Ready副本等于Desired且至少2个；镜像是批准digest；Pod重建后会话/Redis行为正常；应用身份只能DML不能DDL；新版没有连接旧PG。
+
+5. native路径从批准私网浏览`https://llm-admin.<baseDomain>/fallback/login`，使用Stage6配置的用户名和客户密码库中的独立UI密码登录。登录后创建限定模型、预算和有效期的virtual key；API调用只使用该virtual key：
+
+```bash
+BASE_DOMAIN="$(jq -er '.baseDomain' local_execution/customer.json)"
+ENVIRONMENT_NAME="$(jq -er '.environment' local_execution/customer.json)"
+API_PRIVATE_IP="$(az deployment group show --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TARGET_RG" --name "llmgw-${ENVIRONMENT_NAME}-s4-private-ingress" \
+  --query properties.outputs.privateIngress.value.api.privateIpAddress --output tsv)"
+read -r -s -p 'LiteLLM virtual key: ' LITELLM_VIRTUAL_KEY
+printf '\n'
+curl --fail-with-body --silent --show-error \
+  --resolve "llm-api.${BASE_DOMAIN}:443:${API_PRIVATE_IP}" \
+  --header "Authorization: Bearer $LITELLM_VIRTUAL_KEY" \
+  --header 'Content-Type: application/json' \
+  --data '{"model":"coding","messages":[{"role":"user","content":"connectivity test"}]}' \
+  "https://llm-api.${BASE_DOMAIN}/v1/chat/completions"
+unset LITELLM_VIRTUAL_KEY
+```
+
+通过条件：错误密码拒绝；admin UI只从批准私网可达；virtual key正常调用且不能创建其他Key；缺Key、错误Key、管理路径和非批准API路径均拒绝。native路径随后跳过整个Stage7，直接进入Stage8；Entra路径继续下一节。
 
 ## 6. Stage7启用或延期
+
+`application.authentication.mode=native`时本节不适用，执行器会拒绝所有Stage7步骤；不要构建代理镜像或创建Entra UAMI来“占位”。
 
 若保持`entraMode=deferred`，在Stage6停止。可以提前执行`stage7-promote-proxy-image`准备镜像，但不能部署代理或发布后续流量。
 
@@ -1253,11 +1296,11 @@ Graph成功但Vault失败时先运行recover检查孤立凭据，不盲目重跑
 
 ## 7. Stage8
 
-一期默认使用原生Spend Logs。**执行身份：deploy负责可选观测基础设施和镜像，runtime负责应用发布。** Stage7必须完成，`entraMode=deferred`时执行器会阻止Stage8应用发布。
+一期默认使用原生Spend Logs。**执行身份：deploy负责可选观测基础设施和镜像，runtime负责应用发布。** Entra路径必须先完成Stage7；native路径显式跳过Stage7后可直接发布Stage8。普通`entraMode=deferred`且未选择native-auth时仍会被阻止。
 
 ### 7.1 原生Spend Logs路径
 
-1. Stage2已经配置`contentAudit`。不启用独立collector时直接跳到第3步。
+1. Stage2已经配置`contentAudit`。native认证路径只支持该原生Spend Logs方案，不支持`--option observability`或增强L3，直接跳到第3步。Entra路径不启用独立collector时也直接跳到第3步。
 2. 启用collector时，deploy身份导入固定digest、扫描并签名，再部署私有Application Insights/AMPLS相关资源：
 
 ```bash
@@ -1293,7 +1336,7 @@ unset COSIGN_PASSWORD
   --approved-plan-sha256 "REPLACE_STAGE8_OBSERVABILITY_PLAN_SHA256"
 ```
 
-3. runtime身份发布Stage8应用配置；该步骤会再次验证后端、代理及可选collector签名：
+3. runtime身份发布Stage8应用配置；Entra路径再次验证后端、代理及可选collector签名，native路径只验证后端签名并更新其Spend Logs配置：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -1318,7 +1361,7 @@ kubectl --kubeconfig "$VERIFY_KUBECONFIG" -n litellm get deployment otel-collect
 rm -f "$VERIFY_KUBECONFIG"
 ```
 
-通过条件：正常请求写入Spend Logs且正文范围符合政策；授权管理员可查、未授权主体不可查；过期清理和恢复边界已记录；可选collector双副本Ready且Azure Monitor收到脱敏遥测。
+通过条件：正常请求写入Spend Logs且正文范围符合政策；native管理员从私网UI可查、API调用方不可访问管理路径；过期清理和恢复边界已记录。Entra路径另验证授权管理员/未授权主体；可选collector仅适用于Entra路径。
 
 ### 7.2 增强L3替代路径
 
@@ -1385,11 +1428,13 @@ rm -f "$VERIFY_KUBECONFIG"
 
 ## 8. Stage9
 
-Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身份：deploy创建origin/edge，runtime绑定代理和修改Azure DNS。** `stage9-edge-bind`需要Stage7代理；Entra延期时只能准备origin和禁流量edge。
+Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身份：deploy创建origin/edge，runtime核验API入口绑定和修改Azure DNS。** Entra路径的`stage9-edge-bind`绑定Stage7 API代理；native路径核验受管API Traefik的固定推理路由、健康改写、私有LB和后端目标。普通Entra延期且未选择native-auth时只能准备origin和禁流量edge。
+
+禁流量准备只创建API入口的Private Link Service和默认Disabled的Front Door route，不会形成可访问的新网关。Front Door不承载admin域名；admin始终保留在私有入口。普通`entraMode=deferred`时API代理尚未部署，且Front Door endpoint/route保持Disabled，因此不能通过Front Door域名测试API；native路径可继续完成edge-bind，但在正式release前route同样不承载请求。
 
 ### 8.1 禁流量准备
 
-1. deploy仍需读取AKS节点RG中的内部LB；保留Stage4窗口的节点RG读取/部署权限。默认合并禁流量prepare；使用Azure DNS时追加`--option azure-dns`：
+1. deploy仍需读取AKS节点RG中的内部LB；保留Stage4窗口的节点RG读取/部署权限。默认合并禁流量prepare，只把`allowTrafficRelease`保持为false并保留客户当前的`entraMode`；使用Azure DNS时追加`--option azure-dns`：
 
 ```bash
 .venv/bin/python -m local_execution.merge_config \
@@ -1425,7 +1470,7 @@ Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身
   --approved-plan-sha256 "REPLACE_STAGE9_EDGE_PREPARE_PLAN_SHA256"
 ```
 
-4. runtime身份把实际Front Door ID绑定到API代理，但仍不启流量：
+4. Entra路径只有Stage7完成且`entraMode=enabled`时才把实际Front Door ID绑定到API代理。native路径必须执行同一步来核验并记录API Traefik合同；普通deferred路径跳过。本步仍不启流量：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -1437,13 +1482,45 @@ Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身
   --approved-plan-sha256 "REPLACE_STAGE9_EDGE_BIND_PLAN_SHA256"
 ```
 
-5. 检查origin部署输出、Private Link审批、源站TLS、错误Host拒绝、admin不进入Front Door，并运行实际客户端回归。此时生产DNS仍指向旧环境，edge route不能承载业务流量。
+5. 检查origin部署输出、Private Link请求/审批、禁用的route、WAF Detection、源站TLS、错误Host拒绝以及admin不进入Front Door。正式release前不运行Front Door实际客户端回归；Entra路径等待代理。native路径的业务router已经绑定实际Front Door ID，必须从批准私网同时执行带实际`X-Azure-FDID`的正例和无header的负例：
+
+```bash
+BASE_DOMAIN="$(jq -er '.baseDomain' local_execution/customer.json)"
+ENVIRONMENT_NAME="$(jq -er '.environment' local_execution/customer.json)"
+API_PRIVATE_IP="$(az deployment group show --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TARGET_RG" --name "llmgw-${ENVIRONMENT_NAME}-s4-private-ingress" \
+  --query properties.outputs.privateIngress.value.api.privateIpAddress --output tsv)"
+FRONT_DOOR_ID="$(az deployment group show --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TARGET_RG" --name "llmgw-${ENVIRONMENT_NAME}-s9-edge" \
+  --query properties.outputs.edge.value.profileId --output tsv)"
+read -r -s -p 'LiteLLM virtual key: ' LITELLM_VIRTUAL_KEY
+printf '\n'
+curl --fail-with-body --silent --show-error \
+  --resolve "llm-api.${BASE_DOMAIN}:443:${API_PRIVATE_IP}" \
+  --header "X-Azure-FDID: ${FRONT_DOOR_ID}" \
+  --header "Authorization: Bearer ${LITELLM_VIRTUAL_KEY}" \
+  --header 'Content-Type: application/json' \
+  --data '{"model":"coding","messages":[{"role":"user","content":"post-bind connectivity test"}]}' \
+  "https://llm-api.${BASE_DOMAIN}/v1/chat/completions"
+NO_FDID_STATUS="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --resolve "llm-api.${BASE_DOMAIN}:443:${API_PRIVATE_IP}" \
+  --header "Authorization: Bearer ${LITELLM_VIRTUAL_KEY}" \
+  --header 'Content-Type: application/json' \
+  --data '{"model":"coding","messages":[{"role":"user","content":"missing fdid negative test"}]}' \
+  "https://llm-api.${BASE_DOMAIN}/v1/chat/completions")"
+test "$NO_FDID_STATUS" = 404
+unset LITELLM_VIRTUAL_KEY FRONT_DOOR_ID
+```
+
+正例必须成功且实际调用批准模型；无header请求必须为404。此时生产DNS仍指向旧环境，edge route不能承载业务流量。
 
 ### 8.2 最终数据和发布批准
 
 当前没有自动化“最终停写并覆盖演练库”的动作。客户必须在批准维护窗口手工完成：旧入口停止新写入、排空请求、取得最终备份、选择干净最终目标库、恢复/迁移、用户/Team/Key/预算/模型配置对账以及新环境协议测试。未完成这些动作时不得继续。
 
-完成主手册第5节的最终停写、最终恢复、对账和回退批准后，在customer.json设置：
+完成主手册第5节的最终停写、最终恢复、对账和回退批准后，在customer.json设置。Entra路径保持`entraMode=enabled`；native路径保留现有`entraMode=deferred`，执行器依据`application.authentication.mode=native`允许发布：
+
+Entra路径：
 
 ```json
 "features": {
@@ -1453,7 +1530,17 @@ Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身
 "releaseReportPath": "temp/customer-private/stage9-release.json"
 ```
 
-报告必须符合当前Stage9 release校验器，绑定当前revision、Stage9配置哈希、Front Door ID、私有源站、phase、实际检查和批准人。文件只放受控且Git忽略的位置。
+native路径：
+
+```json
+"features": {
+  "entraMode": "deferred",
+  "allowTrafficRelease": true
+},
+"releaseReportPath": "temp/customer-private/stage9-release.json"
+```
+
+报告必须符合当前Stage9 release校验器，绑定当前revision、Stage9配置哈希、Front Door ID、私有源站、phase、实际检查和批准人。native路径填写`"authenticationMode":"native"`，并提供`native_virtual_key_acl`、`native_admin_password_login`和原生Spend Logs证据；不得沿用`entra_backend_acl`。文件只放受控且Git忽略的位置。
 
 推荐使用合并器打开最终发布开关；若前面使用Azure DNS，此处同时保留`--option azure-dns`：
 
@@ -1490,7 +1577,7 @@ deploy身份正式启用获批phase：
   --approved-plan-sha256 "REPLACE_STAGE9_DNS_PUBLISH_PLAN_SHA256"
 ```
 
-其他DNS提供商由客户DNS管理员执行等效变更，不修改脚本猜测API。切流后立即验证真实客户端、企业Token+vkey、错误率/延迟、PG连接、Redis、预算和Spend Logs。
+其他DNS提供商由客户DNS管理员执行等效变更，不修改脚本猜测API。切流后立即验证错误率/延迟、PG连接、Redis、预算和Spend Logs。Entra路径使用企业Token+vkey；native路径只使用virtual key，并确认Front Door拒绝缺Key、管理路径和非批准推理路径。admin继续通过私网LB访问，不创建Front Door admin route或公网DNS。
 
 ### 8.3 回退和旧环境逐步下线
 

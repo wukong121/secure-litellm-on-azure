@@ -9,10 +9,10 @@ from unittest.mock import Mock, patch
 
 import yaml
 
-from scripts.backend_manifest import application_settings, prepare_backend_documents, render_backend_manifest, verify_runtime_image
+from scripts.backend_manifest import application_authentication, application_settings, prepare_backend_documents, render_backend_manifest, verify_runtime_image
 from scripts.customer_migration import ROOT, stage_fingerprint, validate_config
 from scripts.migration_deploy import group_id
-from scripts.runtime_secrets import BACKEND_SECRETS
+from scripts.runtime_secrets import BACKEND_SECRETS, backend_secrets
 from scripts.native_audit import native_audit_settings, render_native_audit
 from LiteLLM.runtime.application import application_config
 from scripts.migration_runtime import check_application, publish
@@ -28,6 +28,51 @@ def backend_customer():
 
 
 class BackendManifestTests(unittest.TestCase):
+    def test_native_stage8_publishes_backend_only_with_spend_logs(self):
+        config = backend_customer()
+        config["application"]["authentication"] = {"mode": "native", "adminUsername": "gateway-admin"}
+        config["contentAudit"] = {"mode": "native", "retentionDays": 7, "contentPolicyAccepted": True}
+        platform = {"keyVaultName": "synthetic-backend", "workloadIdentityClientId": "33333333-3333-4333-8333-333333333333", "workloadIdentityPrincipalId": "44444444-4444-4444-8444-444444444444", "managedRedisHostName": "synthetic.westus.redis.azure.net"}
+        versions = {name: {"id": f"https://synthetic-backend.vault.azure.net/secrets/{name}/" + "a" * 32, "version": "a" * 32} for name in backend_secrets(config)}
+        source = render_backend_manifest(config, platform, versions, "synthetic.postgres.database.azure.com", "10.30.8.0/24")
+
+        def command(arguments, _directory, label, **_kwargs):
+            if label == "server-dry-run":
+                return "{}"
+            if label.startswith("live-") or label.startswith("audit-kube-") or label == "audit-window-check":
+                return ""
+            return ""
+
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl", "--namespace", "litellm"]), patch("scripts.backend_manifest.prepare_backend_documents", return_value=source), patch("scripts.migration_runtime.run_command", side_effect=command), patch("scripts.audit_runtime.AuditCluster.get", return_value=None):
+            path = Path(directory)
+            publish(config, 8, "application", "plan", "a" * 40, path, "")
+            review = json.loads((path / "runtime-review.json").read_text())
+            deployments = [item["metadata"]["name"] for item in review["desiredObjects"] if item["kind"] == "Deployment"]
+            self.assertEqual(deployments, ["litellm"])
+            runtime = yaml.safe_load(next(item for item in review["desiredObjects"] if item["kind"] == "ConfigMap" and "config.yaml" in item.get("data", {}))["data"]["config.yaml"])
+            self.assertTrue(runtime["general_settings"]["store_prompts_in_spend_logs"])
+
+    def test_native_authentication_routes_only_managed_private_ingress_to_backend(self):
+        config = backend_customer()
+        config["application"]["authentication"] = {"mode": "native", "adminUsername": "gateway-admin"}
+        platform = {"keyVaultName": "synthetic-backend", "workloadIdentityClientId": "33333333-3333-4333-8333-333333333333", "workloadIdentityPrincipalId": "44444444-4444-4444-8444-444444444444", "managedRedisHostName": "synthetic.westus.redis.azure.net"}
+        versions = {name: {"id": f"https://synthetic-backend.vault.azure.net/secrets/{name}/" + "a" * 32, "version": "a" * 32} for name in backend_secrets(config)}
+        documents = render_backend_manifest(config, platform, versions, "synthetic.postgres.database.azure.com", "10.30.8.0/24")
+        deployment = next(item for item in documents if item["kind"] == "Deployment")
+        environment = {item["name"]: item["value"] for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(application_authentication(config), {"mode": "native", "adminUsername": "gateway-admin"})
+        self.assertEqual(environment["LLMGW_GATEWAY_AUTH_MODE"], "native")
+        self.assertEqual(environment["LLMGW_NATIVE_ADMIN_USERNAME"], "gateway-admin")
+        policy = next(item for item in documents if item["kind"] == "NetworkPolicy" and item["metadata"]["name"] == "allow-litellm-required-traffic")
+        peers = policy["spec"]["ingress"][0]["from"]
+        self.assertEqual({peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] for peer in peers}, {"llm-api-ingress", "llm-admin-ingress"})
+        self.assertTrue(all(peer["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "llmgw-ingress" for peer in peers))
+        for authentication in ({"mode": "native"}, {"mode": "native", "adminUsername": "bad name"}, {"mode": "other"}):
+            invalid = copy.deepcopy(config)
+            invalid["application"]["authentication"] = authentication
+            with self.assertRaises(ValueError):
+                application_settings(invalid)
+
     def test_local_runtime_signature_uses_explicit_customer_public_key(self):
         config = backend_customer()
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.backend_manifest.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=json.dumps({"loginServer": "customerregistry.azurecr.io", "accessToken": "synthetic-acr-token"}))), patch("scripts.migration_runtime.run_command") as command:
@@ -62,7 +107,7 @@ class BackendManifestTests(unittest.TestCase):
 
     def test_native_logging_is_explicit_retained_and_does_not_mutate_stage6(self):
         config = backend_customer()
-        config["proxy"] = {"bindings": []}
+        config["application"]["authentication"] = {"mode": "native", "adminUsername": "gateway-admin"}
         config["contentAudit"] = {"mode": "native", "retentionDays": 14, "contentPolicyAccepted": True}
         source = [
             {"kind": "ConfigMap", "metadata": {"name": "litellm-config-old"}, "data": {"config.yaml": yaml.safe_dump({"general_settings": {"store_prompts_in_spend_logs": False}})}},
@@ -90,6 +135,15 @@ class BackendManifestTests(unittest.TestCase):
         validate_config(config, "test")
         self.assertEqual(stage_fingerprint(config, 5), stage_fingerprint(plain, 5))
         self.assertNotEqual(stage_fingerprint(config, 6), stage_fingerprint(plain, 6))
+        native = copy.deepcopy(config)
+        native["application"]["authentication"] = {"mode": "native", "adminUsername": "gateway-admin"}
+        self.assertEqual(stage_fingerprint(config, 3), stage_fingerprint(native, 3))
+        self.assertNotEqual(stage_fingerprint(config, 4), stage_fingerprint(native, 4))
+        self.assertNotEqual(stage_fingerprint(config, 5), stage_fingerprint(native, 5))
+        renamed = copy.deepcopy(native)
+        renamed["application"]["authentication"]["adminUsername"] = "another-admin"
+        self.assertEqual(stage_fingerprint(native, 4), stage_fingerprint(renamed, 4))
+        self.assertEqual(stage_fingerprint(native, 5), stage_fingerprint(renamed, 5))
 
     def test_publisher_uses_generated_documents_and_rejects_manual_override(self):
         config = backend_customer()
@@ -110,8 +164,33 @@ class BackendManifestTests(unittest.TestCase):
             self.assertTrue(json.loads((path / "runtime-summary.json").read_text())["applied"])
             with patch.dict("os.environ", {"MIGRATION_MANIFEST_YAML": "manual"}), self.assertRaisesRegex(ValueError, "cannot be mixed"):
                 publish(config, 6, "application", "plan", "a" * 40, path, "")
-            with self.assertRaisesRegex(ValueError, "requires proxy settings for Stage7"):
+            with self.assertRaisesRegex(ValueError, "approved authentication and audit configuration"):
                 publish(config, 7, "application", "plan", "a" * 40, path, "")
+
+    def test_native_stage6_verifies_private_ingress_after_backend_rollout(self):
+        config = backend_customer()
+        config["application"]["authentication"] = {"mode": "native", "adminUsername": "gateway-admin"}
+        platform = {"keyVaultName": "synthetic-backend", "workloadIdentityClientId": "33333333-3333-4333-8333-333333333333", "workloadIdentityPrincipalId": "44444444-4444-4444-8444-444444444444", "managedRedisHostName": "synthetic.westus.redis.azure.net"}
+        versions = {name: {"id": f"https://synthetic-backend.vault.azure.net/secrets/{name}/" + "a" * 32, "version": "a" * 32} for name in backend_secrets(config)}
+        documents = render_backend_manifest(config, platform, versions, "synthetic.postgres.database.azure.com", "10.30.8.0/24")
+        existing_proxy = {"value": False}
+        def command(arguments, _directory, label, **_kwargs):
+            if label == "existing-entra-proxy-llm-api-proxy" and existing_proxy["value"]:
+                return "{}"
+            return "{}" if label == "server-dry-run" else ""
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.connect_cluster", return_value=["kubectl"]), patch("scripts.backend_manifest.prepare_backend_documents", return_value=documents), patch("scripts.migration_runtime.run_command", side_effect=command) as execute, patch("scripts.private_ingress_runtime.verify_private_ingress_backends", return_value={"backendRoutesVerified": True}) as verify:
+            path = Path(directory)
+            publish(config, 6, "application", "plan", "a" * 40, path, "")
+            verify.assert_not_called()
+            digest = json.loads((path / "runtime-summary.json").read_text())["planSha256"]
+            publish(config, 6, "application", "execute", "a" * 40, path, digest)
+            verify.assert_called_once()
+            rollout = next(index for index, call in enumerate(execute.call_args_list) if "rollout" in call.args[0])
+            self.assertLess(rollout, len(execute.call_args_list))
+            self.assertTrue(json.loads((path / "runtime-summary.json").read_text())["backendRoutesVerified"])
+            existing_proxy["value"] = True
+            with self.assertRaisesRegex(ValueError, "explicitly migrate existing Entra proxy"):
+                publish(config, 6, "application", "plan", "a" * 40, path, "")
     def test_receipts_and_image_signature_are_bound_before_rendering(self):
         config = backend_customer()
         config["parameters"]["platform"]["stage4Network"]["privateEndpointSubnetName"] = "snet-private-endpoints"

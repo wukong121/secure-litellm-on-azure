@@ -6,7 +6,7 @@ from uuid import UUID
 import yaml
 
 from scripts.customer_migration import require
-from scripts.runtime_secrets import BACKEND_SECRETS
+from scripts.runtime_secrets import backend_secrets
 
 
 def render_backend_access(config, platform, versions):
@@ -14,9 +14,10 @@ def render_backend_access(config, platform, versions):
     require(UUID(client_id).int != 0 and UUID(platform["workloadIdentityPrincipalId"]).int != 0, "Backend Workload Identity client and principal IDs are required")
     vault = platform["keyVaultName"]
     require(re.fullmatch(r"[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]", vault) is not None, "Invalid backend Vault name")
-    require(set(versions) == set(BACKEND_SECRETS), "Both initialized backend secret versions are required")
+    required = backend_secrets(config)
+    require(set(versions) == set(required), "All required initialized backend secret versions are required")
     objects = []
-    for name, alias in BACKEND_SECRETS.items():
+    for name, alias in required.items():
         version = versions[name]["version"]
         require(re.fullmatch(r"[0-9a-f]{32}", version) is not None, "Backend CSI must bind a concrete verified secret version")
         require(versions[name]["id"].lower() == f"https://{vault}.vault.azure.net/secrets/{name}/{version}".lower(), "Secret version belongs to a different Vault or name")

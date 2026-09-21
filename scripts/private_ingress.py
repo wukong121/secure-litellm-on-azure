@@ -1,5 +1,6 @@
 """Render isolated Traefik file-provider gateways; never watch application Secrets."""
 
+import copy
 import ipaddress
 import hashlib
 import json
@@ -11,6 +12,21 @@ import yaml
 
 from scripts.customer_migration import ROOT, require
 from scripts.render_stage7_domain import domain_hosts
+
+
+NATIVE_API_PATHS = ("/chat/completions", "/v1/chat/completions", "/responses", "/v1/responses", "/embeddings", "/v1/embeddings")
+
+
+def native_api_rule(host, front_door_id=None):
+    path_rule = " || ".join(f"Path(`{path}`)" for path in NATIVE_API_PATHS)
+    rule = f"Host(`{host}`) && Method(`POST`) && ({path_rule})"
+    if front_door_id is not None:
+        rule += f" && HeaderRegexp(`X-Azure-FDID`, `(?i)^{front_door_id}$`)"
+    return rule
+
+
+def native_health_rule(host):
+    return f"Host(`{host}`) && Method(`GET`) && Path(`/readyz`)"
 
 
 def ingress_settings(config):
@@ -71,25 +87,62 @@ def source_ranges(values):
     return sorted(set(networks))
 
 
+def preserve_native_front_door_binding(config, documents, current_config_map):
+    result = copy.deepcopy(documents)
+    if not current_config_map:
+        return result
+    current = yaml.safe_load(current_config_map.get("data", {}).get("routes.yaml", ""))
+    current_rule = (current or {}).get("http", {}).get("routers", {}).get("api", {}).get("rule", "")
+    matches = re.findall(r"HeaderRegexp\(`X-Azure-FDID`,\s*`\(\?i\)\^([a-fA-F0-9-]+)\$`\)", current_rule)
+    require(len(matches) <= 1, "Existing native API ingress has ambiguous Front Door bindings")
+    if not matches:
+        return result
+    from uuid import UUID
+    identifier = matches[0]
+    require(UUID(identifier).int != 0, "Existing native API ingress has an invalid Front Door binding")
+    config_map = next(item for item in result if item["kind"] == "ConfigMap")
+    deployment = next(item for item in result if item["kind"] == "Deployment")
+    dynamic = yaml.safe_load(config_map["data"]["routes.yaml"])
+    require("X-Azure-FDID" not in dynamic["http"]["routers"]["api"]["rule"], "Rendered native API ingress unexpectedly contains a Front Door binding")
+    dynamic["http"]["routers"]["api"]["rule"] = native_api_rule(domain_hosts(config["baseDomain"])["api"], identifier)
+    config_map["data"]["routes.yaml"] = yaml.safe_dump(dynamic, sort_keys=False)
+    annotations = deployment["spec"]["template"]["metadata"].setdefault("annotations", {})
+    annotations["llmgw/front-door-id"] = identifier
+    annotations["llmgw/routes-sha256"] = hashlib.sha256(json.dumps(dynamic, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return result
+
+
 def render_ingress(config, plane, image, ranges):
     require(plane in {"api", "admin"}, "Unknown ingress plane")
     require(re.fullmatch(r"[a-z0-9./_-]+@sha256:[0-9a-f]{64}", image or "") is not None, "Ingress image must be digest pinned")
     hosts = domain_hosts(config["baseDomain"])
+    from scripts.backend_manifest import application_authentication
+    authentication = application_authentication(config)
+    native = authentication["mode"] == "native"
     name = f"llm-{plane}-ingress"
     labels = {"app.kubernetes.io/name": "llmgw-ingress", "app.kubernetes.io/component": "controller", "app.kubernetes.io/managed-by": "llmgw-workflow", "plane": plane}
     network = config["parameters"]["platform"]["stage4Network"]
-    allowed = source_ranges(ranges)
+    allowed = source_ranges([*ranges, network["ingressSubnetPrefix"]] if plane == "api" else ranges)
     metadata = {"name": name, "namespace": name, "labels": labels}
+    upstream = "http://litellm.litellm.svc.cluster.local:4000" if native else f"http://llm-{plane}-proxy.litellm.svc.cluster.local:8080"
+    routers = {plane: {"rule": f"Host(`{hosts[plane]}`)", "entryPoints": ["websecure"], "service": plane, "tls": {}}}
+    middlewares = {}
+    if native and plane == "api":
+        routers[plane]["rule"] = native_api_rule(hosts[plane])
+        routers["api-health"] = {"rule": native_health_rule(hosts[plane]), "entryPoints": ["websecure"], "service": plane, "middlewares": ["api-health-path"], "tls": {}}
+        middlewares["api-health-path"] = {"replacePath": {"path": "/health/readiness"}}
     dynamic = {
         "http": {
-            "routers": {plane: {"rule": f"Host(`{hosts[plane]}`)", "entryPoints": ["websecure"], "service": plane, "tls": {}}},
-            "services": {plane: {"loadBalancer": {"servers": [{"url": f"http://llm-{plane}-proxy.litellm.svc.cluster.local:8080"}], "passHostHeader": True}}},
+            "routers": routers,
+            "services": {plane: {"loadBalancer": {"servers": [{"url": upstream}], "passHostHeader": True}}},
         },
         "tls": {
             "certificates": [{"certFile": "/certs/tls.crt", "keyFile": "/certs/tls.key"}],
             "options": {"default": {"minVersion": "VersionTLS12", "sniStrict": True}},
         },
     }
+    if middlewares:
+        dynamic["http"]["middlewares"] = middlewares
     arguments = [
         "--entrypoints.websecure.address=:8443", "--entrypoints.websecure.http.tls=true",
         "--entrypoints.websecure.transport.respondingtimeouts.readtimeout=600s",
@@ -126,7 +179,7 @@ def render_ingress(config, plane, image, ranges):
             "ingress": [{"from": [{"ipBlock": {"cidr": cidr}} for cidr in allowed], "ports": [{"protocol": "TCP", "port": 8443}]}],
             "egress": [
                 {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}], "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
-                {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "litellm"}}, "podSelector": {"matchLabels": {"app.kubernetes.io/name": "entra-auth-proxy", "plane": plane}}}], "ports": [{"protocol": "TCP", "port": 8080}]},
+                {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "litellm"}}, "podSelector": {"matchLabels": {"app.kubernetes.io/name": "litellm", "app.kubernetes.io/component": "gateway"} if native else {"app.kubernetes.io/name": "entra-auth-proxy", "plane": plane}}}], "ports": [{"protocol": "TCP", "port": 4000 if native else 8080}]},
             ],
         }},
     ]

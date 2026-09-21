@@ -139,7 +139,10 @@ resource waf 'Microsoft.Network/frontDoorWebApplicationFirewallPolicies@2024-02-
           enabledState: 'Enabled'
           ruleType: 'MatchRule'
           action: 'Block'
-          matchConditions: [{ matchVariable: 'RequestMethod', operator: 'Equal', negateCondition: true, matchValue: ['POST'] }]
+          matchConditions: [
+            { matchVariable: 'RequestMethod', operator: 'Equal', negateCondition: true, matchValue: ['POST'] }
+            { matchVariable: 'RequestUri', operator: 'Equal', negateCondition: true, matchValue: ['/readyz'] }
+          ]
         }
         {
           name: 'RateLimitApi'

@@ -25,6 +25,24 @@ def evidence_config(phase="canary"):
 
 
 class Stage9ReleaseTests(unittest.TestCase):
+    def test_native_authentication_release_requires_virtual_key_and_private_admin_login(self):
+        config = evidence_config()
+        config["authenticationMode"] = "native"
+        with self.assertRaisesRegex(ValueError, "native_admin_password_login|native_virtual_key_acl"):
+            validate_release(config)
+        required = release_checks(config)
+        self.assertNotIn("entra_backend_acl", required)
+        self.assertIn("native_virtual_key_acl", required)
+        self.assertIn("native_admin_password_login", required)
+        config["checks"] = {name: {"passed": True, "observedAt": datetime.now(timezone.utc).isoformat(), "report": "synthetic://native-auth-contract"} for name in required}
+        validate_release(config)
+        with self.assertRaisesRegex(ValueError, "managed customer-runtime"):
+            generate(config, ROOT / "temp")
+        invalid = copy.deepcopy(config)
+        invalid["authenticationMode"] = "unsupported"
+        with self.assertRaisesRegex(ValueError, "authenticationMode"):
+            validate_release(invalid)
+
     def test_native_release_requires_real_native_checks_not_l3_placeholders(self):
         config = evidence_config()
         config.update(auditMode="native", telemetryEnabled=False)

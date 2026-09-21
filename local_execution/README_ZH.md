@@ -232,7 +232,7 @@ chmod 600 local_execution/customer.json
 | `localExecution.postgresRestoreImage` | 与旧PG大版本匹配的完整`postgres@sha256:...` |
 | `localExecution.executionHost.virtualNetworkId` | Runner部署输出`managementVnetId`；复用子网模式从`runnerSubnetId`去掉`/subnets/<名称>` |
 | `localExecution.authentication` | 默认复用现有`az login`；Stage2–9可按动作选择UAMI Client ID |
-| `localExecution.features` | `entraMode`决定启用或延期Stage7；`allowTrafficRelease`默认false |
+| `localExecution.features` | `entraMode`决定启用或延期Entra Stage7；Stage6显式选择`--option native-auth`时可保留deferred并跳过Stage7；`allowTrafficRelease`默认false |
 
 ### 4.2 旧日志Workspace怎样填写
 

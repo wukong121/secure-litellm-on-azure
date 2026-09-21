@@ -7,10 +7,10 @@ from unittest.mock import patch
 
 import yaml
 
-from LiteLLM.runtime.application import load_backend_keys
+from LiteLLM.runtime.application import configure_gateway_authentication, load_backend_keys
 from scripts.backend_access import render_backend_access
 from scripts.customer_migration import ROOT, parameters_for
-from scripts.runtime_secrets import BACKEND_SECRETS
+from scripts.runtime_secrets import BACKEND_SECRETS, NATIVE_UI_SECRET, backend_secrets
 from tests.test_customer_migration import customer_config
 
 
@@ -60,3 +60,29 @@ class BackendAccessTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 load_backend_keys(root)
             self.assertNotIn("LITELLM_MASTER_KEY", os.environ)
+
+    def test_native_login_uses_mounted_master_key_without_a_manifest_password(self):
+        values = {"LITELLM_MASTER_KEY": "synthetic-master", "LITELLM_SALT_KEY": "synthetic-salt", "UI_PASSWORD": "synthetic-ui-password"}
+        with patch.dict(os.environ, {"LLMGW_GATEWAY_AUTH_MODE": "native", "LLMGW_NATIVE_ADMIN_USERNAME": "gateway-admin"}, clear=True):
+            configure_gateway_authentication(values)
+            self.assertEqual(os.environ["UI_USERNAME"], "gateway-admin")
+            self.assertEqual(os.environ["UI_PASSWORD"], "synthetic-ui-password")
+        for environment in (
+            {"LLMGW_GATEWAY_AUTH_MODE": "native", "LLMGW_NATIVE_ADMIN_USERNAME": "bad name"},
+            {"LLMGW_GATEWAY_AUTH_MODE": "native", "LLMGW_NATIVE_ADMIN_USERNAME": "gateway-admin", "UI_PASSWORD": "other"},
+            {"LLMGW_GATEWAY_AUTH_MODE": "entra", "LLMGW_NATIVE_ADMIN_USERNAME": "gateway-admin"},
+            {"LLMGW_GATEWAY_AUTH_MODE": "entra", "UI_PASSWORD": "hidden-password"},
+        ):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True), self.assertRaises(ValueError):
+                configure_gateway_authentication(values)
+
+    def test_native_csi_adds_dedicated_ui_password_without_changing_entra(self):
+        platform = {"workloadIdentityClientId": "33333333-3333-4333-8333-333333333333", "workloadIdentityPrincipalId": "44444444-4444-4444-8444-444444444444", "keyVaultName": "synthetic-backend"}
+        native = customer_config()
+        native["application"] = {"authentication": {"mode": "native", "adminUsername": "gateway-admin"}}
+        required = backend_secrets(native)
+        versions = {name: {"version": "a" * 32, "id": f"https://synthetic-backend.vault.azure.net/secrets/{name}/" + "a" * 32} for name in required}
+        result = render_backend_access(native, platform, versions)
+        provider = result["resources"][1]
+        objects = [yaml.safe_load(item) for item in yaml.safe_load(provider["spec"]["parameters"]["objects"])["array"]]
+        self.assertEqual({item["objectAlias"] for item in objects}, set(BACKEND_SECRETS.values()) | set(NATIVE_UI_SECRET.values()))

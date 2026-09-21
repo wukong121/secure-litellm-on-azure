@@ -18,9 +18,21 @@ from scripts.backend_access import render_backend_access
 from scripts.customer_migration import ROOT, configured, private_write, require, stage_fingerprint
 
 
+def application_authentication(config):
+    authentication = config.get("application", {}).get("authentication", {"mode": "entra"})
+    require(isinstance(authentication, dict) and authentication.get("mode") in {"entra", "native"}, "Application authentication mode must be entra or native")
+    if authentication["mode"] == "entra":
+        require(set(authentication) == {"mode"}, "Entra application authentication does not accept native credentials")
+    else:
+        require(set(authentication) == {"mode", "adminUsername"}, "Native application authentication requires adminUsername")
+        require(isinstance(authentication["adminUsername"], str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{2,127}", authentication["adminUsername"]) is not None, "Native admin username must be a plain identifier")
+    return authentication
+
+
 def application_settings(config):
     settings = config.get("application", {})
-    require(isinstance(settings, dict) and set(settings) == {"backendImage", "models"}, "application requires backendImage and models")
+    require(isinstance(settings, dict) and {"backendImage", "models"}.issubset(settings) and not set(settings) - {"backendImage", "models", "authentication"}, "application requires backendImage and models")
+    application_authentication(config)
     registry = config["parameters"]["platform"]["containerRegistryName"].lower()
     require(isinstance(settings["backendImage"], str) and re.fullmatch(re.escape(registry) + r"\.azurecr\.io/[a-z0-9][a-z0-9/._-]*@sha256:[0-9a-f]{64}", settings["backendImage"]) is not None, "Backend image must pin a digest in the approved private ACR")
     require(isinstance(settings["models"], list) and bool(settings["models"]), "At least one approved model deployment is required")
@@ -40,6 +52,7 @@ def application_settings(config):
 
 def render_backend_manifest(config, platform, versions, host, endpoint_subnet):
     settings = application_settings(config)
+    authentication = application_authentication(config)
     access = render_backend_access(config, platform, versions)
     database = config["parameters"]["platform"]["stage5Data"]["postgresqlDatabaseName"]
     require(re.fullmatch(r"[a-z0-9-]+\.postgres\.database\.azure\.com", host) is not None and re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", database) is not None, "Invalid deployed database host or name")
@@ -68,14 +81,20 @@ def render_backend_manifest(config, platform, versions, host, endpoint_subnet):
     deployment["spec"]["template"]["metadata"]["labels"]["azure.workload.identity/use"] = "true"
     container = pod["containers"][0]
     container["image"] = settings["backendImage"]
-    container["env"] = [{"name": name, "value": value} for name, value in {"LLMGW_BACKEND_SECRETS_DIR": "/mnt/backend-secrets", "AZURE_DATABASE_URL_TEMPLATE": database_template, "REDIS_HOST": redis, "REDIS_PORT": "10000", "REDIS_USERNAME": platform["workloadIdentityPrincipalId"], "STORE_MODEL_IN_DB": "false"}.items()]
+    environment = {"LLMGW_BACKEND_SECRETS_DIR": "/mnt/backend-secrets", "LLMGW_GATEWAY_AUTH_MODE": authentication["mode"], "AZURE_DATABASE_URL_TEMPLATE": database_template, "REDIS_HOST": redis, "REDIS_PORT": "10000", "REDIS_USERNAME": platform["workloadIdentityPrincipalId"], "STORE_MODEL_IN_DB": "false"}
+    if authentication["mode"] == "native":
+        environment["LLMGW_NATIVE_ADMIN_USERNAME"] = authentication["adminUsername"]
+    container["env"] = [{"name": name, "value": value} for name, value in environment.items()]
     container["lifecycle"]["preStop"]["exec"]["command"] = ["/bin/sh", "-c", "sleep 30"]
     container["volumeMounts"].extend(copy.deepcopy(access["deploymentPatch"]["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]))
     pod["volumes"].extend(copy.deepcopy(access["deploymentPatch"]["spec"]["template"]["spec"]["volumes"]))
     pod["volumes"][0]["configMap"]["name"] = config_name
     policies = list(yaml.safe_load_all((ROOT / "deploy/components/stage4-network/networkpolicy.yaml").read_text()))
     traffic = policies[1]["spec"]
-    traffic["ingress"] = [{"from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "entra-auth-proxy", "plane": plane}}} for plane in ("api", "admin")], "ports": [{"protocol": "TCP", "port": 4000}]}]
+    if authentication["mode"] == "native":
+        traffic["ingress"] = [{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": f"llm-{plane}-ingress"}}, "podSelector": {"matchLabels": {"app.kubernetes.io/name": "llmgw-ingress", "app.kubernetes.io/component": "controller", "plane": plane}}} for plane in ("api", "admin")], "ports": [{"protocol": "TCP", "port": 4000}]}]
+    else:
+        traffic["ingress"] = [{"from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "entra-auth-proxy", "plane": plane}}} for plane in ("api", "admin")], "ports": [{"protocol": "TCP", "port": 4000}]}]
     traffic["egress"][1]["to"][0]["ipBlock"]["cidr"] = endpoint_subnet
     documents = [yaml.safe_load((ROOT / "deploy/base" / name).read_text()) for name in ("namespace.yaml", "service.yaml", "pdb.yaml")]
     documents.extend([*access["resources"], config_map, deployment, *policies, yaml.safe_load((ROOT / "deploy/components/stage6-ha/hpa.yaml").read_text())])

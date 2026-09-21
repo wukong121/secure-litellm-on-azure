@@ -339,6 +339,8 @@ AZURE_DATABASE_URL_TEMPLATE是后续应用清单生成器应从部署输出生�
 
 新增application仅改变Stage6及之后指纹，不使Stage5回执失效；proxy/entra仅影响Stage7及之后，auditRuntime仅影响Stage8及之后。配置后不得同时提供MIGRATION_MANIFEST_YAML。Stage7代理按下一节自动生成；Stage8审计专用清单按下文显式配置生成，不可删除配置绕过尚未完成的集成验收。真实Redis续期/CSI/模型权限和负载仍需客户隔离环境测试。
 
+客户无法批准Microsoft Graph应用权限、且实施方也不能在同等租户条件下验证时，可在Stage6显式选择`application.authentication.mode=native`。该路径不部署Stage7：后台Vault新增独立随机`litellm-ui-password`，admin通过批准私网LB使用用户名/密码登录，API通过Front Door且只接受LiteLLM virtual key；Master Key不向人工用户分发。现有AKS Workload Identity、Entra-only PostgreSQL/Redis、Key Vault、API/admin双LB和原生Spend Logs保留。该路径不包含Entra MFA/Conditional Access、代理guardrail、增强L3或代理collector，必须使用其专属入口、virtual-key、私网admin和Stage9证据，不能把本节Stage7验收结果套用过去。完整命令见[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md#stage6发布新litellm后端)。
+
 ### Stage7代理身份基础设施
 
 proxy-foundation从平台配置及databaseAccess派生参数，创建API/admin各自UAMI、AKS联邦、独立私有Vault、PE/DNS、诊断和删除锁，自动输出proxyFoundation。各pod身份只能读取本平面Vault；迁移初始化身份在两个Vault获得Secrets Officer，不能把它用于代理pod。默认联邦分别绑定litellm中的llm-api-proxy和llm-admin-proxy。

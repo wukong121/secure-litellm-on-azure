@@ -1,12 +1,16 @@
 import json
+import copy
+import http.client
 import os
 import socket
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
 from unittest.mock import patch
@@ -18,7 +22,7 @@ from cryptography.x509.oid import NameOID
 import yaml
 
 from scripts.customer_migration import ROOT, private_write
-from scripts.private_ingress import certificate_material, render_ingress
+from scripts.private_ingress import certificate_material, preserve_native_front_door_binding, render_ingress
 from scripts.private_ingress_runtime import verify_endpoint
 from tests.test_private_ingress_runtime import ingress_config
 
@@ -80,3 +84,97 @@ class PrivateIngressContainerTests(unittest.TestCase):
                     self.assertEqual(set(routes["http"]["routers"]), {plane})
                 finally:
                     self.docker("rm", "--force", container)
+
+    def test_native_api_requires_front_door_header_only_on_inference_routes(self):
+        config = ingress_config()
+        config["application"] = {"authentication": {"mode": "native", "adminUsername": "gateway-admin"}}
+        lock = json.loads((ROOT / "deploy/private-ingress-image.json").read_text())
+        image = lock["source"] + "@" + lock["digest"]
+        network = "llmgw-native-" + uuid4().hex
+        self.docker("network", "create", "--internal", network)
+        self.addCleanup(self.docker, "network", "rm", network)
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory:
+            root = Path(directory)
+            root.chmod(0o755)
+            (root / "dynamic").mkdir(mode=0o755)
+            (root / "certs").mkdir(mode=0o755)
+            host = "llm-api.customer.invalid"
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+            now = datetime.now(timezone.utc)
+            certificate = x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(days=1)).not_valid_after(now + timedelta(days=30)).add_extension(x509.SubjectAlternativeName([x509.DNSName(host)]), critical=False).sign(key, hashes.SHA256())
+            certificate_pem = certificate.public_bytes(serialization.Encoding.PEM).decode()
+            private_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+            documents = render_ingress(config, "api", image, ["10.30.0.0/16"])
+            current = copy.deepcopy(next(item for item in documents if item["kind"] == "ConfigMap"))
+            identifier = "11111111-1111-4111-8111-111111111111"
+            dynamic = yaml.safe_load(current["data"]["routes.yaml"])
+            dynamic["http"]["routers"]["api"]["rule"] += f" && HeaderRegexp(`X-Azure-FDID`, `(?i)^{identifier}$`)"
+            current["data"]["routes.yaml"] = yaml.safe_dump(dynamic, sort_keys=False)
+            documents = preserve_native_front_door_binding(config, documents, current)
+            objects = {document["kind"]: document for document in documents}
+            backend_requests = []
+            class BackendHandler(BaseHTTPRequestHandler):
+                def respond(self, status):
+                    backend_requests.append((self.command, self.path, self.headers.get("Host")))
+                    body = f"{self.command} {self.path} host={self.headers.get('Host')}".encode("ascii")
+                    self.send_response(status)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def do_GET(self):
+                    self.respond(200)
+
+                def do_POST(self):
+                    self.respond(201)
+
+                def log_message(self, _format, *_arguments):
+                    pass
+
+            network_state = json.loads(self.docker("network", "inspect", network))[0]
+            gateway = network_state["IPAM"]["Config"][0]["Gateway"]
+            backend = ThreadingHTTPServer((gateway, 0), BackendHandler)
+            backend_thread = threading.Thread(target=backend.serve_forever, daemon=True)
+            backend_thread.start()
+            routes = yaml.safe_load(objects["ConfigMap"]["data"]["routes.yaml"])
+            routes["http"]["services"]["api"]["loadBalancer"]["servers"] = [{"url": f"http://{gateway}:{backend.server_port}"}]
+            objects["ConfigMap"]["data"]["routes.yaml"] = yaml.safe_dump(routes, sort_keys=False)
+            for path, value in ((root / "dynamic/routes.yaml", objects["ConfigMap"]["data"]["routes.yaml"]), (root / "certs/tls.crt", certificate_pem), (root / "certs/tls.key", private_pem)):
+                private_write(path, value)
+                path.chmod(0o644)
+            container = "llmgw-native-" + uuid4().hex
+            arguments = objects["Deployment"]["spec"]["template"]["spec"]["containers"][0]["args"]
+            self.docker("run", "--detach", "--name", container, "--network", network, "--user", "65532:65532", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "--mount", f"type=bind,src={root / 'dynamic'},dst=/dynamic,readonly", "--mount", f"type=bind,src={root / 'certs'},dst=/certs,readonly", image, *arguments)
+            try:
+                address = (json.loads(self.docker("inspect", container))[0]["NetworkSettings"]["Networks"][network]["IPAddress"], 8443)
+                context = ssl.create_default_context(cadata=certificate_pem)
+                deadline = time.monotonic() + 20
+                while True:
+                    try:
+                        with socket.create_connection(address, timeout=1) as connection, context.wrap_socket(connection, server_hostname=host):
+                            break
+                    except (OSError, ssl.SSLError):
+                        self.assertLess(time.monotonic(), deadline, "Native Traefik config did not become ready")
+
+                def response(method, path, headers=None):
+                    headers = headers or {}
+                    with socket.create_connection(address, timeout=5) as connection, context.wrap_socket(connection, server_hostname=host) as secured:
+                        lines = [f"{method} {path} HTTP/1.1", f"Host: {host}", "Content-Length: 0", *[f"{key}: {value}" for key, value in headers.items()], "Connection: close", "", ""]
+                        secured.sendall("\r\n".join(lines).encode("ascii"))
+                        response = http.client.HTTPResponse(secured)
+                        response.begin()
+                        return response.status, response.read().decode("ascii")
+
+                self.assertEqual(response("POST", "/v1/chat/completions")[0], 404)
+                self.assertEqual(response("POST", "/v1/chat/completions", {"X-Azure-FDID": identifier}), (201, f"POST /v1/chat/completions host={host}"))
+                self.assertEqual(response("GET", "/v1/chat/completions", {"X-Azure-FDID": identifier})[0], 404)
+                self.assertEqual(response("POST", "/key/generate", {"X-Azure-FDID": identifier})[0], 404)
+                self.assertEqual(response("GET", "/readyz"), (200, f"GET /health/readiness host={host}"))
+                self.assertEqual(backend_requests, [("POST", "/v1/chat/completions", host), ("GET", "/health/readiness", host)])
+            finally:
+                self.docker("rm", "--force", container)
+                backend.shutdown()
+                backend.server_close()
+                backend_thread.join(timeout=5)

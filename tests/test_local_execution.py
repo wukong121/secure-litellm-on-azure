@@ -338,7 +338,7 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertEqual(local_operation("monitoring", "apply"), "apply")
 
     def test_entra_deferral_blocks_identity_and_traffic_not_preparation(self):
-        _config, settings = self.prepared()
+        config, settings = self.prepared()
         settings["features"] = {"entraMode": "deferred", "allowTrafficRelease": False}
         for step in ("stage7-entra-apps", "stage8-application", "stage9-edge-release", "stage9-dns-publish"):
             with self.subTest(step=step), self.assertRaisesRegex(ValueError, "Entra is deferred"):
@@ -346,6 +346,19 @@ class LocalExecutionTests(unittest.TestCase):
         enforce_local_policy(settings, "stage9-edge-prepare")
         enforce_local_policy(settings, "stage7-promote-proxy-image")
         enforce_local_policy(settings, "stage9-dns-rollback")
+        config["parameters"]["platform"]["azureOpenAIConnections"] = [{"alias": "primary", "accountName": "synthetic-model"}]
+        config["parameters"]["platform"]["stage5Data"] = {"postgresqlDatabaseName": "litellm"}
+        config["application"] = {"backendImage": "synthetic.azurecr.io/litellm@sha256:" + "a" * 64, "models": [{"modelGroup": "coding", "connectionAlias": "primary", "deploymentName": "model", "id": "primary-coding", "apiVersion": "v1"}], "authentication": {"mode": "native", "adminUsername": "gateway-admin"}}
+        for step in ("stage7-promote-proxy-image", "stage7-entra-apps", "stage7-application"):
+            with self.subTest(native_step=step), self.assertRaisesRegex(ValueError, "Native gateway authentication"):
+                enforce_local_policy(settings, step, config)
+        for step in ("stage8-application", "stage9-edge-bind", "stage9-edge-release", "stage9-dns-publish"):
+            if step in {"stage9-edge-release", "stage9-dns-publish"}:
+                settings["features"]["allowTrafficRelease"] = True
+            enforce_local_policy(settings, step, config)
+        settings["features"]["entraMode"] = "enabled"
+        with self.assertRaisesRegex(ValueError, "requires localExecution.features.entraMode=deferred"):
+            enforce_local_policy(settings, "stage8-application", config)
 
     def test_local_operation_sanitizes_ambient_manifest_and_ingress_overrides(self):
         from local_execution.runner import local_operation_environment
@@ -521,6 +534,7 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertIn("legacyMasterKeySaltCompatibility", stage5)
         self.assertIn("separateDatabaseAdminIdentity", stage5)
         self.assertIn("application", staged["stages"]["6"]["customerConfig"])
+        self.assertEqual(staged["stages"]["6"]["nativeAuthentication"]["customerConfig"]["application"]["authentication"]["mode"], "native")
         self.assertEqual(set(staged["stages"]["7"]["customerConfig"]), {"entra", "proxy"})
         self.assertEqual(staged["stages"]["7"]["localExecutionMerge"]["features"]["entraMode"], "enabled")
         self.assertEqual(set(staged["stages"]["7"]["localExecutionMerge"]["authentication"]), {"entraBootstrap", "entraAccess"})
@@ -528,11 +542,14 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertIn("enhancedL3Alternative", staged["stages"]["8"])
         self.assertEqual(staged["stages"]["8"]["enhancedL3Alternative"]["removeCustomerConfigKeysBeforeMerge"], ["contentAudit"])
         self.assertEqual(set(staged["stages"]["9"]["customerConfig"]["parameters"]), {"origin", "edge"})
+        self.assertEqual(staged["stages"]["9"]["localExecutionForPrepare"]["features"], {"allowTrafficRelease": False})
         self.assertTrue(staged["stages"]["9"]["localExecutionForApprovedRelease"]["features"]["allowTrafficRelease"])
         for dependency in ("-r ../requirements.txt", "acme==5.8.0", "dnspython==2.8.0", "josepy==2.2.0"):
             self.assertIn(dependency, requirements)
         self.assertIn("local_execution/requirements.txt", guide)
         for value in ("BACKEND_IMAGE_SUMMARY", "BACKEND_IMAGE_PREFIX", "BACKEND_DIGEST", ".signatureVerified == true", "CURRENT_REVISION=\"$(git rev-parse HEAD)\"", "${BACKEND_IMAGE##*@sha256:}", "REPLACE_BUILT_64_HEX_DIGEST"):
+            self.assertIn(value, later_guide)
+        for value in ("--option native-auth", "仅新增`litellm-ui-password=generate`", "Master Key继续不向任何人工用户", "--resolve \"llm-api.${BASE_DOMAIN}:443:${API_PRIVATE_IP}\"", "native_virtual_key_acl", "admin继续通过私网LB访问"):
             self.assertIn(value, later_guide)
         self.assertNotIn("runner-connectivity", example["parameters"])
         self.assertIn("在线Runner VM绝不能挂载高权限UAMI", guide)
@@ -763,6 +780,7 @@ class LocalExecutionTests(unittest.TestCase):
     def test_config_merge_options_are_explicit_and_enhanced_l3_removes_native_audit(self):
         source = self.configuration()
         source["contentAudit"] = {"mode": "native", "retentionDays": 7, "contentPolicyAccepted": True}
+        source["localExecution"]["features"] = {"entraMode": "deferred", "allowTrafficRelease": False}
         catalog = {
             "catalogVersion": 1,
             "stages": {
@@ -771,6 +789,10 @@ class LocalExecutionTests(unittest.TestCase):
                     "separateDatabaseAdminIdentity": {
                         "localExecutionMerge": {"authentication": {"database": {"method": "managed-identity", "clientId": "10000000-0000-4000-8000-000000000007"}}},
                     },
+                },
+                "6": {
+                    "customerConfig": {},
+                    "nativeAuthentication": {"customerConfig": {"application": {"authentication": {"mode": "native", "adminUsername": "REPLACE_NATIVE_ADMIN_USERNAME"}}}},
                 },
                 "8": {
                     "enhancedL3Alternative": {
@@ -781,8 +803,8 @@ class LocalExecutionTests(unittest.TestCase):
                 },
                 "9": {
                     "customerConfig": {},
-                    "localExecutionForPrepare": {"features": {"entraMode": "enabled", "allowTrafficRelease": False}},
-                    "localExecutionForApprovedRelease": {"features": {"entraMode": "enabled", "allowTrafficRelease": True}, "releaseReportPath": "temp/release.json"},
+                    "localExecutionForPrepare": {"features": {"allowTrafficRelease": False}},
+                    "localExecutionForApprovedRelease": {"features": {"allowTrafficRelease": True}, "releaseReportPath": "temp/release.json"},
                 },
             },
         }
@@ -793,11 +815,21 @@ class LocalExecutionTests(unittest.TestCase):
         database_identity, missing = merge_stage(source, catalog, 5, options=("database-admin-identity",))
         self.assertFalse(missing)
         self.assertEqual(database_identity["localExecution"]["authentication"]["database"]["clientId"], "10000000-0000-4000-8000-000000000007")
+        native, missing = merge_stage(source, catalog, 6, options=("native-auth",), values={"REPLACE_NATIVE_ADMIN_USERNAME": "gateway-admin"})
+        self.assertFalse(missing)
+        self.assertEqual(native["application"]["authentication"], {"mode": "native", "adminUsername": "gateway-admin"})
         with self.assertRaisesRegex(ValueError, "not both"):
             merge_stage(source, catalog, 8, options=("enhanced-l3", "observability"))
         prepared, _ = merge_stage(source, catalog, 9)
-        released, _ = merge_stage(source, catalog, 9, options=("approved-release",))
+        enabled_source = copy.deepcopy(source)
+        enabled_source["localExecution"]["features"]["entraMode"] = "enabled"
+        enabled_prepared, _ = merge_stage(enabled_source, catalog, 9)
+        released, _ = merge_stage(enabled_source, catalog, 9, options=("approved-release",))
+        self.assertEqual(prepared["localExecution"]["features"]["entraMode"], "deferred")
         self.assertFalse(prepared["localExecution"]["features"]["allowTrafficRelease"])
+        self.assertEqual(enabled_prepared["localExecution"]["features"]["entraMode"], "enabled")
+        self.assertFalse(enabled_prepared["localExecution"]["features"]["allowTrafficRelease"])
+        self.assertEqual(released["localExecution"]["features"]["entraMode"], "enabled")
         self.assertTrue(released["localExecution"]["features"]["allowTrafficRelease"])
 
     def test_config_merge_plan_does_not_write_and_apply_backs_up_atomically(self):

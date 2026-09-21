@@ -15,10 +15,70 @@ from scripts.backend_manifest import render_backend_manifest
 from scripts.migration_runtime import check_application, publish
 from scripts.customer_migration import ROOT, stage_fingerprint
 from scripts.runtime_secrets import BACKEND_SECRETS
+from scripts.private_ingress import render_ingress
 from tests.test_proxy_config import APPS, proxy_customer
 
 
 class ProxyManifestTests(unittest.TestCase):
+    def test_native_edge_binding_verifies_private_api_ingress_without_proxy(self):
+        from scripts.edge_binding import bind_edge, native_ingress_document_state, require_edge_binding
+        config = proxy_customer()
+        config.pop("proxy")
+        config.pop("entra", None)
+        config["application"]["authentication"] = {"mode": "native", "adminUsername": "gateway-admin"}
+        config["parameters"]["platform"]["stage4Network"].update(ingressSubnetName="snet-ingress", ingressSubnetPrefix="10.30.4.0/24")
+        config["privateIngress"] = {plane: {"tlsSecretId": f"https://synthetic.vault.azure.net/secrets/{plane}-tls", "allowedCidrs": ["10.30.0.0/16"]} for plane in ("api", "admin")}
+        identifier = "11111111-1111-4111-8111-111111111111"
+        profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
+        documents = render_ingress(config, "api", "registry.invalid/traefik@sha256:" + "a" * 64, ["10.30.0.0/16"])
+        resources = {item["kind"].lower(): item for item in documents}
+        for item in resources.values():
+            item.setdefault("metadata", {}).setdefault("uid", item["metadata"]["name"] + "-uid")
+        azure, client = Mock(), Mock()
+        def cloud(arguments):
+            if arguments[:3] == ["deployment", "group", "show"]:
+                return {"state": "Succeeded", "edge": {"provisioned": True, "apiHost": "llm-api." + config["baseDomain"], "routeId": profile + "/afdEndpoints/api/routes/api", "profileId": identifier}}
+            if arguments[0] == "resource":
+                return {"id": profile, "properties": {"frontDoorId": identifier}}
+            return {"properties": {"provisioningState": "Succeeded"}}
+        azure.scoped.side_effect = cloud
+        client.get.side_effect = lambda kind, name: copy.deepcopy(resources[kind])
+        def change(kind, name, operations):
+            self.assertEqual(name, "llm-api-ingress")
+            self.assertEqual(operations[0]["value"], resources[kind]["metadata"]["uid"])
+            target = operations[-1]["path"].removeprefix("/")
+            resources[kind][target] = copy.deepcopy(operations[-1]["value"])
+        client.patch.side_effect = change
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            directory = Path(folder)
+            plan = bind_edge(config, "plan", "a" * 40, directory, "", azure, client)
+            self.assertEqual(plan["bindingMode"], "native-private-ingress")
+            result = bind_edge(config, "execute", "a" * 40, directory, plan["planSha256"], azure, client)
+            self.assertTrue(result["applied"])
+            receipt = json.loads((directory / "edge-binding-receipt.json").read_text())["outputs"]["edgeBinding"]["value"]
+            self.assertEqual(receipt["frontDoorId"], identifier)
+            self.assertEqual(receipt["bindingMode"], "native-private-ingress")
+            self.assertEqual(client.patch.call_count, 2)
+            dynamic = yaml.safe_load(resources["configmap"]["data"]["routes.yaml"])
+            self.assertIn(f"HeaderRegexp(`X-Azure-FDID`, `(?i)^{identifier}$`)", dynamic["http"]["routers"]["api"]["rule"])
+            self.assertNotIn("X-Azure-FDID", dynamic["http"]["routers"]["api-health"]["rule"])
+            azure.scoped.side_effect = None
+            azure.scoped.return_value = {"state": "Succeeded", "binding": receipt}
+            require_edge_binding(config, "a" * 40, identifier, azure, client)
+            resources["configmap"]["data"]["routes.yaml"] = resources["configmap"]["data"]["routes.yaml"].replace(identifier, "22222222-2222-4222-8222-222222222222")
+            with self.assertRaisesRegex(ValueError, "another or no Front Door|differs from"):
+                require_edge_binding(config, "a" * 40, identifier, azure, client)
+            broadened = copy.deepcopy(resources["configmap"])
+            broadened_dynamic = yaml.safe_load(broadened["data"]["routes.yaml"])
+            broadened_dynamic["http"]["routers"]["management-bypass"] = copy.deepcopy(broadened_dynamic["http"]["routers"]["api"])
+            broadened["data"]["routes.yaml"] = yaml.safe_dump(broadened_dynamic, sort_keys=False)
+            with self.assertRaisesRegex(ValueError, "unexpected router"):
+                native_ingress_document_state(config, broadened, resources["deployment"], resources["service"])
+            wrong_service = copy.deepcopy(resources["service"])
+            wrong_service["spec"]["selector"]["plane"] = "admin"
+            with self.assertRaisesRegex(ValueError, "private routing contract"):
+                native_ingress_document_state(config, resources["configmap"], resources["deployment"], wrong_service)
+
     def test_front_door_binding_survives_generated_application_publish(self):
         from scripts.edge_binding import bind_deployment, preserve_binding
         identifier = "11111111-1111-4111-8111-111111111111"
@@ -155,7 +215,7 @@ class ProxyManifestTests(unittest.TestCase):
             publish(config, 7, "application", "execute", "a" * 40, path, digest)
             self.assertTrue(json.loads((path / "runtime-summary.json").read_text())["applied"])
             self.assertEqual(len([call for call in command.call_args_list if "rollout" in call.args[0]]), 3)
-            with self.assertRaisesRegex(ValueError, "Stage8 remains blocked"):
+            with self.assertRaisesRegex(ValueError, "approved authentication and audit configuration"):
                 publish(config, 8, "application", "plan", "a" * 40, path, "")
             from scripts.native_audit import prepare_native_audit
             native = copy.deepcopy(config)
