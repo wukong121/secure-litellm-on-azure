@@ -101,7 +101,7 @@ def initialize_backend_secrets(config, operation, revision, directory, approved)
     from azure.keyvault.secrets import SecretClient
     from azure.core.exceptions import AzureError
     import psycopg
-    from scripts.database_roles import database_access, isolated_postgres_environment
+    from scripts.database_roles import database_access, isolated_postgres_environment, postgres_ca_bundle
     from scripts.schema_runtime import migration_template
 
     require(operation in {"plan", "execute"}, "Invalid secret initialization operation")
@@ -128,7 +128,7 @@ def initialize_backend_secrets(config, operation, revision, directory, approved)
     mode = deployment_mode(config)
     credential = AzureCliCredential(tenant_id=config["azure"]["tenantId"])
     try:
-        with isolated_postgres_environment(), psycopg.connect(host=server["host"], port=5432, dbname=database, user="llmgw_migrator", password=token.stdout.strip(), sslmode="verify-full", sslrootcert="system", connect_timeout=15, options="-c statement_timeout=30000") as lock, SecretClient(vault_url=vault["uri"], credential=credential) as client:
+        with isolated_postgres_environment(), psycopg.connect(host=server["host"], port=5432, dbname=database, user="llmgw_migrator", password=token.stdout.strip(), sslmode="verify-full", sslrootcert=postgres_ca_bundle(), connect_timeout=15, options="-c statement_timeout=30000") as lock, SecretClient(vault_url=vault["uri"], credential=credential) as client:
             with lock.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_lock(hashtext(%s), 7)", (vault["id"].lower(),))
             legacy, source = read_legacy_keys(config, directory) if mode == "migration" else (None, None)

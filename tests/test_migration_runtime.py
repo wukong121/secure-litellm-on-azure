@@ -208,6 +208,7 @@ class RuntimeSafetyTests(unittest.TestCase):
                     restore = next(call for call in command.call_args_list if call.args[0][0] == "pg_restore")
                     self.assertEqual(restore.kwargs["environment"]["PGHOST"], "new-db.postgres.database.azure.com")
                     self.assertEqual(restore.kwargs["environment"]["PGSSLMODE"], "verify-full")
+                    self.assertEqual(restore.kwargs["environment"]["PGSSLROOTCERT"], "/etc/ssl/certs/ca-certificates.crt")
                     self.assertNotIn("PGSERVICE", restore.kwargs["environment"])
                     self.assertNotIn("--clean", restore.args[0])
                     self.assertNotIn("synthetic-token", json.dumps(restore.args, default=str))

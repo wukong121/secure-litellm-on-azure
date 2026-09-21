@@ -17,6 +17,9 @@ from scripts.customer_migration import MigrationError, fingerprint, private_writ
 from scripts.migration_deploy import AzureCommands, deployment_name, group_id
 
 
+POSTGRES_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+
+
 @contextmanager
 def isolated_postgres_environment():
     inherited = {key: os.environ.pop(key) for key in tuple(os.environ) if key.startswith("PG")}
@@ -24,6 +27,11 @@ def isolated_postgres_environment():
         yield
     finally:
         os.environ.update(inherited)
+
+
+def postgres_ca_bundle(path=POSTGRES_CA_BUNDLE):
+    require(os.path.isfile(path), "PostgreSQL system CA bundle is missing from the Runner")
+    return path
 
 
 def database_access(config):
@@ -144,7 +152,7 @@ def provision_database_roles(config, operation, revision, directory, approved):
     token = subprocess.run(["az", "account", "get-access-token", "--subscription", config["azure"]["subscriptionId"], "--resource-type", "oss-rdbms", "--query", "accessToken", "--output", "tsv"], capture_output=True, text=True, check=False, timeout=120)
     require(token.returncode == 0 and token.stdout.strip(), "Unable to obtain database administrator token")
     try:
-        connection_options = {"host": server["host"], "port": 5432, "user": data["postgresqlEntraAdministratorPrincipalName"], "password": token.stdout.strip(), "sslmode": "verify-full", "sslrootcert": "system", "connect_timeout": 15, "options": "-c statement_timeout=30000 -c lock_timeout=5000", "row_factory": dict_row}
+        connection_options = {"host": server["host"], "port": 5432, "user": data["postgresqlEntraAdministratorPrincipalName"], "password": token.stdout.strip(), "sslmode": "verify-full", "sslrootcert": postgres_ca_bundle(), "connect_timeout": 15, "options": "-c statement_timeout=30000 -c lock_timeout=5000", "row_factory": dict_row}
         with isolated_postgres_environment(), psycopg.connect(dbname="postgres", **connection_options) as control, psycopg.connect(dbname=database, **connection_options) as connection:
             with control.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_lock(193701, 5)")

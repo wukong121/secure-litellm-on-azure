@@ -64,6 +64,7 @@ class RuntimeSecretTests(unittest.TestCase):
             apply.assert_not_called()
             result = initialize_backend_secrets(config, "execute", "a" * 40, path, plan["planSha256"])
             apply.assert_called_once()
+            self.assertTrue(all(call.kwargs["sslrootcert"] == "/etc/ssl/certs/ca-certificates.crt" for call in connection.call_args_list))
             self.assertTrue(result["initialized"])
             self.assertFalse(result["stageAccepted"])
             self.assertTrue((path / "backend-access.json").exists())
