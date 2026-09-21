@@ -23,6 +23,7 @@ OPTION_SPECS = {
     "automatic-api-certificate": (4, "optionalAutomaticApiCertificate", "section"),
     "database-admin-identity": (5, "separateDatabaseAdminIdentity", "section"),
     "legacy-master-key-salt": (5, "legacyMasterKeySaltCompatibility", "section"),
+    "native-auth": (6, "nativeAuthentication", "section"),
     "observability": (8, "nativeAuditOptionalObservability", "section"),
     "enhanced-l3": (8, "enhancedL3Alternative", "section"),
     "azure-dns": (9, "optionalAzureDns", "section"),

@@ -5,6 +5,7 @@ import hashlib
 import http.client
 import ipaddress
 import json
+import re
 import socket
 import ssl
 import subprocess
@@ -16,7 +17,7 @@ import yaml
 from scripts.customer_migration import MigrationError, fingerprint, private_write, require, stage_fingerprint
 from scripts.migration_deploy import AzureCommands, deployment_name, group_id
 from scripts.migration_runtime import connect_cluster, run_command
-from scripts.private_ingress import certificate_material, ingress_image, ingress_settings, render_ingress
+from scripts.private_ingress import certificate_material, ingress_image, ingress_settings, preserve_native_front_door_binding, render_ingress
 from scripts.render_stage7_domain import domain_hosts
 from scripts.workflow_diagnostics import command_failure_summary
 
@@ -116,7 +117,7 @@ def promote_image(config, directory, azure, lock):
         authfile.unlink(missing_ok=True)
 
 
-def verify_endpoint(address, host, other_host, expected_sha256):
+def verify_endpoint(address, host, other_host, expected_sha256, *, native=False, plane=None):
     context = ssl.create_default_context()
     with socket.create_connection((address, 443), timeout=15) as connection:
         with context.wrap_socket(connection, server_hostname=host) as secured:
@@ -125,6 +126,16 @@ def verify_endpoint(address, host, other_host, expected_sha256):
             response = http.client.HTTPResponse(secured)
             response.begin()
             require(response.status in {404, 421}, "Private ingress did not reject the other plane's host")
+    if native:
+        require(plane in {"api", "admin"}, "Native ingress verification requires an explicit plane")
+        checks = [("GET", "/readyz", 200), ("GET", "/fallback/login", 404)] if plane == "api" else [("GET", "/fallback/login", 200)]
+        for method, path, expected_status in checks:
+            with socket.create_connection((address, 443), timeout=15) as connection:
+                with context.wrap_socket(connection, server_hostname=host) as secured:
+                    secured.sendall(f"{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode("ascii"))
+                    response = http.client.HTTPResponse(secured)
+                    response.begin()
+                    require(response.status == expected_status, f"Native {plane} ingress route verification failed for {path}")
 
 
 def frontend_for(config, azure, node_group, address):
@@ -184,9 +195,62 @@ def ingress_observation(scoped, namespace, service, directory):
     }
 
 
+def deployed_private_ingress(config, azure):
+    result = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 4, "private-ingress"), "--query", "{state:properties.provisioningState,ingress:properties.outputs.privateIngress.value}"])
+    ingress = result.get("ingress", {})
+    require(result.get("state") == "Succeeded" and ingress.get("configSha256") == stage_fingerprint(config, 4), "Deploy the current Stage 4 private ingress before verifying backend routes")
+    return ingress
+
+
+def verify_private_ingress_backends(config, revision, directory, azure=None):
+    azure = azure or AzureCommands(config, directory)
+    ingress = deployed_private_ingress(config, azure)
+    require(ingress.get("authenticationMode") == "native" and ingress.get("backendRoutesVerified") is False, "Backend route verification applies only to the initial native private ingress")
+    hosts = domain_hosts(config["baseDomain"])
+    network = ipaddress.ip_network(config["parameters"]["platform"]["stage4Network"]["ingressSubnetPrefix"])
+    addresses = {}
+    for plane in ("api", "admin"):
+        address = ingress.get(plane, {}).get("privateIpAddress")
+        certificate_sha256 = ingress.get("certificates", {}).get(plane, {}).get("sha256")
+        require(isinstance(address, str) and ipaddress.ip_address(address) in network and re.fullmatch(r"[a-f0-9]{64}", certificate_sha256 or ""), "Stage 4 private ingress receipt is incomplete")
+        addresses[plane] = address
+        verify_endpoint(address, hosts[plane], hosts["admin" if plane == "api" else "api"], certificate_sha256, native=True, plane=plane)
+    require(addresses["api"] != addresses["admin"], "API/admin must not share an ingress frontend")
+    verification = {
+        "revision": revision,
+        "configSha256": stage_fingerprint(config, 6),
+        "privateIngressSha256": fingerprint(ingress),
+        "authenticationMode": "native",
+        "backendRoutesVerified": True,
+        "verifiedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    receipt = {"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#", "contentVersion": "1.0.0.0", "resources": [], "outputs": {"privateIngressBackend": {"type": "object", "value": verification}}}
+    receipt_path = directory / "ingress-backend-receipt-template.json"
+    private_write(receipt_path, json.dumps(receipt))
+    saved = azure.scoped(["deployment", "group", "create", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 6, "private-ingress-backend"), "--mode", "Incremental", "--template-file", str(receipt_path)])
+    require(saved.get("properties", {}).get("provisioningState") == "Succeeded", "Private ingress backend routes passed, but saving verification evidence failed")
+    return verification
+
+
+def require_private_ingress_backends(config, revision, azure):
+    ingress = deployed_private_ingress(config, azure)
+    result = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 6, "private-ingress-backend"), "--query", "{state:properties.provisioningState,verification:properties.outputs.privateIngressBackend.value}"])
+    verification = result.get("verification", {})
+    expected = {
+        "revision": revision,
+        "configSha256": stage_fingerprint(config, 6),
+        "privateIngressSha256": fingerprint(ingress),
+        "authenticationMode": "native",
+        "backendRoutesVerified": True,
+    }
+    require(result.get("state") == "Succeeded" and all(verification.get(key) == value for key, value in expected.items()), "Verify the current native private ingress against the Stage 6 backend before enabling traffic")
+
+
 def deploy_private_ingress(config, operation, revision, directory, approved):
     require(operation in {"plan", "execute"}, "Invalid private ingress operation")
     settings = ingress_settings(config)
+    from scripts.backend_manifest import application_authentication
+    authentication_mode = application_authentication(config)["mode"] if "application" in config else "entra"
     image, lock = ingress_image(config)
     hosts = domain_hosts(config["baseDomain"])
     kube = connect_cluster(config, directory, legacy=False)
@@ -208,13 +272,17 @@ def deploy_private_ingress(config, operation, revision, directory, approved):
         private_write(certificate_path, material["certificate"])
         run_command(["openssl", "verify", "-purpose", "sslserver", "-verify_hostname", hosts[plane], "-untrusted", str(certificate_path), str(certificate_path)], directory, "certificate-trust-" + plane)
         documents = [document for document in render_ingress(config, plane, image, settings[plane]["allowedCidrs"]) if document["kind"] != "Namespace"]
+        preserved_config_map = None
+        if authentication_mode == "native" and plane == "api":
+            preserved_config_map = json.loads(run_command([*scoped, "get", "ConfigMap", namespace, "--ignore-not-found", "-o", "json"], directory, "before-binding-api-configmap") or "null")
+            documents = preserve_native_front_door_binding(config, documents, preserved_config_map)
         current_service = None
         for document in documents:
             if document["kind"] == "Deployment":
                 pod = document["spec"]["template"]
                 pod["metadata"]["annotations"] = {"llmgw/certificate-sha256": material["sha256"]}
                 pod["spec"]["volumes"][1]["secret"]["secretName"] = namespace + "-tls-" + material["sha256"][:16]
-            current = json.loads(run_command([*scoped, "get", document["kind"], document["metadata"]["name"], "--ignore-not-found", "-o", "json"], directory, f"before-{plane}-{document['kind']}") or "null")
+            current = preserved_config_map if document["kind"] == "ConfigMap" and preserved_config_map is not None else json.loads(run_command([*scoped, "get", document["kind"], document["metadata"]["name"], "--ignore-not-found", "-o", "json"], directory, f"before-{plane}-{document['kind']}") or "null")
             if document["kind"] == "Service":
                 current_service = current
             if current:
@@ -262,13 +330,13 @@ def deploy_private_ingress(config, operation, revision, directory, approved):
         endpoints[plane] = frontend_for(config, azure, cluster["nodeResourceGroup"], address)
         verify_endpoint(address, hosts[plane], hosts["admin" if plane == "api" else "api"], material["sha256"])
     require(endpoints["api"]["privateIpAddress"] != endpoints["admin"]["privateIpAddress"], "API/admin must not share an ingress frontend")
-    output = {"revision": revision, "configSha256": stage_fingerprint(config, 4), "verifiedAt": datetime.now(timezone.utc).isoformat(), "image": image, "certificates": public_certificates, **endpoints}
+    output = {"revision": revision, "configSha256": stage_fingerprint(config, 4), "authenticationMode": authentication_mode, "backendRoutesVerified": False, "verifiedAt": datetime.now(timezone.utc).isoformat(), "image": image, "certificates": public_certificates, **endpoints}
     receipt = {"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#", "contentVersion": "1.0.0.0", "resources": [], "outputs": {"privateIngress": {"type": "object", "value": output}}}
     receipt_path = directory / "ingress-receipt-template.json"
     private_write(receipt_path, json.dumps(receipt))
     saved = azure.scoped(["deployment", "group", "create", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 4, "private-ingress"), "--mode", "Incremental", "--template-file", str(receipt_path)])
     require(saved.get("properties", {}).get("provisioningState") == "Succeeded", "Private ingress verified, but saving deployment outputs failed")
-    summary.update(applied=True, verified=True, endpoints=endpoints)
+    summary.update(applied=True, verified=True, backendRoutesVerified=False, endpoints=endpoints)
     private_write(directory / "runtime-summary.json", json.dumps(summary, indent=2) + "\n")
     print("Private ingress TLS and cross-plane host rejection verified; backend authentication and full stage acceptance remain separate.")
     return summary

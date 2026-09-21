@@ -38,6 +38,12 @@ def release_checks(config):
     if mode not in {"l3", "native"}:
         raise ValueError("Release auditMode must be native or l3")
     required = set({"prepare": PREPARE_CHECKS, "canary": CANARY_CHECKS, "production": PRODUCTION_CHECKS}[phase])
+    authentication = config.get("authenticationMode", "entra")
+    if authentication not in {"entra", "native"}:
+        raise ValueError("Release authenticationMode must be entra or native")
+    if phase != "prepare" and authentication == "native":
+        required.remove("entra_backend_acl")
+        required.update({"native_virtual_key_acl", "native_admin_password_login"})
     if mode == "native":
         if type(config.get("telemetryEnabled")) is not bool:
             raise ValueError("Native release requires an explicit telemetry decision")
@@ -56,6 +62,8 @@ def validate_release(config: dict, now: datetime | None = None, required_approve
     if phase not in {"prepare", "canary", "production"}:
         raise ValueError("phase must be prepare, canary or production")
     domain_hosts(config["baseDomain"])
+    if config.get("authenticationMode", "entra") not in {"entra", "native"}:
+        raise ValueError("Release authenticationMode must be entra or native")
     if config.get("environmentName") not in {"dev", "test", "prod"}:
         raise ValueError("Invalid environment")
     if not PLS_ID.fullmatch(config.get("privateOrigin", {}).get("privateLinkServiceId", "")):
@@ -114,7 +122,7 @@ def validate_what_if(result: dict) -> dict[str, int]:
 
 def generate(config: dict, output_dir: Path) -> None:
     validate_release(config)
-    if config.get("auditMode", "l3") != "l3":
+    if config.get("auditMode", "l3") != "l3" or config.get("authenticationMode", "entra") != "entra":
         raise ValueError("Native release uses managed customer-runtime manifests, not the legacy Stage9 overlay")
     render(config["baseDomain"], output_dir, stage=9)
     overlay_path = output_dir / "kustomization.yaml"

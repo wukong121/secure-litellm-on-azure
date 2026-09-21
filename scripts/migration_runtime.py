@@ -166,7 +166,9 @@ def check_application(documents, stage, config):
             if kind == "Deployment" and container in pod.get("containers", []):
                 require(all(probe in container for probe in ("startupProbe", "readinessProbe", "livenessProbe")), "Deployment container health probes are required")
     require({"Deployment", "NetworkPolicy", "PodDisruptionBudget", "SecretProviderClass"}.issubset(kinds), "Required isolation, availability and secret provider resources are missing")
-    expected = {"litellm"} if stage == 6 else {"litellm", "llm-api-proxy", "llm-admin-proxy"}
+    from scripts.backend_manifest import application_authentication
+    native_gateway = "application" in config and application_authentication(config)["mode"] == "native"
+    expected = {"litellm"} if stage == 6 or native_gateway else {"litellm", "llm-api-proxy", "llm-admin-proxy"}
     require(expected.issubset(deployments), "Stage workload set is incomplete")
 
 
@@ -192,10 +194,15 @@ def publish(config, stage, action, operation, revision, directory, approved, ima
         manifest = os.environ.get("MIGRATION_MANIFEST_YAML", "")
         if "application" in config:
             require(not manifest, "Managed application generation cannot be mixed with manual manifests")
-            require(stage == 6 or (stage == 7 and "proxy" in config) or (stage == 8 and "proxy" in config and ("auditRuntime" in config or "contentAudit" in config)), "Managed application generation requires proxy settings for Stage7; Stage8 remains blocked without explicit auditRuntime or contentAudit decisions")
-            from scripts.backend_manifest import prepare_backend_documents
+            from scripts.backend_manifest import application_authentication, prepare_backend_documents
+            native_gateway = application_authentication(config)["mode"] == "native"
+            require(stage == 6 or (not native_gateway and stage == 7 and "proxy" in config) or (stage == 8 and ((native_gateway and "contentAudit" in config) or ("proxy" in config and ("auditRuntime" in config or "contentAudit" in config)))), "Managed application generation requires its approved authentication and audit configuration")
+            if native_gateway and stage == 6:
+                for proxy in ("llm-api-proxy", "llm-admin-proxy"):
+                    existing = run_command([*kube, "get", "deployment", proxy, "--ignore-not-found", "-o", "json"], directory, "existing-entra-proxy-" + proxy)
+                    require(not existing.strip(), "Remove or explicitly migrate existing Entra proxy workloads before native Stage 6 publication")
             documents = prepare_backend_documents(config, revision, directory, AzureCommands(config, directory), image_public_key=image_public_key)
-            if stage >= 7:
+            if stage >= 7 and not native_gateway:
                 from scripts.proxy_manifest import prepare_proxy_documents
                 documents = [*documents, *prepare_proxy_documents(config, revision, directory, AzureCommands(config, directory), image_public_key=image_public_key)]
             if stage == 8:
@@ -207,7 +214,7 @@ def publish(config, stage, action, operation, revision, directory, approved, ima
                     documents = prepare_audit_documents(config, revision, directory, AzureCommands(config, directory), documents, kube, image_public_key=image_public_key)
         else:
             documents = [document for document in yaml.safe_load_all(manifest) if document]
-        if stage >= 7:
+        if stage >= 7 and not ("application" in config and application_authentication(config)["mode"] == "native"):
             from scripts.edge_binding import preserve_binding
             existing_api = json.loads(run_command([*kube, "get", "deployment", "llm-api-proxy", "--ignore-not-found", "-o", "json"], directory, "existing-api-edge-binding") or "null")
             documents = preserve_binding(documents, existing_api)
@@ -246,6 +253,12 @@ def publish(config, stage, action, operation, revision, directory, approved, ima
         for document in documents:
             if document["kind"] == "Deployment":
                 run_command([*kube, "rollout", "status", "deployment/" + document["metadata"]["name"], "--timeout=15m"], directory, "ready-" + document["metadata"]["name"])
+        if action == "application" and stage == 6 and "application" in config:
+            from scripts.backend_manifest import application_authentication
+            if application_authentication(config)["mode"] == "native":
+                from scripts.private_ingress_runtime import verify_private_ingress_backends
+                verification = verify_private_ingress_backends(config, revision, directory)
+                summary["backendRoutesVerified"] = verification["backendRoutesVerified"]
     summary["applied"] = True
     private_write(directory / "runtime-summary.json", json.dumps(summary, indent=2) + "\n")
 

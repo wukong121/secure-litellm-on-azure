@@ -59,6 +59,7 @@ class AzureSchemaContainerTests(unittest.TestCase):
             (root / "backend").mkdir()
             (root / "backend/LITELLM_MASTER_KEY").write_text("synthetic-application-master-key")
             (root / "backend/LITELLM_SALT_KEY").write_text("synthetic-application-salt-key")
+            (root / "backend/UI_PASSWORD").write_text("synthetic-ui-password")
             network = "llmgw-schema-" + uuid4().hex
             database_container = "llmgw-schema-" + uuid4().hex
             self.docker("network", "create", "--internal", network)

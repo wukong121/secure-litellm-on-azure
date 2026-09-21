@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import os
 from pathlib import Path
+import re
 
 import yaml
 
@@ -20,7 +21,10 @@ REQUIRED_TABLES = ("LiteLLM_VerificationToken", "LiteLLM_TeamTable", "LiteLLM_Us
 
 def load_backend_keys(directory):
     values = {}
-    for name in ("LITELLM_MASTER_KEY", "LITELLM_SALT_KEY"):
+    names = ["LITELLM_MASTER_KEY", "LITELLM_SALT_KEY"]
+    if os.environ.get("LLMGW_GATEWAY_AUTH_MODE") == "native":
+        names.append("UI_PASSWORD")
+    for name in names:
         value = (Path(directory) / name).read_bytes().decode("utf-8")
         if not value.strip() or "\x00" in value or len(value.encode()) > 25000:
             raise DatabaseAuthError("Backend CSI key is missing or invalid")
@@ -28,6 +32,26 @@ def load_backend_keys(directory):
             raise DatabaseAuthError("Mounted backend key conflicts with an existing environment value")
         values[name] = value
     os.environ.update(values)
+    return values
+
+
+def configure_gateway_authentication(values):
+    mode = os.environ.get("LLMGW_GATEWAY_AUTH_MODE", "entra")
+    if mode == "entra":
+        if any(os.environ.get(name) for name in ("LLMGW_NATIVE_ADMIN_USERNAME", "UI_USERNAME", "UI_PASSWORD")):
+            raise DatabaseAuthError("Native UI credentials conflict with Entra gateway authentication")
+        return
+    if mode != "native":
+        raise DatabaseAuthError("Unsupported gateway authentication mode")
+    username = os.environ.get("LLMGW_NATIVE_ADMIN_USERNAME", "")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{2,127}", username) is None:
+        raise DatabaseAuthError("Native admin username is missing or invalid")
+    password = values.get("UI_PASSWORD")
+    if not password:
+        raise DatabaseAuthError("Native admin login requires the dedicated mounted UI password")
+    if os.environ.get("UI_USERNAME") not in {None, username} or os.environ.get("UI_PASSWORD") not in {None, password}:
+        raise DatabaseAuthError("Native UI credentials conflict with the reviewed gateway configuration")
+    os.environ.update(UI_USERNAME=username, UI_PASSWORD=password)
 
 
 def application_config(path):
@@ -60,8 +84,10 @@ async def check_application_role(client):
 
 def create_application(config_path, template, tokens=None):
     application_config(config_path)
+    values = {}
     if os.environ.get("LLMGW_BACKEND_SECRETS_DIR"):
-        load_backend_keys(os.environ["LLMGW_BACKEND_SECRETS_DIR"])
+        values = load_backend_keys(os.environ["LLMGW_BACKEND_SECRETS_DIR"])
+    configure_gateway_authentication(values)
     parsed, _query = database_url_template(template)
     if parsed.username != "llmgw_app":
         raise DatabaseAuthError("Application process must use the DML-only llmgw_app role")

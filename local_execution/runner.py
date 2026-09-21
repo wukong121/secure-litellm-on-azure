@@ -466,9 +466,16 @@ def local_operation_environment(config, settings, step, profile):
                 os.environ[name] = value
 
 
-def enforce_local_policy(settings, step):
+def enforce_local_policy(settings, step, config=None):
     features = settings["features"]
-    if features["entraMode"] == "deferred":
+    native = False
+    if config and "application" in config:
+        from scripts.backend_manifest import application_authentication
+        native = application_authentication(config)["mode"] == "native"
+    if native:
+        require(features["entraMode"] == "deferred", "Native gateway authentication requires localExecution.features.entraMode=deferred")
+        require(not step.startswith("stage7-"), "Native gateway authentication omits all Stage7 Entra and proxy operations")
+    elif features["entraMode"] == "deferred":
         blocked = (step.startswith("stage7-") and step != "stage7-promote-proxy-image") or step == "stage8-application" or step in {
             "stage9-edge-bind", "stage9-edge-release", "stage9-dns-publish",
         }
@@ -733,7 +740,7 @@ def local_operation(step, requested):
 
 
 def execute_step(config, settings, revision, step, destination, operation="auto", approved_plan=""):
-    enforce_local_policy(settings, step)
+    enforce_local_policy(settings, step, config)
     operation = local_operation(step, operation)
     if step == "config-check":
         require(operation in {"execute", "apply"}, "Configuration check does not use plan/execute")

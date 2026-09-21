@@ -6,6 +6,7 @@ import os
 import time
 import hashlib
 import json
+import jwt
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,10 @@ def probe_application(config, password):
     os.environ.pop("LITELLM_MASTER_KEY", None)
     os.environ.pop("LITELLM_SALT_KEY", None)
     os.environ.pop("LLMGW_DATABASE_TOKEN_FILE", None)
+    os.environ.pop("UI_USERNAME", None)
+    os.environ.pop("UI_PASSWORD", None)
+    os.environ["LLMGW_GATEWAY_AUTH_MODE"] = "native"
+    os.environ["LLMGW_NATIVE_ADMIN_USERNAME"] = "gateway-admin"
     tokens = AzureDatabaseTokens(TEMPLATE, credential)
     app = create_application(config, TEMPLATE, tokens)
     return app, tokens, credential
@@ -49,6 +54,20 @@ async def probe(config):
         import httpx
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://isolated.invalid", headers={"Authorization": "Bearer synthetic-application-master-key"}) as http:
+            invalid_login = await http.post("/v2/login", json={"username": "gateway-admin", "password": "wrong-password"})
+            assert invalid_login.status_code in {401, 403}, "Invalid native admin password was accepted"
+            login = await http.post("/v2/login", json={"username": "gateway-admin", "password": "synthetic-ui-password"})
+            assert login.status_code == 200, "Native admin login failed: " + login.text
+            ui_token = login.json().get("token")
+            assert isinstance(ui_token, str) and ui_token.count(".") == 2, "Native admin login did not issue a UI session token"
+            ui_claims = jwt.decode(ui_token, "synthetic-application-master-key", algorithms=["HS256"])
+            ui_key = ui_claims.get("key")
+            assert isinstance(ui_key, str) and ui_key.startswith("sk-"), "Native UI session did not contain a bounded virtual key"
+            native_key = "sk-" + hashlib.sha256(b"synthetic-native-login-key").hexdigest()
+            native_created = await http.post("/key/generate", headers={"Authorization": "Bearer " + ui_key}, json={"models": ["coding"], "key": native_key})
+            assert native_created.status_code == 200, "Native admin UI token could not create a virtual key: " + native_created.text
+            native_info = await http.get("/key/info", params={"key": hashlib.sha256(native_key.encode()).hexdigest()})
+            assert native_info.status_code == 200, "Native login virtual key was not persisted"
             config_fixture = proxy_customer()
             config_fixture["proxy"]["bindings"].append({"oid": "99999999-9999-4999-8999-999999999999", "plane": "admin", "role": "proxy_admin", "models": ["coding"]})
             for binding in credential_bindings(config_fixture):

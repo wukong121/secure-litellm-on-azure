@@ -96,7 +96,8 @@ def deployment_mode(config):
 
 
 def active_stages(config):
-    return tuple(stage for stage in range(10) if deployment_mode(config) != "greenfield" or stage != 1)
+    native = config.get("application", {}).get("authentication", {}).get("mode") == "native"
+    return tuple(stage for stage in range(10) if (deployment_mode(config) != "greenfield" or stage != 1) and (not native or stage != 7))
 
 
 def stage_title(stage, config):
@@ -118,6 +119,8 @@ def stage_checks(stage, config):
             checks[checks.index("l3_policy")] = "content_audit_policy"
         elif stage == 8:
             checks = ["native_spend_logs", "native_audit_access", "native_retention_recovery", "telemetry_received" if "observability" in config else "telemetry_disabled", "guardrail_scope"]
+            if config.get("application", {}).get("authentication", {}).get("mode") == "native":
+                checks[-1] = "native_api_route_isolation"
     if deployment_mode(config) == "greenfield":
         replacements = {
             0: ("subscription_scope", "deployment_permissions", "private_runner", "domain_ownership"),
@@ -132,6 +135,8 @@ def stage_checks(stage, config):
 
 def stage_fingerprint(config, stage):
     scoped = {key: value for key, value in config.items() if key != "parameters"}
+    if 4 <= stage < 6:
+        scoped["applicationAuthenticationMode"] = config.get("application", {}).get("authentication", {}).get("mode", "entra")
     if stage < 1:
         scoped.pop("legacyAccess", None)
     if stage < 2:
@@ -193,6 +198,10 @@ def validate_config(config, environment):
     if mode == "migration":
         required_fields.add("legacy")
     require(set(config) - {"governance", "deploymentMode", "privateIngress", "databaseAccess", "application", "proxy", "entra", "auditRuntime", "contentAudit", "observability", "auditGovernance", "dns", "certificates", "legacyAccess"} == required_fields, "Unexpected or missing customer configuration fields; greenfield must omit legacy")
+    native_gateway = config.get("application", {}).get("authentication", {}).get("mode") == "native"
+    if native_gateway:
+        require("contentAudit" in config, "Native gateway authentication requires the explicit native Spend Logs policy")
+        require(not any(key in config for key in ("entra", "proxy", "auditRuntime", "auditGovernance", "observability")), "Native gateway authentication cannot retain Entra proxy, enhanced L3 or proxy-based observability configuration")
     if "legacyAccess" in config:
         from scripts.legacy_access import access_settings
         access_settings(config)
@@ -222,8 +231,9 @@ def validate_config(config, environment):
         from scripts.entra_apps import entra_settings
         entra_settings(config)
     if "application" in config:
-        from scripts.backend_manifest import application_settings
+        from scripts.backend_manifest import application_authentication, application_settings
         application_settings(config)
+        application_authentication(config)
     if "databaseAccess" in config:
         access = config["databaseAccess"]
         require(isinstance(access, dict) and set(access) == {"migrationPrincipalId"} and isinstance(access["migrationPrincipalId"], str) and UUID(access["migrationPrincipalId"]).int != 0, "databaseAccess requires a nonzero migration service principal Object ID")

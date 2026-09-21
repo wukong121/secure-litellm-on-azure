@@ -85,6 +85,21 @@ class CustomerMigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_config(self.config, "test")
 
+    def test_native_authentication_skips_entra_stage(self):
+        self.config["parameters"]["platform"]["azureOpenAIConnections"] = [{"alias": "primary", "accountName": "synthetic-model"}]
+        self.config["parameters"]["platform"]["stage5Data"] = {"postgresqlDatabaseName": "litellm"}
+        self.config["application"] = {"backendImage": "customerregistry.azurecr.io/litellm@sha256:" + "a" * 64, "models": [{"modelGroup": "coding", "connectionAlias": "primary", "deploymentName": "model", "id": "primary-coding", "apiVersion": "v1"}], "authentication": {"mode": "native", "adminUsername": "gateway-admin"}}
+        self.config["contentAudit"] = {"mode": "native", "retentionDays": 7, "contentPolicyAccepted": True}
+        validate_config(self.config, "test")
+        self.assertEqual(active_stages(self.config), (0, 1, 2, 3, 4, 5, 6, 8, 9))
+        self.assertIn("native_api_route_isolation", stage_checks(8, self.config))
+        self.assertNotIn("guardrail_scope", stage_checks(8, self.config))
+        for field in ("entra", "proxy", "auditRuntime", "auditGovernance", "observability"):
+            invalid = copy.deepcopy(self.config)
+            invalid[field] = {}
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "cannot retain"):
+                validate_config(invalid, "test")
+
     def test_greenfield_guide_shows_initialization_without_cloud_calls(self):
         with patch.dict("os.environ", {"CUSTOMER_CONFIG_JSON": json.dumps({"deploymentMode": "greenfield"})}, clear=True), patch("sys.argv", ["migration", "--stage", "5", "--mode", "guide", "--environment", "test"]), patch("sys.stdout", new_callable=io.StringIO) as output, patch("scripts.customer_migration.subprocess.run") as cloud:
             main()

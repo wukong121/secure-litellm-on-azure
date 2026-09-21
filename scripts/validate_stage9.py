@@ -53,6 +53,11 @@ def validate_templates(edge, origin):
     assert {item["ruleSetType"] for item in waf["managedRules"]["managedRuleSets"]} == {"Microsoft_DefaultRuleSet", "Microsoft_BotManagerRuleSet"}
     assert not waf["managedRules"].get("exclusions")
     assert all(rule["action"] != "Allow" for rule in waf["customRules"]["rules"])
+    block_non_post = next(rule for rule in waf["customRules"]["rules"] if rule["name"] == "BlockNonPost")
+    assert block_non_post["matchConditions"] == [
+        {"matchVariable": "RequestMethod", "operator": "Equal", "negateCondition": True, "matchValue": ["POST"]},
+        {"matchVariable": "RequestUri", "operator": "Equal", "negateCondition": True, "matchValue": ["/readyz"]},
+    ]
     association = by_type["Microsoft.Cdn/profiles/securityPolicies"]["properties"]["parameters"]["associations"]
     assert len(association) == 1 and len(association[0]["domains"]) == 1
     assert association[0]["patternsToMatch"] == ["/*"]

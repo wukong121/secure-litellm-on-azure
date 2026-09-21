@@ -22,7 +22,9 @@ def native_audit_settings(config):
 
 def render_native_audit(config, source):
     settings = native_audit_settings(config)
-    require("application" in config and "proxy" in config, "Native publishing requires managed backend and proxy")
+    from scripts.backend_manifest import application_authentication
+    native_gateway = application_authentication(config)["mode"] == "native"
+    require("application" in config and (native_gateway or "proxy" in config), "Native publishing requires a managed backend and an approved authentication path")
     documents = copy.deepcopy(source)
     candidates = [item for item in documents if item["kind"] == "ConfigMap" and "config.yaml" in item.get("data", {})]
     require(len(candidates) == 1, "Native audit requires exactly one managed backend configuration")
@@ -70,6 +72,11 @@ def prepare_native_audit(config, source, directory, azure, kube, image_public_ke
 
     native_audit_settings(config)
     client = AuditCluster(kube, directory)
+    from scripts.backend_manifest import application_authentication
+    if application_authentication(config)["mode"] == "native":
+        require("observability" not in config, "Native gateway authentication does not yet support the proxy-based observability collector")
+        require(client.get("deployment", "llm-api-proxy", optional=True) is None and client.get("deployment", "llm-admin-proxy", optional=True) is None, "Remove or explicitly migrate existing Entra proxy workloads before native gateway publication")
+        return render_native_audit(config, source)
     for plane in ("api", "admin"):
         existing = client.get("deployment", "llm-" + plane + "-proxy", optional=True)
         if existing:

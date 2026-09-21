@@ -6,7 +6,7 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.runtime_secrets import BACKEND_SECRETS, apply_backend_secrets, backend_secret_values, ensure_key_creation_is_safe, initialize_backend_secrets, inspect_backend_secrets, read_legacy_keys
+from scripts.runtime_secrets import BACKEND_SECRETS, NATIVE_UI_SECRET, apply_backend_secrets, backend_secret_values, backend_secrets, ensure_key_creation_is_safe, initialize_backend_secrets, inspect_backend_secrets, read_legacy_keys
 import base64
 from scripts.customer_migration import ROOT, parameters_for
 from scripts.migration_deploy import group_id
@@ -232,6 +232,21 @@ class RuntimeSecretTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "overwrite is forbidden"):
                 backend_secret_values("migration", {"litellm-master-key": "different"}, legacy)
             random.assert_not_called()
+
+    def test_native_migration_generates_only_dedicated_ui_password(self):
+        config = {"application": {"authentication": {"mode": "native", "adminUsername": "gateway-admin"}}}
+        required = backend_secrets(config)
+        legacy = {"LITELLM_MASTER_KEY": "existing-master", "LITELLM_SALT_KEY": "existing-salt"}
+        with patch("scripts.runtime_secrets.secrets.token_urlsafe", return_value="generated-ui-password") as random:
+            values = backend_secret_values("migration", {}, legacy, required)
+        self.assertEqual(values["litellm-master-key"], "existing-master")
+        self.assertEqual(values["litellm-salt-key"], "existing-salt")
+        self.assertEqual(values["litellm-ui-password"], "generated-ui-password")
+        self.assertEqual(set(required), set(BACKEND_SECRETS) | set(NATIVE_UI_SECRET))
+        random.assert_called_once_with(48)
+        existing = {name: values[name] for name in BACKEND_SECRETS}
+        with patch("scripts.runtime_secrets.secrets.token_urlsafe", return_value="generated-ui-password"):
+            self.assertEqual(backend_secret_values("migration", existing, legacy, required), {"litellm-ui-password": "generated-ui-password"})
 
     def test_missing_legacy_salt_or_empty_keys_never_generate_replacements(self):
         for source in (None, {"LITELLM_MASTER_KEY": "existing"}, {"LITELLM_MASTER_KEY": "existing", "LITELLM_SALT_KEY": ""}):

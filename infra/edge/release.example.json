@@ -2,6 +2,7 @@
   "phase": "prepare",
   "baseDomain": "example.com",
   "environmentName": "test",
+  "authenticationMode": "entra",
   "privateOrigin": {
     "privateLinkServiceId": "REPLACE_API_PRIVATE_LINK_SERVICE_ID",
     "privateLinkLocation": "westus"

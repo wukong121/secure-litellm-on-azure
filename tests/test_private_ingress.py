@@ -1,4 +1,5 @@
 import unittest
+import copy
 from datetime import datetime, timedelta, timezone
 
 from cryptography import x509
@@ -8,14 +9,14 @@ from cryptography.x509.oid import NameOID
 
 import yaml
 
-from scripts.private_ingress import certificate_material, ingress_settings, render_ingress, source_ranges
+from scripts.private_ingress import certificate_material, ingress_settings, preserve_native_front_door_binding, render_ingress, source_ranges
 from tests.test_customer_migration import customer_config
 
 
 class PrivateIngressTests(unittest.TestCase):
     def setUp(self):
         self.config = customer_config()
-        self.config["parameters"]["platform"]["stage4Network"]["ingressSubnetName"] = "snet-ingress"
+        self.config["parameters"]["platform"]["stage4Network"].update(ingressSubnetName="snet-ingress", ingressSubnetPrefix="10.30.4.0/24")
         self.image = "registry.invalid/traefik@sha256:" + "a" * 64
 
     def test_private_planes_have_no_api_credentials_or_cross_plane_backend(self):
@@ -36,6 +37,60 @@ class PrivateIngressTests(unittest.TestCase):
             self.assertTrue(dynamic["tls"]["options"]["default"]["sniStrict"])
             backend = objects["NetworkPolicy"]["spec"]["egress"][1]["to"][0]
             self.assertEqual(backend["podSelector"]["matchLabels"]["plane"], plane)
+
+    def test_native_mode_routes_admin_privately_and_limits_api_to_inference(self):
+        self.config["application"] = {
+            "backendImage": "customerregistry.azurecr.io/litellm@sha256:" + "a" * 64,
+            "models": [{"modelGroup": "coding", "connectionAlias": "primary", "deploymentName": "model", "id": "primary-coding", "apiVersion": "v1"}],
+            "authentication": {"mode": "native", "adminUsername": "gateway-admin"},
+        }
+        for plane in ("api", "admin"):
+            documents = render_ingress(self.config, plane, self.image, ["10.30.0.0/16"])
+            objects = {document["kind"]: document for document in documents}
+            dynamic = yaml.safe_load(objects["ConfigMap"]["data"]["routes.yaml"])
+            self.assertEqual(dynamic["http"]["services"][plane]["loadBalancer"]["servers"], [{"url": "http://litellm.litellm.svc.cluster.local:4000"}])
+            policy = objects["NetworkPolicy"]["spec"]["egress"][1]
+            self.assertEqual(policy["ports"], [{"protocol": "TCP", "port": 4000}])
+            self.assertEqual(policy["to"][0]["podSelector"]["matchLabels"], {"app.kubernetes.io/name": "litellm", "app.kubernetes.io/component": "gateway"})
+            if plane == "api":
+                rule = dynamic["http"]["routers"]["api"]["rule"]
+                for path in ("/chat/completions", "/v1/chat/completions", "/responses", "/v1/responses", "/embeddings", "/v1/embeddings"):
+                    self.assertIn(f"Path(`{path}`)", rule)
+                self.assertIn("Method(`POST`)", rule)
+                self.assertEqual(dynamic["http"]["middlewares"]["api-health-path"]["replacePath"]["path"], "/health/readiness")
+                self.assertIn("Path(`/readyz`)", dynamic["http"]["routers"]["api-health"]["rule"])
+            else:
+                self.assertEqual(set(dynamic["http"]["routers"]), {"admin"})
+
+    def test_api_allows_private_link_nat_subnet_without_broadening_admin(self):
+        configured = ["10.60.0.0/16"]
+        ingress_subnet = self.config["parameters"]["platform"]["stage4Network"]["ingressSubnetPrefix"]
+        for plane in ("api", "admin"):
+            documents = render_ingress(self.config, plane, self.image, configured)
+            objects = {document["kind"]: document for document in documents}
+            expected = sorted([*configured, ingress_subnet]) if plane == "api" else configured
+            self.assertEqual(objects["Service"]["spec"]["loadBalancerSourceRanges"], expected)
+            policy_sources = [item["ipBlock"]["cidr"] for item in objects["NetworkPolicy"]["spec"]["ingress"][0]["from"]]
+            self.assertEqual(policy_sources, expected)
+
+    def test_native_ingress_redeploy_preserves_front_door_business_binding(self):
+        self.config["application"] = {
+            "backendImage": "customerregistry.azurecr.io/litellm@sha256:" + "a" * 64,
+            "models": [{"modelGroup": "coding", "connectionAlias": "primary", "deploymentName": "model", "id": "primary-coding", "apiVersion": "v1"}],
+            "authentication": {"mode": "native", "adminUsername": "gateway-admin"},
+        }
+        documents = render_ingress(self.config, "api", self.image, ["10.30.0.0/16"])
+        identifier = "11111111-1111-4111-8111-111111111111"
+        current = copy.deepcopy(next(item for item in documents if item["kind"] == "ConfigMap"))
+        dynamic = yaml.safe_load(current["data"]["routes.yaml"])
+        dynamic["http"]["routers"]["api"]["rule"] += f" && HeaderRegexp(`X-Azure-FDID`, `(?i)^{identifier}$`)"
+        current["data"]["routes.yaml"] = yaml.safe_dump(dynamic, sort_keys=False)
+        result = preserve_native_front_door_binding(self.config, documents, current)
+        rendered = yaml.safe_load(next(item for item in result if item["kind"] == "ConfigMap")["data"]["routes.yaml"])
+        self.assertIn(identifier, rendered["http"]["routers"]["api"]["rule"])
+        self.assertNotIn("X-Azure-FDID", rendered["http"]["routers"]["api-health"]["rule"])
+        deployment = next(item for item in result if item["kind"] == "Deployment")
+        self.assertEqual(deployment["spec"]["template"]["metadata"]["annotations"]["llmgw/front-door-id"], identifier)
 
     def test_public_and_missing_source_ranges_are_rejected(self):
         for ranges in ([], ["0.0.0.0/0"], ["8.8.8.0/24"], ["::/0"], ["10.30.1.1/24"]):
