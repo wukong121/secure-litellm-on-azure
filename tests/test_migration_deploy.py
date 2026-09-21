@@ -595,10 +595,16 @@ class MigrationDeploymentTests(unittest.TestCase):
 
     def test_certificate_dns_ownership_does_not_revert_at_stage5(self):
         config = certificate_config()
+        config["parameters"]["runner-target-connectivity"] = {
+            "runnerVirtualNetworkId": config["parameters"]["certificate-vault"]["runnerVirtualNetworkId"],
+            "manageDnsLink": True,
+        }
         config["parameters"]["platform"]["stage5Data"] = {"postgresqlDatabaseName": "litellm"}
         _, parameters = parameters_for(config, 5, "platform")
         self.assertFalse(parameters["parameters"]["createStage5KeyVaultPrivateDnsZone"]["value"])
         self.assertFalse(parameters["parameters"]["configureStage5KeyVaultDnsLink"]["value"])
+        self.assertEqual(parameters["parameters"]["stage5RunnerVirtualNetworkId"]["value"], config["parameters"]["runner-target-connectivity"]["runnerVirtualNetworkId"])
+        self.assertTrue(parameters["parameters"]["manageStage5RunnerDnsLinks"]["value"])
         config["parameters"]["platform"]["createStage5KeyVaultPrivateDnsZone"] = True
         with self.assertRaisesRegex(ValueError, "owns Key Vault DNS"):
             parameters_for(config, 5, "platform")

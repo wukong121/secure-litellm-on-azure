@@ -101,6 +101,12 @@ param createStage5PostgresqlPrivateDnsZone bool = false
 @description('Create the Stage 5 Azure Managed Redis private DNS zone.')
 param createStage5ManagedRedisPrivateDnsZone bool = true
 
+@description('Approved Runner VNet resource ID requiring Stage 5 private data-plane DNS resolution.')
+param stage5RunnerVirtualNetworkId string = ''
+
+@description('Create Runner VNet links for Stage 5 private DNS zones. Keep false for customer-managed DNS forwarding.')
+param manageStage5RunnerDnsLinks bool = false
+
 @description('Stage 5 data platform configuration. Entra administrator metadata must be injected through protected deployment variables before deployment.')
 param stage5Data stage5DataConfiguration = {
   postgresqlDatabaseName: 'litellm'
@@ -196,6 +202,8 @@ module privateDns '../modules/private-dns/main.bicep' = if (deployStage4) {
     configureKeyVaultLink: configureStage5KeyVaultDnsLink
     createPostgresqlZone: createStage5PostgresqlPrivateDnsZone
     createManagedRedisZone: createStage5ManagedRedisPrivateDnsZone
+    runnerVirtualNetworkId: stage5RunnerVirtualNetworkId
+    configureRunnerLinks: manageStage5RunnerDnsLinks
     tags: tags
   }
 }

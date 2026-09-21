@@ -44,6 +44,12 @@ def validate_infrastructure() -> None:
     assert "category: 'ConnectionEvents'" in redis
     assert "categoryGroup: 'allLogs'" not in redis
 
+    private_dns = read(MODULES / "private-dns/main.bicep")
+    assert "resource postgresqlRunnerLink" in private_dns
+    assert "resource managedRedisRunnerLink" in private_dns
+    assert "registrationEnabled: false" in private_dns
+    assert "id: runnerVirtualNetworkId" in private_dns
+
     expected_private_link = {
         "key-vault-private-endpoint/main.bicep": ("'vault'", "privatelink.vaultcore.azure.net"),
         "postgresql-private-endpoint/main.bicep": (

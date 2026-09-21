@@ -842,6 +842,21 @@ chmod 600 local_execution/stage-5-values.local.json
 
 该步骤创建/配置私有Entra-only PostgreSQL、Managed Redis、后台Key Vault、Private Endpoint/DNS、诊断设置和应用Workload Identity；不会恢复数据库。
 
+Stage5数据面操作从Runner发起，因此PG和Redis私有DNS区域还必须链接Runner VNet；VNet Peering不会传递Private DNS区域可见性。平台成功后先取得部署输出中的主机名并核对解析，结果必须只包含对应PE私网IPv4：
+
+```bash
+PLATFORM_OUTPUT="$(az deployment group show --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TARGET_RG" --name "llmgw-${ENVIRONMENT_NAME}-s5-platform" \
+  --query properties.outputs.platform.value --output json)"
+PG_HOST="$(jq -er '.postgresqlServerName + ".postgres.database.azure.com"' \
+  <<<"$PLATFORM_OUTPUT")"
+REDIS_HOST="$(jq -er '.managedRedisHostName' <<<"$PLATFORM_OUTPUT")"
+getent ahostsv4 "$PG_HOST"
+getent ahostsv4 "$REDIS_HOST"
+```
+
+若`stage5-database-roles --operation plan`在`database_roles.py`返回泛化的数据库错误，先查本次`azure-auth.json`确认profile为`database`、method为`managed-identity`，再执行上述DNS检查。PG Entra管理员已正确但PG主机解析为公网IP或无法解析时，不要改管理员、开放PG公网或使用`PGHOSTADDR`绕过DNS。更新到包含Stage5 Runner DNS链接的版本，重新plan/execute `stage5-platform`；审核计划应新增PG和Redis区域到批准Runner VNet的链接，不删除或重建数据资源。平台成功后重新解析，再重新运行`stage5-database-roles` plan；不得复用旧哈希。
+
 若旧版本在`send-managed-redis-to-log-analytics`报`CategoryGroup: 'allLogs' is not supported`，本次Stage5父部署为Failed，不能继续`database-roles`。Azure Managed Redis集群资源只提供`AllMetrics`，`default`数据库子资源提供`ConnectionEvents`日志；旧模板把集群误配为`allLogs`。失败时Redis集群/数据库及其他Stage5资源可能已经成功创建，但集群诊断设置整项未创建，因此缺少送往Log Analytics的Redis集群指标。不要删除这些部分成功资源，也不要手工把父部署改成成功。更新到包含“集群`AllMetrics`、数据库`ConnectionEvents`”修复的版本后，重新运行`stage5-platform --operation plan`，审核当前实际状态下的全部增量，再用新plan哈希execute；不得复用失败前的plan哈希。成功后确认父部署为Succeeded，并分别回读两级诊断设置。
 
 2. 创建`llmgw_migrator`、`llmgw_app`及DDL/DML边界。身份取决于前面选择的管理员路径：

@@ -6,13 +6,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.database_roles import create_roles, database_access, grant_roles, isolated_postgres_environment, provision_database_roles, role_contract
+from scripts.database_roles import create_roles, database_access, grant_roles, isolated_postgres_environment, provision_database_roles, require_private_postgres_dns, role_contract
 from scripts.customer_migration import ROOT, stage_fingerprint, validate_config
 from scripts.migration_deploy import group_id
 from tests.test_customer_migration import customer_config
 
 
 class DatabaseRoleTests(unittest.TestCase):
+    def test_postgres_dns_must_resolve_only_to_private_ipv4(self):
+        private = lambda *_args, **_kwargs: [(None, None, None, None, ("10.30.8.20", 5432))]
+        public = lambda *_args, **_kwargs: [(None, None, None, None, ("20.42.1.2", 5432))]
+        self.assertEqual(require_private_postgres_dns("target.postgres.database.azure.com", private), ["10.30.8.20"])
+        with self.assertRaisesRegex(ValueError, "private endpoint"):
+            require_private_postgres_dns("target.postgres.database.azure.com", public)
+        with self.assertRaisesRegex(ValueError, "does not resolve"):
+            require_private_postgres_dns("target.postgres.database.azure.com", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError()))
+
     def test_inherited_postgres_destinations_are_temporarily_removed(self):
         with patch.dict(os.environ, {"PGHOSTADDR": "unexpected", "PGSERVICE": "other", "PGPASSWORD": "synthetic", "UNRELATED": "retained"}, clear=True):
             with isolated_postgres_environment():
@@ -76,6 +85,7 @@ class DatabaseRoleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, ExitStack() as stack:
             path = Path(directory)
             stack.enter_context(patch("scripts.database_roles.AzureCommands", return_value=azure))
+            stack.enter_context(patch("scripts.database_roles.require_private_postgres_dns", return_value=["10.30.8.20"]))
             stack.enter_context(patch("scripts.database_roles.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="synthetic-token")))
             connect = stack.enter_context(patch("scripts.database_roles.psycopg.connect"))
             stack.enter_context(patch("scripts.database_roles.inspect_roles", return_value=[{"existing": None}, {"existing": None}]))
