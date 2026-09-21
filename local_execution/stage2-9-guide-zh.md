@@ -672,6 +672,7 @@ set -euo pipefail
 SUBSCRIPTION_ID="$(jq -er '.azure.subscriptionId' local_execution/customer.json)"
 TARGET_RG="$(jq -er '.target.resourceGroup' local_execution/customer.json)"
 TARGET_AKS="$(jq -er '.parameters.platform.stage4Aks.name' local_execution/customer.json)"
+ENVIRONMENT_NAME="$(jq -er '.environment' local_execution/customer.json)"
 VERIFY_KUBECONFIG="$(mktemp)"
 trap 'rm -f "$VERIFY_KUBECONFIG"' EXIT
 az aks get-credentials --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
@@ -686,6 +687,75 @@ kubectl --kubeconfig "$VERIFY_KUBECONFIG" get pods,service \
 ```
 
 通过条件：三个namespace存在；两套入口Pod Ready、内部LoadBalancer有不同私网IP；证书域名/指纹正确；错误Host和未批准来源被拒绝；AKS、ACR和证书Vault公网均关闭。此时仍不切业务流量。
+
+#### 私有AKS自动停机后的启动复核
+
+客户Policy夜间执行AKS stop/start时，通常不需要重跑Stage3–5部署。Private Link模式的AKS会在启动时重建由AKS管理的API Server Private Endpoint，其私网IP可能变化；用户另行创建且目标指向该AKS的Private Endpoint则不由AKS恢复，需要网络Owner删除后重建。ACR、证书Vault、PostgreSQL和Redis各自的Private Endpoint不属于“目标指向AKS”的PE，不因该提示删除。
+
+每次启动后先等待管理面完全恢复；`power=Running`但`state=Starting`仍不能继续：
+
+```bash
+set -euo pipefail
+SUBSCRIPTION_ID="$(jq -er '.azure.subscriptionId' local_execution/customer.json)"
+TARGET_RG="$(jq -er '.target.resourceGroup' local_execution/customer.json)"
+TARGET_AKS="$(jq -er '.parameters.platform.stage4Aks.name' local_execution/customer.json)"
+ENVIRONMENT_NAME="$(jq -er '.environment' local_execution/customer.json)"
+
+az aks wait --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
+  --name "$TARGET_AKS" --updated --interval 30 --timeout 1800
+az aks show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
+  --name "$TARGET_AKS" \
+  --query '{state:provisioningState,power:powerState.code,privateFqdn:privateFqdn}' \
+  --output json
+```
+
+只有`state=Succeeded`且`power=Running`时继续。先运行只读检查，它会重新发现本次API PE地址，验证Runner DNS、TLS、ACR和实际Kubernetes读取，不依赖停机前IP：
+
+```bash
+.venv/bin/python -m local_execution \
+  --config local_execution/customer.json --step stage4-target-check
+```
+
+然后重新取得临时kubeconfig，确认节点、系统Pod和两套入口恢复，并把当前入口IP与Stage4回执比较：
+
+```bash
+VERIFY_KUBECONFIG="$(mktemp)"
+trap 'rm -f "$VERIFY_KUBECONFIG"' EXIT
+az aks get-credentials --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG" \
+  --name "$TARGET_AKS" --file "$VERIFY_KUBECONFIG" --overwrite-existing
+kubelogin convert-kubeconfig --kubeconfig "$VERIFY_KUBECONFIG" -l azurecli
+kubectl --kubeconfig "$VERIFY_KUBECONFIG" wait --for=condition=Ready nodes --all --timeout=15m
+kubectl --kubeconfig "$VERIFY_KUBECONFIG" -n kube-system get pods
+kubectl --kubeconfig "$VERIFY_KUBECONFIG" -n llm-api-ingress rollout status \
+  deployment/llm-api-ingress --timeout=15m
+kubectl --kubeconfig "$VERIFY_KUBECONFIG" -n llm-admin-ingress rollout status \
+  deployment/llm-admin-ingress --timeout=15m
+
+EXPECTED_API_IP="$(az deployment group show --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TARGET_RG" --name "llmgw-${ENVIRONMENT_NAME}-s4-private-ingress" \
+  --query properties.outputs.privateIngress.value.api.privateIpAddress --output tsv)"
+EXPECTED_ADMIN_IP="$(az deployment group show --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$TARGET_RG" --name "llmgw-${ENVIRONMENT_NAME}-s4-private-ingress" \
+  --query properties.outputs.privateIngress.value.admin.privateIpAddress --output tsv)"
+ACTUAL_API_IP="$(kubectl --kubeconfig "$VERIFY_KUBECONFIG" -n llm-api-ingress \
+  get service llm-api-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+ACTUAL_ADMIN_IP="$(kubectl --kubeconfig "$VERIFY_KUBECONFIG" -n llm-admin-ingress \
+  get service llm-admin-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+printf 'api expected=%s actual=%s\nadmin expected=%s actual=%s\n' \
+  "$EXPECTED_API_IP" "$ACTUAL_API_IP" "$EXPECTED_ADMIN_IP" "$ACTUAL_ADMIN_IP"
+[[ -n "$ACTUAL_API_IP" && -n "$ACTUAL_ADMIN_IP" && \
+   "$ACTUAL_API_IP" == "$EXPECTED_API_IP" && \
+   "$ACTUAL_ADMIN_IP" == "$EXPECTED_ADMIN_IP" ]]
+```
+
+处理边界：
+
+- `stage4-target-check`通过且入口IP一致、rollout Ready：不重跑platform、证书Vault、target-connectivity、cluster-bootstrap、monitoring、private-ingress或Stage5。
+- `stage4-target-check`显示Runner VNet的AKS Private DNS链接缺失时：重新执行`stage4-target-connectivity`的plan，审核后仅在计划显示修复该链接时用新哈希execute；不重跑Stage4 platform。
+- 实际API PE NIC与AKS私有区域A记录长期不一致时：等待AKS托管资源协调，仍不一致则交Azure/网络Owner处理。`stage4-target-connectivity`不拥有或改写AKS托管PE/A记录，不能靠反复execute修复。
+- 入口Pod/Service未恢复或入口IP与回执不同：先查看Service事件；控制面授权错误才执行`stage4-aks-ingress-role`。随后为当前状态重新plan/execute `stage4-private-ingress`，让TLS在线验证和ARM回执绑定新地址，不复用停机前哈希。
+- 查询到用户自建且目标为该AKS的Private Endpoint时，停止自动恢复，由网络Owner按客户变更流程删除并重建该PE；不要删除AKS管理的API PE，也不要误删ACR/Vault/PG/Redis PE。
+- 已进入Stage9时，还要复核Private Link Service、Front Door origin和实际客户端；入口前端地址或资源映射变化时重新plan受影响的Stage9步骤，不直接启流量。
 
 ### Stage5：PostgreSQL、Redis、后台秘密和恢复演练
 
