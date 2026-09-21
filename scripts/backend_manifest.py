@@ -72,6 +72,7 @@ def render_backend_manifest(config, platform, versions, host, endpoint_subnet):
     config_name = "litellm-config-" + hashlib.sha256(config_text.encode()).hexdigest()[:12]
     config_map = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": config_name, "namespace": "litellm"}, "data": {"config.yaml": config_text}}
     deployment = yaml.safe_load((ROOT / "deploy/base/deployment.yaml").read_text())
+    deployment["spec"].pop("replicas", None)
     deployment["spec"].update(minReadySeconds=30, progressDeadlineSeconds=900)
     pod = deployment["spec"]["template"]["spec"]
     provider = next(item for item in access["resources"] if item["kind"] == "SecretProviderClass")
