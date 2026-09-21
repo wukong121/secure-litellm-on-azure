@@ -60,6 +60,8 @@ def validate(path: Path) -> None:
             assert "secretObjects" not in provider
             assert provider["parameters"]["clientID"] == f"REPLACE_{plane.upper()}_PROXY_CLIENT_ID"
             assert provider["parameters"]["keyvaultName"] == f"REPLACE_{plane.upper()}_AUTH_VAULT_NAME"
+            objects = yaml.safe_load(provider["parameters"]["objects"])["array"]
+            assert all(yaml.safe_load(item)["filePermission"] == "0444" for item in objects)
         ingress_policy = policies[f"llm-{plane}-proxy-ingress"]["spec"]
         assert ingress_policy["podSelector"]["matchLabels"]["plane"] == plane
         assert ingress_policy["ingress"][0]["from"] == [{

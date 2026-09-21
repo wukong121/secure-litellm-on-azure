@@ -61,6 +61,8 @@ def render_backend_manifest(config, platform, versions, host, endpoint_subnet):
     deployment = yaml.safe_load((ROOT / "deploy/base/deployment.yaml").read_text())
     deployment["spec"].update(minReadySeconds=30, progressDeadlineSeconds=900)
     pod = deployment["spec"]["template"]["spec"]
+    provider = next(item for item in access["resources"] if item["kind"] == "SecretProviderClass")
+    deployment["spec"]["template"]["metadata"].setdefault("annotations", {})["llmgw/backend-secret-mount"] = hashlib.sha256(provider["spec"]["parameters"]["objects"].encode()).hexdigest()
     pod["terminationGracePeriodSeconds"] = 600
     pod["serviceAccountName"] = "litellm"
     deployment["spec"]["template"]["metadata"]["labels"]["azure.workload.identity/use"] = "true"

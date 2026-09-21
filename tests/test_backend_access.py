@@ -39,6 +39,7 @@ class BackendAccessTests(unittest.TestCase):
         objects = [yaml.safe_load(item) for item in yaml.safe_load(provider["spec"]["parameters"]["objects"])["array"]]
         self.assertEqual({item["objectAlias"] for item in objects}, set(BACKEND_SECRETS.values()))
         self.assertTrue(all(item["objectVersion"] == "a" * 32 for item in objects))
+        self.assertTrue(all(item["filePermission"] == "0444" for item in objects))
         invalid = copy.deepcopy(versions)
         invalid["litellm-master-key"]["id"] = "https://other.vault.azure.net/secrets/key/version"
         with self.assertRaises(ValueError):
