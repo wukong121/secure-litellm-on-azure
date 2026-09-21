@@ -336,6 +336,10 @@ def parameters_for(config, stage, component):
         require(parameters.get("stage4RoleAssignmentNaming", "principal-id") in {"principal-id", "resource-id"}, "Invalid Stage 4 role assignment naming mode")
         if stage >= 5:
             require("stage5Data" in parameters, "Stage 5 database configuration is required")
+            runner_dns = config["parameters"].get("runner-target-connectivity", {})
+            runner_vnet = runner_dns.get("runnerVirtualNetworkId", "") if isinstance(runner_dns, dict) else ""
+            manage_runner_dns = runner_dns.get("manageDnsLink", True) if isinstance(runner_dns, dict) and runner_vnet else False
+            parameters.update(stage5RunnerVirtualNetworkId=runner_vnet, manageStage5RunnerDnsLinks=manage_runner_dns)
             if "certificate-vault" in config["parameters"]:
                 require(not parameters.get("createStage5KeyVaultPrivateDnsZone", False), "certificate-vault owns Key Vault DNS; set createStage5KeyVaultPrivateDnsZone=false")
                 parameters.update(createStage5KeyVaultPrivateDnsZone=False, configureStage5KeyVaultDnsLink=False)

@@ -19,6 +19,12 @@ param createPostgresqlZone bool = false
 @description('Create the Azure Managed Redis private DNS zone when it does not already exist.')
 param createManagedRedisZone bool = true
 
+@description('Approved Runner VNet resource ID for Stage 5 private data-plane operations.')
+param runnerVirtualNetworkId string = ''
+
+@description('Create Runner links for the Stage 5 private DNS zones.')
+param configureRunnerLinks bool = false
+
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-07-01' existing = {
   name: virtualNetworkName
 }
@@ -62,6 +68,9 @@ resource azureOpenAILink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@
 var keyVaultZoneName = 'privatelink.vaultcore.azure.net'
 var postgresqlZoneName = 'privatelink.postgres.database.azure.com'
 var managedRedisZoneName = 'privatelink.redis.azure.net'
+var targetVirtualNetworkId = virtualNetwork.id
+var createRunnerLinks = configureStage5Zones && configureRunnerLinks && !empty(runnerVirtualNetworkId) && toLower(runnerVirtualNetworkId) != toLower(targetVirtualNetworkId)
+var runnerLinkName = 'stage5-runner-${uniqueString(toLower(runnerVirtualNetworkId))}'
 
 resource keyVaultZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (configureStage5Zones && createKeyVaultZone) {
   name: keyVaultZoneName
@@ -77,6 +86,21 @@ resource keyVaultLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@202
     registrationEnabled: false
     virtualNetwork: {
       id: virtualNetwork.id
+    }
+  }
+  dependsOn: [
+    keyVaultZone
+  ]
+}
+
+resource keyVaultRunnerLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (createRunnerLinks && configureKeyVaultLink) {
+  #disable-next-line use-parent-property
+  name: '${keyVaultZoneName}/${runnerLinkName}'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: runnerVirtualNetworkId
     }
   }
   dependsOn: [
@@ -105,6 +129,21 @@ resource postgresqlLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2
   ]
 }
 
+resource postgresqlRunnerLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (createRunnerLinks) {
+  #disable-next-line use-parent-property
+  name: '${postgresqlZoneName}/${runnerLinkName}'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: runnerVirtualNetworkId
+    }
+  }
+  dependsOn: [
+    postgresqlZone
+  ]
+}
+
 resource managedRedisZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (configureStage5Zones && createManagedRedisZone) {
   name: managedRedisZoneName
   location: 'global'
@@ -126,10 +165,27 @@ resource managedRedisLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks
   ]
 }
 
+resource managedRedisRunnerLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (createRunnerLinks) {
+  #disable-next-line use-parent-property
+  name: '${managedRedisZoneName}/${runnerLinkName}'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: runnerVirtualNetworkId
+    }
+  }
+  dependsOn: [
+    managedRedisZone
+  ]
+}
+
 output privateDns object = {
   acrZoneId: acrZone.id
   azureOpenAIZoneId: azureOpenAIZone.id
   keyVaultZoneId: resourceId('Microsoft.Network/privateDnsZones', keyVaultZoneName)
   postgresqlZoneId: resourceId('Microsoft.Network/privateDnsZones', postgresqlZoneName)
   managedRedisZoneId: resourceId('Microsoft.Network/privateDnsZones', managedRedisZoneName)
+  runnerLinksManaged: createRunnerLinks
+  runnerLinkName: createRunnerLinks ? runnerLinkName : ''
 }

@@ -1,8 +1,10 @@
 """Provision bounded Entra database roles on the deployed target PostgreSQL server."""
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 from contextlib import contextmanager
 from uuid import UUID
@@ -29,6 +31,15 @@ def database_access(config):
     require(isinstance(access, dict) and set(access) == {"migrationPrincipalId"}, "databaseAccess requires the migration service principal Object ID")
     require(isinstance(access["migrationPrincipalId"], str) and UUID(access["migrationPrincipalId"]).int != 0, "Invalid migration service principal Object ID")
     return access
+
+
+def require_private_postgres_dns(host, resolve=socket.getaddrinfo):
+    try:
+        addresses = {item[4][0] for item in resolve(host, 5432, type=socket.SOCK_STREAM)}
+    except OSError:
+        raise MigrationError("PostgreSQL private hostname does not resolve from this Runner; deploy the Stage 5 Runner private DNS links") from None
+    require(addresses and all(ipaddress.ip_address(address).version == 4 and ipaddress.ip_address(address).is_private for address in addresses), "PostgreSQL hostname must resolve only to private endpoint IPv4 addresses from this Runner; deploy the Stage 5 Runner private DNS links")
+    return sorted(addresses)
 
 
 def role_contract(config, application):
@@ -129,6 +140,7 @@ def provision_database_roles(config, operation, revision, directory, approved):
     require(str(data["postgresqlEntraAdministratorObjectId"]).lower() not in {role["objectId"] for role in roles}, "Do not use the database administrator as migration or application identity")
     database = data["postgresqlDatabaseName"]
     require(re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", database) is not None, "Invalid target database name")
+    require_private_postgres_dns(server["host"])
     token = subprocess.run(["az", "account", "get-access-token", "--subscription", config["azure"]["subscriptionId"], "--resource-type", "oss-rdbms", "--query", "accessToken", "--output", "tsv"], capture_output=True, text=True, check=False, timeout=120)
     require(token.returncode == 0 and token.stdout.strip(), "Unable to obtain database administrator token")
     try:
@@ -158,5 +170,9 @@ def provision_database_roles(config, operation, revision, directory, approved):
             private_write(directory / "runtime-summary.json", json.dumps(summary, indent=2) + "\n")
         print(json.dumps(summary))
         return summary
+    except psycopg.OperationalError:
+        raise MigrationError("PostgreSQL connection failed after private DNS validation; verify Runner TCP/5432, TLS trust, and the configured Entra administrator identity") from None
     except psycopg.Error:
-        raise MigrationError("Database role operation failed; mapped roles may remain if target grants failed. Replan before retrying; no acceptance issued.") from None
+        if operation == "plan":
+            raise MigrationError("PostgreSQL role plan could not inspect the target database; no database changes were made") from None
+        raise MigrationError("Database role execution failed; mapped roles may remain if target grants failed. Replan before retrying; no acceptance issued.") from None
