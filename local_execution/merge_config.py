@@ -67,10 +67,16 @@ def remove_keys(target, keys):
 
 def derived_values(config):
     platform = config.get("parameters", {}).get("platform", {})
+    stage5 = platform.get("stage5Data", {})
     backup = config.get("parameters", {}).get("backup", {})
     certificate = config.get("parameters", {}).get("certificate-vault", {})
     local = config.get("localExecution", {})
     host = local.get("executionHost", {})
+    runtime_inputs = local.get("runtimeInputs", {})
+    database_profile = local.get("authentication", {}).get("database", {})
+    backup_blob = runtime_inputs.get("backupBlob", "")
+    backup_sha256 = runtime_inputs.get("backupSha256", "")
+    backup_match = re.fullmatch(r"pre-change/([0-9a-f]{32})\.dump", backup_blob) if isinstance(backup_blob, str) else None
     values = {
         "REPLACE_SUBSCRIPTION_ID": config.get("azure", {}).get("subscriptionId"),
         "REPLACE_AZURE_REGION": config.get("location"),
@@ -81,7 +87,22 @@ def derived_values(config):
         "REPLACE_GLOBALLY_UNIQUE_ACR_NAME": platform.get("containerRegistryName"),
         "REPLACE_CERTIFICATE_VAULT_NAME": certificate.get("vaultName"),
         "REPLACE_GLOBALLY_UNIQUE_CERTIFICATE_VAULT_NAME": certificate.get("vaultName"),
+        "REPLACE_SUPPORTED_PG_SKU": stage5.get("postgresqlSkuName"),
+        "REPLACE_LOCAL_OPERATOR_UAMI_PRINCIPAL_ID": config.get("databaseAccess", {}).get("migrationPrincipalId"),
+        "REPLACE_32_HEX": backup_match.group(1) if backup_match else None,
+        "REPLACE_64_HEX_SHA256": backup_sha256 if isinstance(backup_sha256, str) and re.fullmatch(r"[0-9a-f]{64}", backup_sha256) else None,
     }
+    if stage5.get("postgresqlEntraAdministratorPrincipalType") == "Group":
+        values.update({
+            "REPLACE_PG_ADMIN_GROUP_OBJECT_ID": stage5.get("postgresqlEntraAdministratorObjectId"),
+            "REPLACE_PG_ADMIN_GROUP_NAME": stage5.get("postgresqlEntraAdministratorPrincipalName"),
+        })
+    if stage5.get("postgresqlEntraAdministratorPrincipalType") == "ServicePrincipal":
+        values.update({
+            "REPLACE_DATABASE_ADMIN_UAMI_CLIENT_ID": database_profile.get("clientId"),
+            "REPLACE_DATABASE_ADMIN_UAMI_PRINCIPAL_ID": stage5.get("postgresqlEntraAdministratorObjectId"),
+            "REPLACE_DATABASE_ADMIN_UAMI_NAME": stage5.get("postgresqlEntraAdministratorPrincipalName"),
+        })
     return {key: value for key, value in values.items() if isinstance(value, str) and value and "REPLACE_" not in value}
 
 
@@ -150,7 +171,7 @@ def merge_stage(config, catalog, stage, options=(), values=None):
             apply_section(merged, section)
         else:
             deep_merge(merged["localExecution"], section)
-    replacements = {**derived_values(merged), **(values or {})}
+    replacements = {**derived_values(merged), **derived_values(config), **(values or {})}
     merged = replace_placeholders(merged, replacements)
     return merged, sorted(unresolved_placeholders(merged))
 

@@ -932,6 +932,8 @@ kubectl --kubeconfig "$LEGACY_RUNTIME_KUBECONFIG" -n "$LEGACY_NAMESPACE" \
   --option database-admin-identity --option legacy-master-key-salt
 ```
 
+当前`customer.json`已经完整应用过相同Stage5身份路径时，合并器会按现有字段复用PG SKU、迁移Principal、备份引用及database UAMI标识，因此上述命令不需要再次填写这些值。plan的`missingPlaceholders`应为空，`changedPaths`应只有`localExecution.runtimeInputs.legacySaltSource`；若仍出现其他占位符或变更路径，停止apply并核对所选option是否与现有管理员类型一致，不复制空的`values.required.json`覆盖原values文件。
+
 确认`customer.json`中的`legacySaltSource`为获批值后，再生成backend-secrets计划；execute必须使用本次新计划哈希：
 
 ```bash
