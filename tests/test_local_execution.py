@@ -532,6 +532,8 @@ class LocalExecutionTests(unittest.TestCase):
         for dependency in ("-r ../requirements.txt", "acme==5.8.0", "dnspython==2.8.0", "josepy==2.2.0"):
             self.assertIn(dependency, requirements)
         self.assertIn("local_execution/requirements.txt", guide)
+        for value in ("BACKEND_IMAGE_SUMMARY", "BACKEND_IMAGE_PREFIX", "BACKEND_DIGEST", ".signatureVerified == true", "CURRENT_REVISION=\"$(git rev-parse HEAD)\"", "${BACKEND_IMAGE##*@sha256:}", "REPLACE_BUILT_64_HEX_DIGEST"):
+            self.assertIn(value, later_guide)
         self.assertNotIn("runner-connectivity", example["parameters"])
         self.assertIn("在线Runner VM绝不能挂载高权限UAMI", guide)
         self.assertIn("可以复用客户现有的deploy/runtime UAMI", guide)
