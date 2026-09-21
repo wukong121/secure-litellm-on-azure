@@ -859,6 +859,8 @@ getent ahostsv4 "$REDIS_HOST"
 
 若错误明确为`SSL error: certificate verify failed`，先用`openssl s_client -starttls postgres -connect "$PG_HOST:5432" -servername "$PG_HOST" -verify_return_error`核对服务端链。仓库固定的psycopg binary/libpq组合不得使用模糊的`sslrootcert=system`；本地Stage5数据库操作使用Ubuntu明确CA bundle`/etc/ssl/certs/ca-certificates.crt`并保持`verify-full`。不要改成`sslmode=require`、关闭主机名校验或下载临时CA替代系统信任库。
 
+若TLS修复后plan仍返回`PostgreSQL role plan could not inspect the target database`，确认Runner已更新到包含Azure PG角色契约修复的版本。PG16的`pgaadauth_list_principals(false)`返回列名`rolname`；ARM创建的空数据库可由`azure_pg_admin`同时持有数据库和`public` schema，这是本流程允许的初始状态。execute会在创建并核验`llmgw_migrator`后把`public` owner转交给该角色，再撤销`PUBLIC`的CREATE权限。不要手工改owner、提前创建同名角色或重建数据库；更新代码后重新plan并审核`before.schema`和计划中的owner转交，不得复用旧哈希。
+
 若旧版本在`send-managed-redis-to-log-analytics`报`CategoryGroup: 'allLogs' is not supported`，本次Stage5父部署为Failed，不能继续`database-roles`。Azure Managed Redis集群资源只提供`AllMetrics`，`default`数据库子资源提供`ConnectionEvents`日志；旧模板把集群误配为`allLogs`。失败时Redis集群/数据库及其他Stage5资源可能已经成功创建，但集群诊断设置整项未创建，因此缺少送往Log Analytics的Redis集群指标。不要删除这些部分成功资源，也不要手工把父部署改成成功。更新到包含“集群`AllMetrics`、数据库`ConnectionEvents`”修复的版本后，重新运行`stage5-platform --operation plan`，审核当前实际状态下的全部增量，再用新plan哈希execute；不得复用失败前的plan哈希。成功后确认父部署为Succeeded，并分别回读两级诊断设置。
 
 2. 创建`llmgw_migrator`、`llmgw_app`及DDL/DML边界。身份取决于前面选择的管理员路径：

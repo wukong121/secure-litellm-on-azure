@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.database_roles import POSTGRES_CA_BUNDLE, create_roles, database_access, grant_roles, isolated_postgres_environment, postgres_ca_bundle, provision_database_roles, require_private_postgres_dns, role_contract
+from scripts.database_roles import POSTGRES_CA_BUNDLE, create_roles, database_access, grant_roles, inspect_roles, inspect_schema, isolated_postgres_environment, postgres_ca_bundle, provision_database_roles, require_private_postgres_dns, role_contract
 from scripts.customer_migration import ROOT, stage_fingerprint, validate_config
 from scripts.migration_deploy import group_id
 from tests.test_customer_migration import customer_config
@@ -62,8 +62,38 @@ class DatabaseRoleTests(unittest.TestCase):
         self.assertIn("false, false", statements[0])
         self.assertNotIn(roles[0]["objectId"], statements[0])
         self.assertIn('GRANT CONNECT, CREATE ON DATABASE "litellm" TO "llmgw_migrator"', statements)
+        self.assertIn('ALTER SCHEMA public OWNER TO "llmgw_migrator"', statements)
         self.assertIn('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "llmgw_app"', statements)
         self.assertFalse(any("PASSWORD" in statement or "SUPERUSER" in statement or "DROP" in statement for statement in statements))
+
+    def test_inspection_uses_azure_principal_contract(self):
+        role = role_contract(self.config, self.application)[0]
+        connection = Mock()
+        cursor = Mock()
+        cursor.fetchall.side_effect = [[{"rolname": role["name"], "principaltype": "service", "objectid": role["objectId"], "tenantid": role["tenantId"], "isadmin": 0}], []]
+        cursor.fetchone.return_value = {"rolname": role["name"], "rolsuper": False, "rolcreaterole": False, "rolcreatedb": False, "rolreplication": False, "rolbypassrls": False, "rolcanlogin": True}
+        connection.cursor.return_value.__enter__ = Mock(return_value=cursor)
+        connection.cursor.return_value.__exit__ = Mock(return_value=False)
+
+        result = inspect_roles(connection, [role])
+
+        self.assertEqual(result[0]["mapping"]["rolname"], role["name"])
+        self.assertIn("SELECT rolname,", cursor.execute.call_args_list[0].args[0])
+
+    def test_initial_azure_database_owner_is_approved_but_other_owner_is_rejected(self):
+        def connection_with_owner(owner, database_owner):
+            connection = Mock()
+            cursor = Mock()
+            cursor.fetchone.side_effect = [{"owner": owner, "database_owner": database_owner, "acl": None}, {"acl": None}]
+            cursor.fetchall.side_effect = [[], []]
+            connection.cursor.return_value.__enter__ = Mock(return_value=cursor)
+            connection.cursor.return_value.__exit__ = Mock(return_value=False)
+            return connection
+
+        result = inspect_schema(connection_with_owner("azure_pg_admin", "azure_pg_admin"))
+        self.assertEqual(result["schema"]["owner"], "azure_pg_admin")
+        with self.assertRaisesRegex(ValueError, "Azure database owner"):
+            inspect_schema(connection_with_owner("other_owner", "azure_pg_admin"))
 
     def test_database_identity_config_only_invalidates_stage5_onwards(self):
         config = customer_config()

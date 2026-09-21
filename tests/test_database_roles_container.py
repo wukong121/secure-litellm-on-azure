@@ -43,6 +43,8 @@ class DatabaseRoleContainerTests(unittest.TestCase):
                 with psycopg.connect(host=address, dbname="litellm", user="postgres", sslmode="disable", row_factory=dict_row) as admin:
                     grant_roles(admin, roles, "litellm")
                     verify_grants(admin)
+                    owner = admin.execute("SELECT pg_get_userbyid(nspowner) AS owner FROM pg_catalog.pg_namespace WHERE nspname = 'public'").fetchone()
+                    self.assertEqual(owner["owner"], "llmgw_migrator")
                 with psycopg.connect(host=address, dbname="litellm", user="llmgw_migrator", sslmode="disable") as migrator:
                     migrator.execute("CREATE TABLE public.workflow_probe (id bigserial PRIMARY KEY, value text NOT NULL)")
                 with psycopg.connect(host=address, dbname="litellm", user="llmgw_app", sslmode="disable", autocommit=True) as application:
