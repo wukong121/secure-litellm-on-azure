@@ -218,7 +218,7 @@ DNS应让目标服务的正常FQDN解析到其Private Endpoint；连接仍使用
 | GitHub CLI `gh` | 支持`gh api`和artifact读取 | 预装；作业内用GitHub提供的短期Token，不需在VM长驻个人PAT |
 | OpenSSL | 使用Ubuntu受支持版本及正确CA信任库 | 入口证书材料和真实TLS校验 |
 | `skopeo`、`syft`、`trivy`、`cosign` | 在最终演练版本中验证可用并记录版本 | private-ingress/application分别依赖这些工具；晋级workflow虽安装部分工具，不能假定此前已跑过晋级才能执行其他动作 |
-| PostgreSQL客户端 | `psql`、`pg_restore`可用，恢复工具须兼容实际dump格式；旧PG16优先匹配经验证的16系列工具 | 源`pg_dump`在旧Pod内执行；目标恢复在runner执行，须验证所链接libpq支持当前`PGSSLROOTCERT=system`和`verify-full` |
+| PostgreSQL客户端 | `psql`、`pg_restore`可用，恢复工具须兼容实际dump格式；旧PG16优先匹配经验证的16系列工具 | 源`pg_dump`在旧Pod内执行；目标恢复在runner执行，使用`PGSSLMODE=verify-full`及Ubuntu系统CA bundle `/etc/ssl/certs/ca-certificates.crt` |
 
 Python依赖的固定版本以[运行workflow](../.github/workflows/customer-runtime.yml)为准，其中已安装PyYAML、cryptography、service-identity、psycopg、Azure Identity/Key Vault SDK；`certificate-renew`另安装ACME/DNS依赖。不要为了“全部预装”改写系统Python或随意升级这些固定版本。
 

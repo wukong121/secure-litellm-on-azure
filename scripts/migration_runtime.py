@@ -20,6 +20,9 @@ from scripts.migration_evidence import draft_report
 from scripts.workflow_diagnostics import command_failure_summary, diagnostic_exit
 
 
+POSTGRES_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+
+
 def file_sha256(path):
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -315,8 +318,9 @@ def target_database_restore(config, operation, revision, directory, approved):
     require(file_sha256(backup) == digest, "Downloaded backup SHA256 mismatch")
     token_result = subprocess.run(["az", "account", "get-access-token", "--subscription", config["azure"]["subscriptionId"], "--resource-type", "oss-rdbms", "--query", "accessToken", "--output", "tsv"], capture_output=True, text=True, check=False)
     require(token_result.returncode == 0 and bool(token_result.stdout.strip()), "Unable to acquire PostgreSQL Entra token")
+    require(Path(POSTGRES_CA_BUNDLE).is_file(), "PostgreSQL system CA bundle is missing from the Runner")
     environment = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
-    environment.update(PGHOST=server["host"], PGPORT="5432", PGDATABASE=database, PGUSER=username, PGPASSWORD=token_result.stdout.strip(), PGSSLMODE="verify-full", PGSSLROOTCERT="system")
+    environment.update(PGHOST=server["host"], PGPORT="5432", PGDATABASE=database, PGUSER=username, PGPASSWORD=token_result.stdout.strip(), PGSSLMODE="verify-full", PGSSLROOTCERT=POSTGRES_CA_BUNDLE)
     empty_query = "SELECT (SELECT count(*) FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_namespace.oid = pg_class.relnamespace WHERE nspname = 'public') + (SELECT count(*) FROM pg_catalog.pg_proc JOIN pg_catalog.pg_namespace ON pg_namespace.oid = pg_proc.pronamespace WHERE nspname = 'public') + (SELECT count(*) FROM pg_catalog.pg_type JOIN pg_catalog.pg_namespace ON pg_namespace.oid = pg_type.typnamespace WHERE nspname = 'public') + (SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname NOT IN ('public', 'information_schema') AND nspname NOT LIKE 'pg_%');"
     tables = run_command(["psql", "--no-psqlrc", "--no-password", "--set", "ON_ERROR_STOP=1", "-At", "-c", empty_query], directory, "target-empty-check", environment=environment).strip()
     require(tables == "0", "Target database is not empty; refusing to overwrite or clean it")

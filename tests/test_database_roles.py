@@ -6,13 +6,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.database_roles import create_roles, database_access, grant_roles, isolated_postgres_environment, provision_database_roles, require_private_postgres_dns, role_contract
+from scripts.database_roles import POSTGRES_CA_BUNDLE, create_roles, database_access, grant_roles, isolated_postgres_environment, postgres_ca_bundle, provision_database_roles, require_private_postgres_dns, role_contract
 from scripts.customer_migration import ROOT, stage_fingerprint, validate_config
 from scripts.migration_deploy import group_id
 from tests.test_customer_migration import customer_config
 
 
 class DatabaseRoleTests(unittest.TestCase):
+    def test_postgres_ca_bundle_must_exist(self):
+        self.assertEqual(postgres_ca_bundle(), POSTGRES_CA_BUNDLE)
+        with self.assertRaisesRegex(ValueError, "CA bundle is missing"):
+            postgres_ca_bundle("/missing/ca-bundle.crt")
+
     def test_postgres_dns_must_resolve_only_to_private_ipv4(self):
         private = lambda *_args, **_kwargs: [(None, None, None, None, ("10.30.8.20", 5432))]
         public = lambda *_args, **_kwargs: [(None, None, None, None, ("20.42.1.2", 5432))]
@@ -96,6 +101,7 @@ class DatabaseRoleTests(unittest.TestCase):
             plan = provision_database_roles(self.config, "plan", "a" * 40, path, "")
             self.assertEqual([call.kwargs["dbname"] for call in connect.call_args_list], ["postgres", "litellm"])
             self.assertTrue(all(call.kwargs["sslmode"] == "verify-full" for call in connect.call_args_list))
+            self.assertTrue(all(call.kwargs["sslrootcert"] == POSTGRES_CA_BUNDLE for call in connect.call_args_list))
             create.assert_not_called()
             grant.assert_not_called()
             self.assertNotIn("synthetic-token", (path / "runtime-review.json").read_text())
