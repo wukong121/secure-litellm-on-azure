@@ -59,6 +59,9 @@ class BackendManifestTests(unittest.TestCase):
         versions = {name: {"id": f"https://synthetic-backend.vault.azure.net/secrets/{name}/" + "a" * 32, "version": "a" * 32} for name in backend_secrets(config)}
         documents = render_backend_manifest(config, platform, versions, "synthetic.postgres.database.azure.com", "10.30.8.0/24")
         deployment = next(item for item in documents if item["kind"] == "Deployment")
+        autoscaler = next(item for item in documents if item["kind"] == "HorizontalPodAutoscaler")
+        self.assertNotIn("replicas", deployment["spec"])
+        self.assertEqual(autoscaler["spec"]["minReplicas"], 2)
         environment = {item["name"]: item["value"] for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
         self.assertEqual(application_authentication(config), {"mode": "native", "adminUsername": "gateway-admin"})
         self.assertEqual(environment["LLMGW_GATEWAY_AUTH_MODE"], "native")
@@ -67,6 +70,10 @@ class BackendManifestTests(unittest.TestCase):
         peers = policy["spec"]["ingress"][0]["from"]
         self.assertEqual({peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] for peer in peers}, {"llm-api-ingress", "llm-admin-ingress"})
         self.assertTrue(all(peer["podSelector"]["matchLabels"]["app.kubernetes.io/name"] == "llmgw-ingress" for peer in peers))
+        conflicting = copy.deepcopy(documents)
+        next(item for item in conflicting if item["kind"] == "Deployment")["spec"]["replicas"] = 2
+        with self.assertRaisesRegex(ValueError, "HPA ownership"):
+            check_application(conflicting, 6, config)
         for authentication in ({"mode": "native"}, {"mode": "native", "adminUsername": "bad name"}, {"mode": "other"}):
             invalid = copy.deepcopy(config)
             invalid["application"]["authentication"] = authentication

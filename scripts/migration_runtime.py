@@ -92,6 +92,15 @@ def hardened_spec(deployment):
 def check_application(documents, stage, config):
     require(stage in {6, 7, 8}, "Application publishing supports stages 6, 7 and 8")
     require(isinstance(documents, list) and documents, "Reviewed rendered manifests are required")
+    autoscaled = {}
+    for document in documents:
+        if isinstance(document, dict) and document.get("kind") == "HorizontalPodAutoscaler":
+            spec = document.get("spec", {})
+            target = spec.get("scaleTargetRef", {})
+            name = target.get("name")
+            require(target.get("apiVersion") == "apps/v1" and target.get("kind") == "Deployment" and isinstance(name, str), "HPA must target an explicit apps/v1 Deployment")
+            require(name not in autoscaled and type(spec.get("minReplicas")) is int and spec["minReplicas"] >= 2 and type(spec.get("maxReplicas")) is int and spec["maxReplicas"] >= spec["minReplicas"], "HPA must preserve at least two available deployment replicas")
+            autoscaled[name] = spec
     allowed = {"Namespace", "Deployment", "Service", "ServiceAccount", "ConfigMap", "SecretProviderClass", "NetworkPolicy", "PodDisruptionBudget", "HorizontalPodAutoscaler", "Ingress", "CronJob"}
     kinds = set()
     identities = set()
@@ -139,7 +148,10 @@ def check_application(documents, stage, config):
         spec = document["spec"]
         if kind == "Deployment":
             deployments.add(metadata["name"])
-            require(spec.get("replicas", 1) >= 2, "Target deployments require at least two replicas")
+            if metadata["name"] in autoscaled:
+                require("replicas" not in spec, "Autoscaled deployments must leave replicas under HPA ownership")
+            else:
+                require(type(spec.get("replicas")) is int and spec["replicas"] >= 2, "Target deployments require at least two replicas")
             pod = spec["template"]["spec"]
         else:
             pod = spec["jobTemplate"]["spec"]["template"]["spec"]
