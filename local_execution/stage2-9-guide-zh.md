@@ -629,7 +629,50 @@ AKS私有API证书由集群CA签发，检查器会从本次生成的kubeconfig�
 unset COSIGN_PASSWORD
 ```
 
-保存输出`result.image`的完整digest，Stage6填入`application.backendImage`。镜像推送成功但扫描或签名失败时不得使用。
+命令成功后，从本Runner的受控输出中选择**当前Git revision、当前environment、Azure后台runtime、签名已回验**的最新产物。不要使用旧revision的成功镜像，也不要从ACR tag猜digest：
+
+```bash
+CURRENT_REVISION="$(git rev-parse HEAD)"
+ENVIRONMENT_NAME="$(jq -er '.environment' local_execution/customer.json)"
+ACR_NAME="$(jq -er '.parameters.platform.containerRegistryName' \
+  local_execution/customer.json)"
+BACKEND_IMAGE_PREFIX="${ACR_NAME}.azurecr.io/litellm-azure@sha256:"
+
+BACKEND_IMAGE_SUMMARY=
+while IFS= read -r candidate; do
+  if jq -e --arg revision "$CURRENT_REVISION" \
+      --arg environment "$ENVIRONMENT_NAME" \
+      --arg prefix "$BACKEND_IMAGE_PREFIX" \
+      '.revision == $revision
+       and .environment == $environment
+       and .runtime == "azure"
+       and .signatureVerified == true
+       and (.image | type == "string"
+            and startswith($prefix)
+            and test("@sha256:[0-9a-f]{64}$"))' \
+      "$candidate" >/dev/null; then
+    BACKEND_IMAGE_SUMMARY="$candidate"
+    break
+  fi
+done < <(
+  find temp/local-stage09 -mindepth 2 -maxdepth 2 -type f \
+    -path '*-stage4-promote-backend-image-*/target-image-summary.json' \
+    -printf '%T@ %p\n' | sort -nr | cut -d' ' -f2-
+)
+
+if [[ -z "$BACKEND_IMAGE_SUMMARY" ]]; then
+  echo 'No verified backend image for the current revision/environment' >&2
+  false
+else
+  BACKEND_IMAGE="$(jq -er '.image' "$BACKEND_IMAGE_SUMMARY")"
+  BACKEND_DIGEST="${BACKEND_IMAGE##*@sha256:}"
+  [[ "$BACKEND_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+  printf 'Backend image: %s\nStage6 digest value: %s\n' \
+    "$BACKEND_IMAGE" "$BACKEND_DIGEST"
+fi
+```
+
+`Backend image`是完整不可变引用；`Stage6 digest value`输出的纯64位十六进制值才填写`REPLACE_BUILT_64_HEX_DIGEST`，不包含`sha256:`。镜像推送成功但扫描、签名或上述revision/environment核对失败时不得使用。
 
 8. 准备入口证书。手工导入按[Stage4证书导入步骤](../docs/customer-migration-guide-zh.md#4-c-部署后手动导入两个secret)上传`api-tls`和`admin-tls`。选择自动API证书时，先给当前客户账号或operator UAMI授予公共DNS zone的DNS Zone Contributor和证书Vault的Key Vault Secrets Officer，再执行：
 
@@ -1000,7 +1043,7 @@ az postgres flexible-server show --subscription "$SUBSCRIPTION_ID" \
 
 **客户模式使用当前登录账号；验证模式使用operator UAMI。** 它已获得新AKS Cluster User/Cluster Admin；Stage5数据库、秘密和Schema回执必须属于当前代码和配置。
 
-1. 将Stage4镜像步骤输出的完整digest和实际模型deployment填入Stage6 values文件；`connectionAlias`必须匹配Stage4模型账号，然后合并：
+1. 按Stage4第7步的提取命令取得当前revision的`BACKEND_DIGEST`，将其纯64位值填入Stage6 values文件的`REPLACE_BUILT_64_HEX_DIGEST`；不要填写完整镜像引用、`sha256:`前缀、tag、schema plan哈希或SBOM哈希。`REPLACE_EXISTING_MODEL_DEPLOYMENT_NAME`填写`connectionAlias=primary`对应Azure OpenAI账号中实际Succeeded的deployment名称，不是模型展示名。需要在新shell继续时，重新运行Stage4提取块从证据恢复变量，然后合并：
 
 ```bash
 .venv/bin/python -m local_execution.merge_config \
