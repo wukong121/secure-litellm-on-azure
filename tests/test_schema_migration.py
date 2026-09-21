@@ -10,7 +10,7 @@ from LiteLLM.runtime.schema_migration import check_history, state_fingerprint
 class SchemaMigrationTests(unittest.TestCase):
     def test_known_source_allows_interleaved_new_migrations_without_rewriting_history(self):
         assets = {"migrations": [{"name": name, "sha256": digest * 64} for name, digest in (("first", "a"), ("inserted", "b"), ("last", "c"))]}
-        old = [assets["migrations"][0], assets["migrations"][2]]
+        old = [{"name": "first", "sha256": "d" * 64}, {"name": "last", "sha256": "e" * 64}]
         digest = hashlib.sha256(json.dumps(old, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         history = [{"name": item["name"], "checksum": item["sha256"], "finished": True, "rolledBack": False} for item in old]
         with self.assertRaises(DatabaseAuthError):
@@ -20,8 +20,13 @@ class SchemaMigrationTests(unittest.TestCase):
             complete = history + [{"name": "inserted", "checksum": "b" * 64, "finished": True, "rolledBack": False}]
             self.assertEqual(check_history(assets, complete, ["existing"], "migration"), [])
             self.assertEqual([item["name"] for item in history], ["first", "last"])
-            for invalid in (list(reversed(history)), [{**history[0], "checksum": "d" * 64}, history[1]], complete + [complete[-1]]):
+            for invalid in (list(reversed(history)), [{**history[0], "checksum": "f" * 64}, history[1]], [{**complete[0]}, {**complete[1]}, {**complete[2], "checksum": "f" * 64}], complete + [complete[-1]]):
                 with self.assertRaises(DatabaseAuthError):
+                    check_history(assets, invalid, ["existing"], "migration")
+            for invalid in ([history[0], history[0]], [history[0], {**history[1], "name": "unknown"}]):
+                source = [{"name": item["name"], "sha256": item["checksum"]} for item in invalid]
+                invalid_digest = hashlib.sha256(json.dumps(source, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                with patch.dict("LiteLLM.runtime.schema_migration.SUPPORTED_SOURCE_HISTORIES", {invalid_digest: 2}, clear=True), self.assertRaises(DatabaseAuthError):
                     check_history(assets, invalid, ["existing"], "migration")
             with self.assertRaises(DatabaseAuthError):
                 check_history(assets, history, ["existing"], "greenfield")
