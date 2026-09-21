@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import unittest
 import tempfile
@@ -165,11 +166,16 @@ class BackendManifestTests(unittest.TestCase):
         self.assertNotIn("litellm-runtime-secrets", serialized)
         self.assertNotIn("secretObjects", serialized)
         deployment = next(item for item in documents if item["kind"] == "Deployment")
+        provider = next(item for item in documents if item["kind"] == "SecretProviderClass")
         container = deployment["spec"]["template"]["spec"]["containers"][0]
         environment = {item["name"]: item["value"] for item in container["env"]}
         self.assertNotIn("DATABASE_URL", environment)
         self.assertEqual(environment["LLMGW_BACKEND_SECRETS_DIR"], "/mnt/backend-secrets")
         self.assertEqual(container["image"], config["application"]["backendImage"])
+        self.assertEqual(
+            deployment["spec"]["template"]["metadata"]["annotations"]["llmgw/backend-secret-mount"],
+            hashlib.sha256(provider["spec"]["parameters"]["objects"].encode()).hexdigest(),
+        )
         runtime = yaml.safe_load(next(item for item in documents if item["kind"] == "ConfigMap")["data"]["config.yaml"])
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory:
             config_file = Path(directory) / "generated.yaml"

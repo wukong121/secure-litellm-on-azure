@@ -210,7 +210,9 @@ class ProxyManifestTests(unittest.TestCase):
         self.assertNotIn("/mnt/auth-secrets", json.dumps(api_pod))
         for provider in providers:
             for entry in yaml.safe_load(provider["spec"]["parameters"]["objects"])["array"]:
-                self.assertEqual(yaml.safe_load(entry)["objectVersion"], "a" * 32)
+                secret_object = yaml.safe_load(entry)
+                self.assertEqual(secret_object["objectVersion"], "a" * 32)
+                self.assertEqual(secret_object["filePermission"], "0444")
         invalid = copy.deepcopy(credentials)
         invalid["bindings"][0]["secret"]["id"] = secret("api", invalid["bindings"][0]["contract"]["secretName"])["id"]
         with self.assertRaisesRegex(ValueError, "crosses its approved plane"):

@@ -47,7 +47,7 @@ def render_proxy_documents(config, foundation, applications, admin_credentials, 
         objects = []
         for name, secret in mapping.items():
             require(re.fullmatch(r"[0-9a-f]{32}", secret["version"]) is not None and secret["id"].lower() == f"https://{vault['name']}.vault.azure.net/secrets/{name}/{secret['version']}".lower(), "Proxy CSI secret reference crosses its approved plane or lacks a version")
-            objects.append(yaml.safe_dump({"objectName": name, "objectAlias": secret["alias"], "objectType": "secret", "objectVersion": secret["version"], "filePermission": "0440"}, sort_keys=False))
+            objects.append(yaml.safe_dump({"objectName": name, "objectAlias": secret["alias"], "objectType": "secret", "objectVersion": secret["version"], "filePermission": "0444"}, sort_keys=False))
         documents.append({"apiVersion": "secrets-store.csi.x-k8s.io/v1", "kind": "SecretProviderClass", "metadata": {"name": f"llm-{plane}-auth", "namespace": "litellm"}, "spec": {"provider": "azure", "parameters": {"usePodIdentity": "false", "clientID": foundation[plane]["identity"]["clientId"], "keyvaultName": vault["name"], "tenantId": config["azure"]["tenantId"], "objects": yaml.safe_dump({"array": objects}, sort_keys=False)}}})
     for name in ("workloads.yaml", "admin-workload.yaml", "networkpolicy.yaml"):
         for item in yaml.safe_load_all((ROOT / "deploy/components/stage7-identity" / name).read_text()):
