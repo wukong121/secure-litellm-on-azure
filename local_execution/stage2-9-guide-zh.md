@@ -759,9 +759,9 @@ printf 'api expected=%s actual=%s\nadmin expected=%s actual=%s\n' \
 
 ### Stage5：PostgreSQL、Redis、后台秘密和恢复演练
 
-**客户模式按步骤切换当前账号；验证模式继续使用同一个operator UAMI。** Stage5开始前：
+**客户模式按步骤使用IT部署账号、PG管理员和migration/runtime身份；验证模式除可选的独立database UAMI外继续使用operator。** Stage5开始前：
 
-- 验证模式创建PG管理员安全组并把operator UAMI加入；`stage5Data`填写组Object ID、组名和`Group`。
+- PG管理员使用安全组时，把获批执行主体加入组，`stage5Data`填写组Object ID、组名和`Group`；没有组管理权限时可选择独立database UAMI路径。
 - `databaseAccess.migrationPrincipalId`填operator UAMI Principal ID，不能填PG管理员组ID。
 - operator具有Stage0备份容器Blob Data Contributor，以及旧AKS `litellm-env` Secret读取权；目标RGOwner已覆盖管理面和回执写入。
 - `runtimeInputs.backupBlob`和`backupSha256`来自同一个成功Stage0报告。
@@ -844,7 +844,12 @@ chmod 600 local_execution/stage-5-values.local.json
 
 若旧版本在`send-managed-redis-to-log-analytics`报`CategoryGroup: 'allLogs' is not supported`，本次Stage5父部署为Failed，不能继续`database-roles`。Azure Managed Redis集群资源只提供`AllMetrics`，`default`数据库子资源提供`ConnectionEvents`日志；旧模板把集群误配为`allLogs`。失败时Redis集群/数据库及其他Stage5资源可能已经成功创建，但集群诊断设置整项未创建，因此缺少送往Log Analytics的Redis集群指标。不要删除这些部分成功资源，也不要手工把父部署改成成功。更新到包含“集群`AllMetrics`、数据库`ConnectionEvents`”修复的版本后，重新运行`stage5-platform --operation plan`，审核当前实际状态下的全部增量，再用新plan哈希execute；不得复用失败前的plan哈希。成功后确认父部署为Succeeded，并分别回读两级诊断设置。
 
-2. 客户模式切换到获批PG管理员账号；验证模式继续用PG管理员组内的operator UAMI。创建`llmgw_migrator`、`llmgw_app`及DDL/DML边界：
+2. 创建`llmgw_migrator`、`llmgw_app`及DDL/DML边界。身份取决于前面选择的管理员路径：
+
+- PG管理员组路径：当前Azure CLI账号必须是该组成员；客户IT管理员可保持交互登录，验证operator必须已加入组。
+- `database-admin-identity`路径：无需手工切换账号；本地执行器在本步骤前自动执行`az login --identity --client-id <authentication.database.clientId>`，使用独立database UAMI取得PG Token。
+
+客户IT账号在目标RG拥有Azure `Owner`或`Contributor`只代表管理面部署权限，不会自动成为PostgreSQL Entra管理员、数据库owner或schema owner。当前自动化把已迁移业务对象归`llmgw_migrator`所有；需要IT人员直接进入PG时，须另行批准并把该用户配置为额外Entra管理员，或使用包含该用户的PG管理员组，不能用Azure RBAC代替数据库数据面授权。
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -856,7 +861,7 @@ chmod 600 local_execution/stage-5-values.local.json
   --approved-plan-sha256 "REPLACE_STAGE5_DATABASE_ROLES_PLAN_SHA256"
 ```
 
-3. 客户模式在此处切换到`databaseAccess.migrationPrincipalId`对应的runtime服务身份；验证模式继续使用operator。客户使用已挂载runtime UAMI时先执行：
+3. 在此处使用`databaseAccess.migrationPrincipalId`对应的runtime服务身份；验证模式继续使用operator。客户若在`localExecution.authentication.runtime`配置了managed identity，执行器会自动登录；未配置专项runtime profile、而`default=existing`时，必须在运行本步骤前从database UAMI或IT用户会话切换到已挂载的migration/runtime UAMI：
 
 ```bash
 az logout
@@ -1565,7 +1570,7 @@ az aks start --subscription "$SUBSCRIPTION_ID" \
 | Stage2决策、Stage3源检查 | 当前账号 | 无Azure身份或operator |
 | Stage3–4 | 当前账号 | 单一operator UAMI |
 | Stage5 platform | 当前部署账号 | 单一operator UAMI |
-| Stage5 database-roles | PG管理员账号/组成员 | PG管理员组内的operator UAMI |
+| Stage5 database-roles | PG管理员用户/组成员，或独立database UAMI | PG管理员组内operator，或独立database UAMI |
 | Stage5 secrets/restore/schema | migrationPrincipalId对应服务身份 | 单一operator UAMI |
 | Stage6 application | 当前账号或客户runtime身份 | 单一operator UAMI |
 | Stage7代理镜像/foundation/runtime | 当前账号 | 单一operator UAMI |
