@@ -64,9 +64,9 @@ def role_contract(config, application):
 def inspect_roles(connection, roles):
     result = []
     with connection.cursor() as cursor:
-        cursor.execute("SELECT rolename, principaltype, objectid, tenantid, isadmin FROM pg_catalog.pgaadauth_list_principals(false)")
+        cursor.execute("SELECT rolname, principaltype, objectid, tenantid, isadmin FROM pg_catalog.pgaadauth_list_principals(false)")
         normalized = [{key.lower(): value for key, value in row.items()} for row in cursor.fetchall()]
-        mapped = {row["rolename"]: row for row in normalized}
+        mapped = {row["rolname"]: row for row in normalized}
         for role in roles:
             cursor.execute("SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls, rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = %s", (role["name"],))
             existing = cursor.fetchone()
@@ -83,9 +83,10 @@ def inspect_roles(connection, roles):
 
 def inspect_schema(connection):
     with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_get_userbyid(nspowner) AS owner, nspacl::text AS acl FROM pg_catalog.pg_namespace WHERE nspname = 'public'")
+        cursor.execute("SELECT pg_get_userbyid(namespace.nspowner) AS owner, pg_get_userbyid(database.datdba) AS database_owner, namespace.nspacl::text AS acl FROM pg_catalog.pg_namespace namespace JOIN pg_catalog.pg_database database ON database.datname = current_database() WHERE namespace.nspname = 'public'")
         schema = cursor.fetchone()
-        require(schema is not None and schema["owner"] in {"pg_database_owner", "llmgw_migrator"}, "Public schema must be owned by pg_database_owner or the managed migration role")
+        approved_owner = schema is not None and (schema["owner"] in {"pg_database_owner", "llmgw_migrator"} or schema["owner"] == schema["database_owner"] == "azure_pg_admin")
+        require(approved_owner, "Public schema must be owned by the Azure database owner or the managed migration role")
         cursor.execute("SELECT pg_get_userbyid(relowner) AS owner, count(*) AS count FROM pg_catalog.pg_class relation JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'public' AND relation.relkind IN ('r','p','v','m','S','f') GROUP BY relowner ORDER BY owner")
         owners = cursor.fetchall()
         require(all(row["owner"] == "llmgw_migrator" for row in owners), "Existing public objects are not owned by the migration role; refusing automatic ownership takeover")
@@ -109,6 +110,7 @@ def grant_roles(connection, roles, database):
         cursor.execute(sql.SQL("GRANT CONNECT, CREATE ON DATABASE {} TO {}").format(sql.Identifier(database), migrator))
         cursor.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(database), application))
         cursor.execute(sql.SQL("GRANT {} TO CURRENT_USER").format(migrator))
+        cursor.execute(sql.SQL("ALTER SCHEMA public OWNER TO {}").format(migrator))
         cursor.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
         cursor.execute(sql.SQL("GRANT USAGE, CREATE ON SCHEMA public TO {}").format(migrator))
         cursor.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(application))
@@ -157,7 +159,7 @@ def provision_database_roles(config, operation, revision, directory, approved):
             with control.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_lock(193701, 5)")
             before = {"roles": inspect_roles(control, roles), **inspect_schema(connection)}
-            plan = {"stage": 5, "action": "database-roles", "revision": revision, "configSha256": stage_fingerprint(config, 5), "serverId": server["id"], "database": database, "roles": roles, "before": before, "grants": {"llmgw_migrator": "CONNECT, CREATE database; USAGE, CREATE public schema; administrator receives migration-role membership", "llmgw_app": "CONNECT; public schema USAGE; table DML; sequence USAGE, SELECT; future migrator objects", "public": "revoke CREATE on public schema"}}
+            plan = {"stage": 5, "action": "database-roles", "revision": revision, "configSha256": stage_fingerprint(config, 5), "serverId": server["id"], "database": database, "roles": roles, "before": before, "grants": {"llmgw_migrator": "CONNECT, CREATE database; own public schema with USAGE, CREATE; administrator receives migration-role membership", "llmgw_app": "CONNECT; public schema USAGE; table DML; sequence USAGE, SELECT; future migrator objects", "public": "transfer owner to llmgw_migrator and revoke CREATE from PUBLIC"}}
             digest = fingerprint(plan)
             summary = {"stage": 5, "action": "database-roles", "planSha256": digest, "stageAccepted": False}
             private_write(directory / "runtime-review.json", json.dumps(plan, indent=2) + "\n")
