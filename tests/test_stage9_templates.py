@@ -47,18 +47,23 @@ class Stage9TemplateTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             validate_templates(edge, self.origin)
 
-    def test_admin_domain_requires_strict_mtls(self):
+    def test_admin_domain_requires_source_ip_allowlist(self):
         resources = self.edge["resources"]
         resources = resources.values() if isinstance(resources, dict) else resources
         endpoints = [item for item in resources if item["type"] == "Microsoft.Cdn/profiles/afdEndpoints"]
         admin_endpoint = next(item for item in endpoints if "llm-admin" in item["name"])
-        self.assertEqual(admin_endpoint["apiVersion"], "2026-08-01-preview")
-        self.assertEqual(admin_endpoint["properties"]["enforceMtls"], "Enabled")
+        self.assertEqual(admin_endpoint["apiVersion"], "2025-04-15")
+        self.assertNotIn("enforceMtls", admin_endpoint["properties"])
         domains = [item for item in resources if item["type"] == "Microsoft.Cdn/profiles/customDomains"]
         admin = next(item for item in domains if "llm-admin" in item["name"])
-        self.assertEqual(admin["apiVersion"], "2026-08-01-preview")
-        mtls = admin["properties"]["mtlsSettings"]
-        self.assertEqual(mtls["scenario"], "ClientCertificateRequiredAndValidated")
-        self.assertEqual(mtls["certificateRevocationCheck"], "Enabled")
-        secrets = next(item for item in mtls["copy"] if item["name"] == "secrets")
-        self.assertIn("Microsoft.Cdn/profiles/secrets", secrets["input"]["id"])
+        self.assertEqual(admin["apiVersion"], "2025-04-15")
+        self.assertNotIn("mtlsSettings", admin["properties"])
+        wafs = [item for item in resources if item["type"] == "Microsoft.Network/FrontDoorWebApplicationFirewallPolicies"]
+        admin_waf = next(item for item in wafs if "wafllmadmin" in item["name"])
+        self.assertEqual(admin_waf["properties"]["policySettings"]["mode"], "Prevention")
+        allowlist = next(item for item in admin_waf["properties"]["customRules"]["rules"] if item["name"] == "BlockUnapprovedAdminSources")
+        self.assertEqual(allowlist["action"], "Block")
+        self.assertEqual(allowlist["matchConditions"], [{
+            "matchVariable": "SocketAddr", "operator": "IPMatch", "negateCondition": True,
+            "matchValue": "[parameters('adminAllowedCidrs')]",
+        }])

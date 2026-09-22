@@ -18,7 +18,7 @@ def evidence_config(phase="canary"):
         "phase": phase, "baseDomain": "customer.test.invalid", "environmentName": "test",
         "privateOrigin": {"privateLinkServiceId": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/synthetic/providers/Microsoft.Network/privateLinkServices/api", "privateLinkLocation": "westus"},
         "adminPrivateOrigin": {"privateLinkServiceId": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/synthetic/providers/Microsoft.Network/privateLinkServices/admin", "privateLinkLocation": "westus"},
-        "adminMtls": {"keyVaultResourceGroupName": "synthetic", "keyVaultName": "syntheticvault", "allowedCertificateFqdns": ["admin-device.customer.invalid"], "trustedClientCaSecrets": [{"secretName": "admin-client-ca", "secretVersion": "a" * 32}]},
+        "adminAllowedCidrs": ["20.30.40.50/32"],
         "logAnalyticsWorkspaceName": "synthetic-logs", "frontDoorId": "22222222-2222-4222-8222-222222222222",
         "wafMode": "Prevention" if phase == "production" else "Detection", "rateLimitPerMinute": 600, "adminRateLimitPerMinute": 120,
         "changeTicket": "SYNTHETIC-ONLY", "approvedBy": ["33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"],
@@ -110,7 +110,7 @@ class Stage9ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing"):
             validate_origin_snapshot({"sku": {"name": "Standard"}, "properties": {"frontendIPConfigurations": []}}, frontend_id, subnet)
 
-    def test_admin_release_requires_distinct_origin_and_version_pinned_ca(self):
+    def test_admin_release_requires_distinct_origin_and_bounded_source_allowlist(self):
         config = evidence_config()
         validate_release(config)
         invalid = copy.deepcopy(config)
@@ -118,8 +118,8 @@ class Stage9ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "separate"):
             validate_release(invalid)
         invalid = copy.deepcopy(config)
-        invalid["adminMtls"]["trustedClientCaSecrets"][0]["secretVersion"] = "latest"
-        with self.assertRaisesRegex(ValueError, "fixed Key Vault versions"):
+        invalid["adminAllowedCidrs"] = ["0.0.0.0/0"]
+        with self.assertRaisesRegex(ValueError, "public|broader"):
             validate_release(invalid)
 
     def test_render_has_no_dns_or_deployment_side_effect_and_prepare_disables_traffic(self):

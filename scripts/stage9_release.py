@@ -13,14 +13,14 @@ import yaml
 
 try:
     from scripts.render_stage7_domain import ROOT, domain_hosts, render
-    from scripts.customer_migration import admin_mtls_parameters
+    from scripts.customer_migration import admin_source_cidrs
 except ModuleNotFoundError:
     from render_stage7_domain import ROOT, domain_hosts, render
-    from customer_migration import admin_mtls_parameters
+    from customer_migration import admin_source_cidrs
 
 PREPARE_CHECKS = {
-    "private_origin_tls", "origin_bypass_denied", "admin_mtls_enforcement",
-    "admin_private_origin_isolation", "admin_ca_revocation_rotation",
+    "private_origin_tls", "origin_bypass_denied", "admin_source_ip_allowlist",
+    "admin_private_origin_isolation",
     "waf_diagnostics_privacy", "private_link_approval", "rollback_plan",
 }
 CANARY_CHECKS = PREPARE_CHECKS | {
@@ -77,7 +77,7 @@ def validate_release(config: dict, now: datetime | None = None, required_approve
             raise ValueError(f"An approved {plane} Private Link location is required")
     if origins["API"]["privateLinkServiceId"].lower() == origins["Admin"]["privateLinkServiceId"].lower():
         raise ValueError("API and Admin releases require separate Private Link Services")
-    admin_mtls_parameters(config.get("adminMtls"))
+    admin_source_cidrs(config.get("adminAllowedCidrs"))
     if not config.get("logAnalyticsWorkspaceName") or "REPLACE" in config["logAnalyticsWorkspaceName"]:
         raise ValueError("An explicit diagnostics workspace is required")
     if type(config.get("rateLimitPerMinute")) is not int or not 1 <= config["rateLimitPerMinute"] <= 100000:
@@ -149,7 +149,7 @@ def generate(config: dict, output_dir: Path) -> None:
                 "spec": {"template": {"spec": {"containers": [{"name": "auth-proxy", "env": [{"name": "FRONT_DOOR_ID", "value": config["frontDoorId"]}]}]}}},
             })})
     overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False), encoding="utf-8")
-    parameters = {name: {"value": config[name]} for name in ("environmentName", "privateOrigin", "adminPrivateOrigin", "adminMtls", "logAnalyticsWorkspaceName", "wafMode", "rateLimitPerMinute", "adminRateLimitPerMinute")}
+    parameters = {name: {"value": config[name]} for name in ("environmentName", "privateOrigin", "adminPrivateOrigin", "adminAllowedCidrs", "logAnalyticsWorkspaceName", "wafMode", "rateLimitPerMinute", "adminRateLimitPerMinute")}
     parameters.update({"baseDomain": {"value": domain_hosts(config["baseDomain"])["api"].removeprefix("llm-api.")}, "deployEdge": {"value": True}, "enableApiTraffic": {"value": config["phase"] != "prepare"}, "enableAdminTraffic": {"value": config["phase"] != "prepare"}})
     (output_dir / "edge.parameters.json").write_text(json.dumps({"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#", "contentVersion": "1.0.0.0", "parameters": parameters}, indent=2) + "\n", encoding="utf-8")
     fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()

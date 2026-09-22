@@ -11,15 +11,7 @@
     "privateLinkServiceId": "REPLACE_ADMIN_PRIVATE_LINK_SERVICE_ID",
     "privateLinkLocation": "westus"
   },
-  "adminMtls": {
-    "keyVaultResourceGroupName": "REPLACE_EDGE_TRUST_VAULT_RESOURCE_GROUP",
-    "keyVaultName": "REPLACE_EDGE_TRUST_VAULT_NAME",
-    "allowedCertificateFqdns": ["REPLACE_CLIENT_CERTIFICATE_FQDN"],
-    "trustedClientCaSecrets": [{
-      "secretName": "REPLACE_CLIENT_CA_CHAIN_SECRET_NAME",
-      "secretVersion": "REPLACE_CLIENT_CA_CHAIN_SECRET_VERSION"
-    }]
-  },
+  "adminAllowedCidrs": ["REPLACE_ADMIN_ALLOWED_PUBLIC_CIDR"],
   "logAnalyticsWorkspaceName": "REPLACE_LOG_ANALYTICS_WORKSPACE",
   "frontDoorId": "REPLACE_EXPECTED_FRONT_DOOR_ID",
   "rateLimitPerMinute": 600,

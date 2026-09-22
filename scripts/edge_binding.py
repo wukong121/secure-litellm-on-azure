@@ -9,7 +9,7 @@ import yaml
 
 from scripts.customer_migration import fingerprint, private_write, require, stage_fingerprint
 from scripts.migration_deploy import AzureCommands, deployment_name, group_id
-from scripts.private_ingress import native_admin_rule, native_api_rule, native_health_rule, source_ranges
+from scripts.private_ingress import NATIVE_API_PATHS, native_admin_rule, native_api_rule, native_health_rule, source_ranges
 
 
 def front_door_id(deployment):
@@ -64,9 +64,20 @@ def validate_private_edge_resources(config, azure, profile_resource_id, deployed
     api_endpoint_id = edge_output["routeId"].rsplit("/routes/", 1)[0]
     admin_endpoint_id = edge_output["adminRouteId"].rsplit("/routes/", 1)[0]
     api_endpoint = deployed_resource(azure, api_endpoint_id, "2025-04-15").get("properties", {})
-    admin_endpoint = deployed_resource(azure, admin_endpoint_id, "2026-08-01-preview").get("properties", {})
+    admin_endpoint = deployed_resource(azure, admin_endpoint_id, "2025-04-15").get("properties", {})
     require(api_endpoint.get("provisioningState") == "Succeeded" and api_endpoint.get("enforceMtls") in {None, "Disabled"}, "Front Door API endpoint unexpectedly enforces mTLS")
-    require(admin_endpoint.get("provisioningState") == "Succeeded" and admin_endpoint.get("enforceMtls") == "Enabled", "Front Door Admin endpoint does not enforce mTLS")
+    require(admin_endpoint.get("provisioningState") == "Succeeded" and admin_endpoint.get("enforceMtls") in {None, "Disabled"}, "Front Door Admin endpoint has an unexpected mTLS requirement")
+    for plane, route_key, traffic_key in (("api", "routeId", "apiTrafficEnabled"), ("admin", "adminRouteId", "adminTrafficEnabled")):
+        route = deployed_resource(azure, edge_output[route_key], "2025-04-15").get("properties", {})
+        expected_state = "Enabled" if edge_output.get(traffic_key) is True else "Disabled"
+        expected_patterns = sorted(NATIVE_API_PATHS) if plane == "api" else ["/*"]
+        expected_domain = profile_resource_id + f"/customDomains/llm-{plane}"
+        expected_group = profile_resource_id + f"/originGroups/private-{plane}"
+        require(route.get("provisioningState") == "Succeeded" and route.get("deploymentStatus") == "Succeeded" and route.get("enabledState") == expected_state, f"Front Door {plane} route is not deployed in the reviewed traffic state")
+        require(route.get("supportedProtocols") == ["Https"] and route.get("forwardingProtocol") == "HttpsOnly" and route.get("httpsRedirect") == "Enabled" and route.get("linkToDefaultDomain") == "Disabled", f"Front Door {plane} route exposes an unreviewed protocol or default endpoint")
+        require(sorted(route.get("patternsToMatch", [])) == expected_patterns and route.get("ruleSets", []) == [] and route.get("cacheConfiguration") in (None, {}), f"Front Door {plane} route patterns, rules or caching differ from the reviewed contract")
+        domains = route.get("customDomains", [])
+        require(len(domains) == 1 and domains[0].get("id", "").lower() == expected_domain.lower() and route.get("originGroup", {}).get("id", "").lower() == expected_group.lower(), f"Front Door {plane} route targets an unexpected domain or origin group")
     for plane in ("api", "admin"):
         origin_id = profile_resource_id + f"/originGroups/private-{plane}/origins/private-{plane}"
         origin = deployed_resource(azure, origin_id, "2025-04-15")
@@ -84,29 +95,33 @@ def validate_private_edge_resources(config, azure, profile_resource_id, deployed
                 active.append((status, connection.get("properties", {}).get("privateEndpoint", {}).get("id")))
         require(len(active) == 1 and active[0][0] == "approved" and isinstance(active[0][1], str) and bool(active[0][1]), f"{plane} PLS must have exactly one approved connection and no unexpected pending connection")
         require(service_properties.get("autoApproval", {}).get("subscriptions") == [], f"{plane} PLS must not auto-approve consumers")
-    mtls = edge["adminMtls"]
-    vault_id = f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{mtls['keyVaultResourceGroupName']}/providers/Microsoft.KeyVault/vaults/{mtls['keyVaultName']}"
-    api_domain = deployed_resource(azure, profile_resource_id + "/customDomains/llm-api", "2025-04-15")
-    api_properties = api_domain.get("properties", {})
-    require(api_properties.get("provisioningState") == "Succeeded" and api_properties.get("deploymentStatus") == "Succeeded" and api_properties.get("domainValidationState") == "Approved", "Front Door API custom domain ownership or edge certificate is not ready")
-    require(api_properties.get("hostName") == hosts["api"] and api_properties.get("tlsSettings", {}).get("certificateType") == "ManagedCertificate" and api_properties.get("tlsSettings", {}).get("minimumTlsVersion") == "TLS12", "Front Door API custom domain TLS differs from the reviewed contract")
-    secret_ids = []
-    for index, trusted_ca in enumerate(mtls["trustedClientCaSecrets"], 1):
-        secret_id = profile_resource_id + f"/secrets/admin-client-ca-{index}"
-        secret_ids.append(secret_id.lower())
-        secret = deployed_resource(azure, secret_id, "2026-08-01-preview")
-        properties = secret.get("properties", {})
-        parameters = properties.get("parameters", {})
-        require(properties.get("provisioningState") == "Succeeded" and properties.get("deploymentStatus") == "Succeeded" and parameters.get("type") == "MtlsCertificateChain", "Front Door Admin client CA secret is not provisioned globally")
-        require(parameters.get("secretSource", {}).get("id", "").lower() == f"{vault_id}/secrets/{trusted_ca['secretName']}".lower() and parameters.get("secretVersion", "").lower() == trusted_ca["secretVersion"].lower(), "Front Door Admin client CA secret differs from the fixed reviewed Vault version")
-    domain_id = profile_resource_id + "/customDomains/llm-admin"
-    domain = deployed_resource(azure, domain_id, "2026-08-01-preview")
-    properties = domain.get("properties", {})
-    settings = properties.get("mtlsSettings", {})
-    require(properties.get("provisioningState") == "Succeeded" and properties.get("deploymentStatus") == "Succeeded" and properties.get("domainValidationState") == "Approved" and properties.get("hostName") == hosts["admin"], "Front Door Admin custom domain ownership or edge certificate is not ready")
-    require(properties.get("tlsSettings", {}).get("certificateType") == "ManagedCertificate" and properties.get("tlsSettings", {}).get("minimumTlsVersion") == "TLS12", "Front Door Admin custom domain TLS differs from the reviewed contract")
-    require(settings.get("scenario") == "ClientCertificateRequiredAndValidated" and settings.get("certificateRevocationCheck") == "Enabled", "Front Door Admin custom domain does not enforce strict mTLS and revocation")
-    require({value.lower() for value in settings.get("allowedFqdns", [])} == {value.lower() for value in mtls["allowedCertificateFqdns"]} and {item.get("id", "").lower() for item in settings.get("secrets", [])} == set(secret_ids), "Front Door Admin mTLS identities or CA chains differ from the reviewed configuration")
+    for plane in ("api", "admin"):
+        domain = deployed_resource(azure, profile_resource_id + f"/customDomains/llm-{plane}", "2025-04-15")
+        properties = domain.get("properties", {})
+        require(properties.get("provisioningState") == "Succeeded" and properties.get("deploymentStatus") == "Succeeded" and properties.get("domainValidationState") == "Approved", f"Front Door {plane} custom domain ownership or edge certificate is not ready")
+        require(properties.get("hostName") == hosts[plane] and properties.get("tlsSettings", {}).get("certificateType") == "ManagedCertificate" and properties.get("tlsSettings", {}).get("minimumTlsVersion") == "TLS12" and "mtlsSettings" not in properties, f"Front Door {plane} custom domain TLS differs from the reviewed contract")
+    waf = deployed_resource(azure, edge_output["adminWafId"], "2024-02-01").get("properties", {})
+    policy = waf.get("policySettings", {})
+    require(waf.get("provisioningState") == "Succeeded" and policy.get("enabledState") == "Enabled" and policy.get("mode") == "Prevention" and policy.get("requestBodyCheck") == "Enabled" and policy.get("logScrubbing", {}).get("state") == "Enabled", "Admin WAF source-IP gate, body checks or log scrubbing are not enabled in Prevention mode")
+    managed = {(item.get("ruleSetType"), item.get("ruleSetVersion")) for item in waf.get("managedRules", {}).get("managedRuleSets", [])}
+    require(managed == {("Microsoft_DefaultRuleSet", "2.1"), ("Microsoft_BotManagerRuleSet", "1.1")}, "Admin WAF managed rule sets differ from the reviewed contract")
+    rules = {rule.get("name"): rule for rule in waf.get("customRules", {}).get("rules", [])}
+    require(set(rules) == {"BlockUnapprovedAdminSources", "BlockUnsafeMethods", "RateLimitAdmin"}, "Admin WAF contains an unexpected custom rule set")
+    allowlist = rules["BlockUnapprovedAdminSources"]
+    conditions = allowlist.get("matchConditions", [])
+    require(allowlist.get("enabledState") == "Enabled" and allowlist.get("action") == "Block" and allowlist.get("priority") == 5 and len(conditions) == 1, "Admin WAF source-IP rule is disabled or reordered")
+    condition = conditions[0]
+    require(condition.get("matchVariable") == "SocketAddr" and condition.get("operator") == "IPMatch" and condition.get("negateCondition") is True and sorted(condition.get("matchValue", [])) == sorted(edge["adminAllowedCidrs"]), "Admin WAF source-IP allowlist differs from the customer configuration")
+    unsafe = rules["BlockUnsafeMethods"]
+    unsafe_conditions = unsafe.get("matchConditions", [])
+    require(unsafe.get("enabledState") == "Enabled" and unsafe.get("ruleType") == "MatchRule" and unsafe.get("action") == "Block" and unsafe.get("priority") == 10 and len(unsafe_conditions) == 1, "Admin WAF unsafe-method rule is disabled or reordered")
+    unsafe_condition = unsafe_conditions[0]
+    require(unsafe_condition.get("matchVariable") == "RequestMethod" and unsafe_condition.get("operator") == "Equal" and unsafe_condition.get("negateCondition", False) is False and set(unsafe_condition.get("matchValue", [])) == {"TRACE", "TRACK"}, "Admin WAF unsafe-method contract changed")
+    rate = rules["RateLimitAdmin"]
+    rate_conditions = rate.get("matchConditions", [])
+    require(rate.get("enabledState") == "Enabled" and rate.get("ruleType") == "RateLimitRule" and rate.get("action") == "Block" and rate.get("priority") == 20 and rate.get("rateLimitDurationInMinutes") == 1 and rate.get("rateLimitThreshold") == edge.get("adminRateLimitPerMinute", 120) and len(rate_conditions) == 1, "Admin WAF rate-limit rule differs from the reviewed contract")
+    rate_condition = rate_conditions[0]
+    require(rate_condition.get("matchVariable") == "RequestUri" and rate_condition.get("operator") == "BeginsWith" and rate_condition.get("negateCondition", False) is False and rate_condition.get("matchValue") == ["/"], "Admin WAF rate-limit scope changed")
 
 
 def deployed_edge(config, azure):
@@ -114,7 +129,7 @@ def deployed_edge(config, azure):
     edge = output.get("edge", {})
     require(output.get("state") == "Succeeded" and edge.get("provisioned") is True, "Provision the matching disabled Front Door before binding")
     require(edge.get("apiHost") == "llm-api." + config["baseDomain"] and edge.get("adminHost") == "llm-admin." + config["baseDomain"], "Front Door domains differ from the customer configuration")
-    require(edge.get("adminMtlsMode") == "ClientCertificateRequiredAndValidated", "Admin Front Door does not enforce strict mTLS")
+    require(edge.get("adminAccessMode") == "SourceIpAllowlistAndNativeLogin", "Admin Front Door does not enforce the reviewed source-IP and native-login access mode")
     prefix = group_id(config) + "/providers/Microsoft.Cdn/profiles/"
     matches = []
     for key in ("routeId", "adminRouteId"):
@@ -138,9 +153,9 @@ def deployed_edge(config, azure):
         require(isinstance(origin, dict) and origin.get("privateLinkServiceId", "").lower().startswith(prefix_pls) and origin.get("privateLinkLocation") == configured_origin["privateLinkLocation"], f"Deployed {plane} private origin differs from the approved target scope")
         require(configured_origin["privateLinkServiceId"] == "auto" or origin == configured_origin, f"Deployed {plane} private origin differs from the explicit customer configuration")
     require(deployed_origins["api"]["privateLinkServiceId"].lower() != deployed_origins["admin"]["privateLinkServiceId"].lower(), "Deployed API and Admin origins reuse one Private Link Service")
-    require(edge.get("adminMtls") == configured_edge["adminMtls"], "Deployed Admin mTLS configuration differs from the customer configuration")
+    require(edge.get("adminAllowedCidrs") == configured_edge["adminAllowedCidrs"], "Deployed Admin source-IP allowlist differs from the customer configuration")
     validate_private_edge_resources(config, azure, resource_id, deployed_origins, edge)
-    return {"profileResourceId": resource_id, "frontDoorId": identifier, "apiHost": edge["apiHost"], "adminHost": edge["adminHost"], "endpointHost": edge["endpointHost"], "adminEndpointHost": edge["adminEndpointHost"], "routeId": edge["routeId"], "adminRouteId": edge["adminRouteId"], "adminMtlsMode": edge["adminMtlsMode"], "privateOrigin": deployed_origins["api"], "adminPrivateOrigin": deployed_origins["admin"], "adminMtls": edge["adminMtls"]}
+    return {"profileResourceId": resource_id, "frontDoorId": identifier, "apiHost": edge["apiHost"], "adminHost": edge["adminHost"], "endpointHost": edge["endpointHost"], "adminEndpointHost": edge["adminEndpointHost"], "routeId": edge["routeId"], "adminRouteId": edge["adminRouteId"], "adminWafId": edge["adminWafId"], "adminAccessMode": edge["adminAccessMode"], "privateOrigin": deployed_origins["api"], "adminPrivateOrigin": deployed_origins["admin"], "adminAllowedCidrs": edge["adminAllowedCidrs"], "adminRateLimitPerMinute": edge["adminRateLimitPerMinute"]}
 
 
 def native_ingress_state(config, client, identifier=None, plane="api"):
@@ -347,10 +362,10 @@ def require_edge_binding(config, revision, identifier, azure, client=None):
     require(current_edge["frontDoorId"] == identifier, "Current Front Door identity differs from the release")
     expected = {"revision": revision, "configSha256": stage_fingerprint(config, 9), "frontDoorId": identifier,
                 "apiHost": "llm-api." + config["baseDomain"], "adminHost": "llm-admin." + config["baseDomain"],
-                "adminMtlsMode": "ClientCertificateRequiredAndValidated",
+                "adminAccessMode": "SourceIpAllowlistAndNativeLogin",
                 "clusterResourceId": group_id(config) + "/providers/Microsoft.ContainerService/managedClusters/" + config["parameters"]["platform"]["stage4Aks"]["name"]}
     require(all(receipt.get(key) == value for key, value in expected.items()), "Edge binding receipt is stale or belongs to a different environment")
-    for key in ("profileResourceId", "endpointHost", "adminEndpointHost", "routeId", "adminRouteId", "privateOrigin", "adminPrivateOrigin", "adminMtls"):
+    for key in ("profileResourceId", "endpointHost", "adminEndpointHost", "routeId", "adminRouteId", "adminWafId", "privateOrigin", "adminPrivateOrigin", "adminAllowedCidrs", "adminRateLimitPerMinute"):
         require(receipt.get(key) == current_edge.get(key), "Edge binding receipt differs from the current Front Door and private-origin configuration")
     from scripts.backend_manifest import application_authentication
     if application_authentication(config)["mode"] == "native":

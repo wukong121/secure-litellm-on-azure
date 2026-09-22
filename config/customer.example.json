@@ -116,12 +116,7 @@
         "privateLinkServiceId": "REPLACE_ADMIN_PLS_RESOURCE_ID",
         "privateLinkLocation": "REPLACE_AZURE_REGION"
       },
-      "adminMtls": {
-        "keyVaultResourceGroupName": "REPLACE_EDGE_TRUST_VAULT_RESOURCE_GROUP",
-        "keyVaultName": "REPLACE_EDGE_TRUST_VAULT_NAME",
-        "allowedCertificateFqdns": ["REPLACE_CLIENT_CERTIFICATE_FQDN"],
-        "trustedClientCaSecrets": [{"secretName": "REPLACE_CLIENT_CA_CHAIN_SECRET_NAME", "secretVersion": "REPLACE_CLIENT_CA_CHAIN_SECRET_VERSION"}]
-      },
+      "adminAllowedCidrs": ["REPLACE_ADMIN_ALLOWED_PUBLIC_CIDR"],
       "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
       "rateLimitPerMinute": 600,
       "adminRateLimitPerMinute": 120

@@ -26,7 +26,6 @@ def validate_templates(edge, origin):
         by_type.setdefault(item["type"], []).append(item)
     assert {kind: len(items) for kind, items in by_type.items()} == {
         "Microsoft.Cdn/profiles": 1,
-        "Microsoft.Cdn/profiles/secrets": 1,
         "Microsoft.Cdn/profiles/afdEndpoints": 2,
         "Microsoft.Cdn/profiles/customDomains": 2,
         "Microsoft.Cdn/profiles/originGroups": 2,
@@ -35,35 +34,21 @@ def validate_templates(edge, origin):
         "Microsoft.Cdn/profiles/securityPolicies": 2,
         "Microsoft.Cdn/profiles/afdEndpoints/routes": 2,
         "Microsoft.Insights/diagnosticSettings": 1,
-        "Microsoft.Resources/deployments": 1,
     }
     profile = by_type["Microsoft.Cdn/profiles"][0]
     assert profile["sku"]["name"] == "Premium_AzureFrontDoor"
-    assert profile["identity"] == {"type": "SystemAssigned"}
-    ca_secret = by_type["Microsoft.Cdn/profiles/secrets"][0]
-    assert ca_secret["apiVersion"] == "2026-08-01-preview"
-    assert ca_secret["copy"]["count"] == "[length(parameters('adminMtls').trustedClientCaSecrets)]"
-    assert ca_secret["properties"]["parameters"] == {
-        "type": "MtlsCertificateChain",
-        "secretSource": {"id": "[format('{0}/secrets/{1}', variables('adminMtlsVaultId'), parameters('adminMtls').trustedClientCaSecrets[copyIndex()].secretName)]"},
-        "secretVersion": "[parameters('adminMtls').trustedClientCaSecrets[copyIndex()].secretVersion]",
-    }
+    assert "identity" not in profile
     endpoints = {"admin" if "llm-admin" in item["name"] else "api": item for item in by_type["Microsoft.Cdn/profiles/afdEndpoints"]}
     assert set(endpoints) == {"api", "admin"}
     assert endpoints["api"]["properties"]["enabledState"] == "[variables('apiTrafficState')]"
     assert endpoints["admin"]["properties"]["enabledState"] == "[variables('adminTrafficState')]"
-    assert endpoints["admin"]["apiVersion"] == "2026-08-01-preview"
-    assert endpoints["admin"]["properties"]["enforceMtls"] == "Enabled"
-    assert "enforceMtls" not in endpoints["api"]["properties"]
+    assert endpoints["api"]["apiVersion"] == endpoints["admin"]["apiVersion"] == "2025-04-15"
+    assert all("enforceMtls" not in endpoint["properties"] for endpoint in endpoints.values())
     domains = {"admin" if "llm-admin" in item["name"] else "api": item for item in by_type["Microsoft.Cdn/profiles/customDomains"]}
     assert set(domains) == {"api", "admin"}
-    assert domains["api"]["properties"]["hostName"] == "[variables('apiHost')]" and "mtlsSettings" not in domains["api"]["properties"]
-    admin_mtls = domains["admin"]["properties"]["mtlsSettings"]
-    assert domains["admin"]["apiVersion"] == "2026-08-01-preview" and domains["admin"]["properties"]["hostName"] == "[variables('adminHost')]"
-    assert admin_mtls["scenario"] == "ClientCertificateRequiredAndValidated"
-    assert admin_mtls["certificateRevocationCheck"] == "Enabled"
-    assert admin_mtls["allowedFqdns"] == "[parameters('adminMtls').allowedCertificateFqdns]"
-    assert len(admin_mtls["copy"]) == 1 and admin_mtls["copy"][0]["name"] == "secrets"
+    assert domains["api"]["properties"]["hostName"] == "[variables('apiHost')]"
+    assert domains["admin"]["properties"]["hostName"] == "[variables('adminHost')]"
+    assert all(domain["apiVersion"] == "2025-04-15" and "mtlsSettings" not in domain["properties"] for domain in domains.values())
     assert edge["variables"]["apiHost"] == "[format('llm-api.{0}', parameters('baseDomain'))]"
     assert edge["variables"]["adminHost"] == "[format('llm-admin.{0}', parameters('baseDomain'))]"
     origin_groups = {"admin" if "private-admin" in item["name"] else "api": item for item in by_type["Microsoft.Cdn/profiles/originGroups"]}
@@ -88,9 +73,14 @@ def validate_templates(edge, origin):
         assert all(rule["action"] != "Allow" for rule in waf["customRules"]["rules"])
     block_non_post = next(rule for rule in wafs["api"]["properties"]["customRules"]["rules"] if rule["name"] == "BlockNonPost")
     assert block_non_post["matchConditions"] == [{"matchVariable": "RequestMethod", "operator": "Equal", "negateCondition": True, "matchValue": ["POST"]}]
-    assert {rule["name"] for rule in wafs["admin"]["properties"]["customRules"]["rules"]} == {"BlockUnsafeMethods", "RateLimitAdmin"}
+    admin_waf = wafs["admin"]["properties"]
+    assert admin_waf["policySettings"]["mode"] == "Prevention"
+    assert {rule["name"] for rule in admin_waf["customRules"]["rules"]} == {"BlockUnapprovedAdminSources", "BlockUnsafeMethods", "RateLimitAdmin"}
+    allowlist = next(rule for rule in admin_waf["customRules"]["rules"] if rule["name"] == "BlockUnapprovedAdminSources")
+    assert allowlist["action"] == "Block" and allowlist["priority"] == 5
+    assert allowlist["matchConditions"] == [{"matchVariable": "SocketAddr", "operator": "IPMatch", "negateCondition": True, "matchValue": "[parameters('adminAllowedCidrs')]"}]
     policies = {"admin" if "admin-waf" in item["name"] else "api": item for item in by_type["Microsoft.Cdn/profiles/securityPolicies"]}
-    routes = {"admin" if "admin-mtls-only" in item["name"] else "api": item for item in by_type["Microsoft.Cdn/profiles/afdEndpoints/routes"]}
+    routes = {"admin" if "admin-ip-allowlist-only" in item["name"] else "api": item for item in by_type["Microsoft.Cdn/profiles/afdEndpoints/routes"]}
     assert set(policies) == set(routes) == {"api", "admin"}
     for plane in ("api", "admin"):
         association = policies[plane]["properties"]["parameters"]["associations"]
@@ -106,8 +96,10 @@ def validate_templates(edge, origin):
     output = edge["outputs"]["edge"]["value"]
     assert output["privateOrigin"] == "[parameters('privateOrigin')]"
     assert output["adminPrivateOrigin"] == "[parameters('adminPrivateOrigin')]"
-    assert output["adminMtls"] == "[parameters('adminMtls')]"
-    assert output["adminMtlsMode"] == "ClientCertificateRequiredAndValidated"
+    assert output["adminAllowedCidrs"] == "[parameters('adminAllowedCidrs')]"
+    assert output["adminRateLimitPerMinute"] == "[parameters('adminRateLimitPerMinute')]"
+    assert output["adminAccessMode"] == "SourceIpAllowlistAndNativeLogin"
+    assert "adminMtls" not in output
     assert output["endpointHost"] != output["adminEndpointHost"] and output["routeId"] != output["adminRouteId"]
     origin_resources = resources(origin)
     assert len(origin_resources) == 2 and all(item["type"] == "Microsoft.Network/privateLinkServices" for item in origin_resources)
