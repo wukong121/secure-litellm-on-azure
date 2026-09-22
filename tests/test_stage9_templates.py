@@ -50,6 +50,10 @@ class Stage9TemplateTests(unittest.TestCase):
     def test_admin_domain_requires_strict_mtls(self):
         resources = self.edge["resources"]
         resources = resources.values() if isinstance(resources, dict) else resources
+        endpoints = [item for item in resources if item["type"] == "Microsoft.Cdn/profiles/afdEndpoints"]
+        admin_endpoint = next(item for item in endpoints if "llm-admin" in item["name"])
+        self.assertEqual(admin_endpoint["apiVersion"], "2026-08-01-preview")
+        self.assertEqual(admin_endpoint["properties"]["enforceMtls"], "Enabled")
         domains = [item for item in resources if item["type"] == "Microsoft.Cdn/profiles/customDomains"]
         admin = next(item for item in domains if "llm-admin" in item["name"])
         self.assertEqual(admin["apiVersion"], "2026-08-01-preview")

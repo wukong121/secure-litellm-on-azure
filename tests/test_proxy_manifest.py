@@ -37,6 +37,10 @@ def live_edge_resource(config, identifier, profile, arguments, connection_status
     if resource_id == profile:
         return {"id": profile, "properties": {"frontDoorId": identifier}}
     edge = edge_output or edge_deployment_output(config, identifier, profile)
+    if resource_id == edge["routeId"].rsplit("/routes/", 1)[0]:
+        return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "enabledState": "Disabled"}}
+    if resource_id == edge["adminRouteId"].rsplit("/routes/", 1)[0]:
+        return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "enabledState": "Disabled", "enforceMtls": "Enabled"}}
     for plane, parameter in (("api", "privateOrigin"), ("admin", "adminPrivateOrigin")):
         origin_id = profile + f"/originGroups/private-{plane}/origins/private-{plane}"
         if resource_id == origin_id:

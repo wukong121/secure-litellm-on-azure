@@ -789,7 +789,7 @@ class MigrationDeploymentTests(unittest.TestCase):
         }
         mtls = self.config["parameters"]["edge"]["adminMtls"]
         vault = {"id": f"/subscriptions/{self.config['azure']['subscriptionId']}/resourceGroups/{mtls['keyVaultResourceGroupName']}/providers/Microsoft.KeyVault/vaults/{mtls['keyVaultName']}", "rbac": True, "publicNetworkAccess": "Disabled", "bypass": "AzureServices"}
-        provider = {"state": "Registered", "resourceTypes": [{"resourceType": kind, "apiVersions": ["2026-08-01-preview"]} for kind in ("profiles/customdomains", "profiles/secrets")]}
+        provider = {"state": "Registered", "resourceTypes": [{"resourceType": kind, "apiVersions": ["2026-08-01-preview"]} for kind in ("profiles/afdendpoints", "profiles/customdomains", "profiles/secrets")]}
         azure.scoped.side_effect = [origin, vault, provider]
         resolved = resolve_origin(self.config, "edge", azure)
         self.assertEqual(resolved["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"], expected_api)
