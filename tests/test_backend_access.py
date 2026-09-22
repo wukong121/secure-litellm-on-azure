@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import yaml
 
-from LiteLLM.runtime.application import configure_gateway_authentication, load_backend_keys
+from LiteLLM.runtime.application import configure_gateway_authentication, load_backend_keys, proxy_server_settings, trusted_proxy_cidrs
 from scripts.backend_access import render_backend_access
 from scripts.customer_migration import ROOT, parameters_for
 from scripts.runtime_secrets import BACKEND_SECRETS, NATIVE_UI_SECRET, backend_secrets
@@ -15,6 +15,13 @@ from tests.test_customer_migration import customer_config
 
 
 class BackendAccessTests(unittest.TestCase):
+    def test_runtime_trusts_only_explicit_private_proxy_networks(self):
+        self.assertEqual(trusted_proxy_cidrs("10.244.0.0/16, 172.20.1.0/24"), ["10.244.0.0/16", "172.20.1.0/24"])
+        self.assertEqual(proxy_server_settings("10.244.0.0/16"), {"proxy_headers": True, "forwarded_allow_ips": ["10.244.0.0/16"]})
+        for value in (None, "", "*", "0.0.0.0/0", "8.8.8.0/24", "10.244.0.1/16", "::1/128"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                trusted_proxy_cidrs(value)
+
     def test_proxy_foundation_uses_bounded_names_and_approved_identity(self):
         template = (ROOT / "infra/proxy-foundation/main.bicep").read_text()
         self.assertIn("name: 'kv-p-${plane}-${uniqueString(resourceGroup().id, environmentName)}'", template)
