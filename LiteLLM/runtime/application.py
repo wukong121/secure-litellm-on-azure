@@ -4,6 +4,7 @@ import argparse
 from contextlib import asynccontextmanager
 import hashlib
 import hmac
+import ipaddress
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,23 @@ UTILS_SHA256 = "eb957b8a6028baeb675c260ddcccf46584cb84034538a1c545cf2bffe4698526
 SERVER_SHA256 = "14b954201801f7ef19df1f328dda37f489a03315b856f0dc43da8827d07669ec"
 REQUIRED_VIEWS = ("LiteLLM_VerificationTokenView", "MonthlyGlobalSpend", "Last30dKeysBySpend", "Last30dModelsBySpend", "MonthlyGlobalSpendPerKey", "MonthlyGlobalSpendPerUserPerKey", "Last30dTopEndUsersSpend", "DailyTagSpend")
 REQUIRED_TABLES = ("LiteLLM_VerificationToken", "LiteLLM_TeamTable", "LiteLLM_UserTable", "LiteLLM_SpendLogs", "_prisma_migrations")
+
+
+def trusted_proxy_cidrs(value):
+    if not isinstance(value, str) or not value.strip():
+        raise DatabaseAuthError("Trusted ingress proxy CIDR is missing")
+    private_ranges = tuple(ipaddress.ip_network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+    try:
+        networks = [ipaddress.ip_network(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError:
+        raise DatabaseAuthError("Trusted ingress proxy CIDR is invalid") from None
+    if not networks or any(network.version != 4 or not any(network.subnet_of(parent) for parent in private_ranges) for network in networks):
+        raise DatabaseAuthError("Trusted ingress proxies must use explicit RFC1918 IPv4 CIDRs")
+    return [str(network) for network in networks]
+
+
+def proxy_server_settings(value):
+    return {"proxy_headers": True, "forwarded_allow_ips": trusted_proxy_cidrs(value)}
 
 
 def load_backend_keys(directory):
@@ -138,11 +156,12 @@ def main():
     args = parser.parse_args()
     try:
         app = create_application(args.config, os.environ["AZURE_DATABASE_URL_TEMPLATE"])
+        proxy_settings = proxy_server_settings(os.environ.get("LLMGW_TRUSTED_PROXY_CIDRS"))
     except Exception:
         raise SystemExit("Azure application initialization failed; check approved configuration, identity and schema. Sensitive values are suppressed.") from None
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=4000, workers=1, access_log=False, proxy_headers=False)
+    uvicorn.run(app, host="0.0.0.0", port=4000, workers=1, access_log=False, **proxy_settings)
 
 
 if __name__ == "__main__":

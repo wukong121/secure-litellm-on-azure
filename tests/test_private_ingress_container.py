@@ -116,7 +116,7 @@ class PrivateIngressContainerTests(unittest.TestCase):
             backend_requests = []
             class BackendHandler(BaseHTTPRequestHandler):
                 def respond(self, status):
-                    backend_requests.append((self.command, self.path, self.headers.get("Host")))
+                    backend_requests.append((self.command, self.path, self.headers.get("Host"), self.headers.get("X-Forwarded-Proto"), self.headers.get("X-Forwarded-Host")))
                     body = f"{self.command} {self.path} host={self.headers.get('Host')}".encode("ascii")
                     self.send_response(status)
                     self.send_header("Content-Type", "text/plain")
@@ -168,11 +168,11 @@ class PrivateIngressContainerTests(unittest.TestCase):
                         return response.status, response.read().decode("ascii")
 
                 self.assertEqual(response("POST", "/v1/chat/completions")[0], 404)
-                self.assertEqual(response("POST", "/v1/chat/completions", {"X-Azure-FDID": identifier}), (201, f"POST /v1/chat/completions host={host}"))
+                self.assertEqual(response("POST", "/v1/chat/completions", {"X-Azure-FDID": identifier, "X-Forwarded-Proto": "http"}), (201, f"POST /v1/chat/completions host={host}"))
                 self.assertEqual(response("GET", "/v1/chat/completions", {"X-Azure-FDID": identifier})[0], 404)
                 self.assertEqual(response("POST", "/key/generate", {"X-Azure-FDID": identifier})[0], 404)
                 self.assertEqual(response("GET", "/readyz"), (200, f"GET /health/readiness host={host}"))
-                self.assertEqual(backend_requests, [("POST", "/v1/chat/completions", host), ("GET", "/health/readiness", host)])
+                self.assertEqual(backend_requests, [("POST", "/v1/chat/completions", host, "https", host), ("GET", "/health/readiness", host, "https", host)])
             finally:
                 self.docker("rm", "--force", container)
                 backend.shutdown()

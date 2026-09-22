@@ -21,6 +21,7 @@ from tests.test_customer_migration import customer_config
 
 def backend_customer():
     config = customer_config()
+    config["parameters"]["platform"]["stage4Network"]["podCidr"] = "10.244.0.0/16"
     config["parameters"]["platform"]["azureOpenAIConnections"] = [{"alias": "primary", "accountName": "synthetic-model"}]
     config["parameters"]["platform"]["stage5Data"] = {"postgresqlDatabaseName": "litellm"}
     config["application"] = {"backendImage": "customerregistry.azurecr.io/litellm-azure@sha256:" + "a" * 64, "models": [{"modelGroup": "coding", "connectionAlias": "primary", "deploymentName": "gpt-deployment", "id": "primary-coding", "apiVersion": "v1"}]}
@@ -66,6 +67,7 @@ class BackendManifestTests(unittest.TestCase):
         self.assertEqual(application_authentication(config), {"mode": "native", "adminUsername": "gateway-admin"})
         self.assertEqual(environment["LLMGW_GATEWAY_AUTH_MODE"], "native")
         self.assertEqual(environment["LLMGW_NATIVE_ADMIN_USERNAME"], "gateway-admin")
+        self.assertEqual(environment["LLMGW_TRUSTED_PROXY_CIDRS"], config["parameters"]["platform"]["stage4Network"]["podCidr"])
         policy = next(item for item in documents if item["kind"] == "NetworkPolicy" and item["metadata"]["name"] == "allow-litellm-required-traffic")
         peers = policy["spec"]["ingress"][0]["from"]
         self.assertEqual({peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] for peer in peers}, {"llm-api-ingress", "llm-admin-ingress"})

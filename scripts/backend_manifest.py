@@ -82,7 +82,9 @@ def render_backend_manifest(config, platform, versions, host, endpoint_subnet):
     deployment["spec"]["template"]["metadata"]["labels"]["azure.workload.identity/use"] = "true"
     container = pod["containers"][0]
     container["image"] = settings["backendImage"]
-    environment = {"LLMGW_BACKEND_SECRETS_DIR": "/mnt/backend-secrets", "LLMGW_GATEWAY_AUTH_MODE": authentication["mode"], "AZURE_DATABASE_URL_TEMPLATE": database_template, "REDIS_HOST": redis, "REDIS_PORT": "10000", "REDIS_USERNAME": platform["workloadIdentityPrincipalId"], "STORE_MODEL_IN_DB": "false"}
+    pod_network = ipaddress.ip_network(config["parameters"]["platform"]["stage4Network"]["podCidr"])
+    require(pod_network.version == 4 and pod_network.is_private, "Trusted ingress proxies require the approved private IPv4 pod CIDR")
+    environment = {"LLMGW_BACKEND_SECRETS_DIR": "/mnt/backend-secrets", "LLMGW_GATEWAY_AUTH_MODE": authentication["mode"], "LLMGW_TRUSTED_PROXY_CIDRS": str(pod_network), "AZURE_DATABASE_URL_TEMPLATE": database_template, "REDIS_HOST": redis, "REDIS_PORT": "10000", "REDIS_USERNAME": platform["workloadIdentityPrincipalId"], "STORE_MODEL_IN_DB": "false"}
     if authentication["mode"] == "native":
         environment["LLMGW_NATIVE_ADMIN_USERNAME"] = authentication["adminUsername"]
     container["env"] = [{"name": name, "value": value} for name, value in environment.items()]
