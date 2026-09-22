@@ -209,14 +209,14 @@ class ProjectDocumentationTests(unittest.TestCase):
             self.assertIn("certificate-vault", workflow["on"]["workflow_dispatch"]["inputs"]["component"]["options"])
         guide = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
         section = guide.split("### 阶段4：", 1)[1].split("### 阶段5：", 1)[0]
-        for value in (*settings, "Secrets User", "Secrets Officer", "certificateMaterialsImported=false", "25KB", "S4-03", "S4-04", "S4-11", "S4-12", "Object ID", "不打开Vault公网", "CA的私钥独立保管"):
+        for value in (*settings, "Secrets User", "Secrets Officer", "certificateMaterialsImported=false", "25KB", "S4-03", "S4-04", "S4-11", "S4-12", "Object ID", "不打开Vault公网", "CA私钥独立保管"):
             self.assertIn(value, section)
         snippets = re.findall(r"```bash\n(.*?)\n```", section.split("#### 4-C.", 1)[1], re.S)
-        self.assertEqual(len(snippets), 7)
+        self.assertEqual(len(snippets), 6)
         for source in snippets:
             result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
-        for value in ("两个Secret，不是两张新证书", "admin-ca.key", "admin.csr", "没有中间链", "上传不需要登录Runner", "客户本机上传", "公有CA签发", "企业PKI签发", "不是已签发证书", "不返回值", "Secret Identifier"):
+        for value in ("两个Secret，不是两张新证书", "Microsoft Trusted CA List", "Admin客户端CA公钥链", "上传不需要登录Runner", "客户本机上传", "公有CA签发", "不是已签发证书", "不返回值", "Secret Identifier"):
             self.assertIn(value, section)
         for value in ("specific virtual networks and IP addresses", "实际公网出口IPv4", "/32", "Microsoft.KeyVault/vaults/write", "无论上传成功、失败或中断", "Disable public access", "ipRules=[]", "bypass=None", "网络策略拒绝", "certificates.api/admin.secretId", "applied=true", "verified=true"):
             self.assertIn(value, section)
@@ -224,17 +224,17 @@ class ProjectDocumentationTests(unittest.TestCase):
         commands = "\n".join(snippets)
         for forbidden in ("az network bastion", "scp -P", "AZURE_CONFIG_DIR", "az keyvault update", "az keyvault secret show"):
             self.assertNotIn(forbidden, commands)
-        login = snippets[4]
+        login = snippets[3]
         self.assertTrue(login.startswith("set -euo pipefail\n"))
         for value in ("az login --tenant", "az ad signed-in-user show", 'API_PEM_FILE="temp/certificate-import/api.pem"', "az keyvault secret list"):
             self.assertIn(value, login)
-        upload = snippets[5]
+        upload = snippets[4]
         self.assertEqual(upload.count("az keyvault secret set"), 2)
         self.assertEqual(upload.count("--query '{id:id,enabled:attributes.enabled}'"), 2)
         self.assertNotIn("--value", upload)
         self.assertNotIn("certificate import", upload)
-        self.assertIn("az keyvault show", snippets[6])
-        self.assertIn("publicNetworkAccess:properties.publicNetworkAccess", snippets[6])
+        self.assertIn("az keyvault show", snippets[5])
+        self.assertIn("publicNetworkAccess:properties.publicNetworkAccess", snippets[5])
         reference = (ROOT / "docs/customer-deployment-workflows-zh.md").read_text()
         self.assertIn("customer-migration-guide-zh.md#4-a-共用证书vault的配置与取值", reference)
         self.assertIn("customer-migration-guide-zh.md#4-c-部署后手动导入两个secret", reference)
@@ -244,42 +244,27 @@ class ProjectDocumentationTests(unittest.TestCase):
         self.assertIn("bypass: 'None'", template)
         self.assertIn("infra/certificate-vault/main.bicep", (ROOT / "scripts/validate-stage4.sh").read_text())
 
-    def test_documented_certificate_creation_produces_valid_csr_and_admin_leaf(self):
+    def test_documented_certificate_creation_produces_valid_api_csr_and_rejects_self_signed_admin_origin(self):
         import subprocess
         import tempfile
         from cryptography import x509
         from cryptography.hazmat.primitives import serialization
-        from cryptography.x509.oid import ExtendedKeyUsageOID
-        from scripts.private_ingress import certificate_material
 
         section = (ROOT / "docs/customer-migration-guide-zh.md").read_text().split("#### 4-C.", 1)[1]
         snippets = re.findall(r"```bash\n(.*?)\n```", section, re.S)
         api_source = snippets[1].replace("REPLACE_BASE_DOMAIN_FROM_CUSTOMER_JSON", "customer.invalid")
-        admin_source = snippets[2].replace("REPLACE_BASE_DOMAIN_FROM_CUSTOMER_JSON", "customer.invalid")
-        self.assertIn("openssl req -x509 -newkey", admin_source)
-        admin_source = admin_source.replace("openssl req -x509", "openssl req -passout pass:synthetic-test-only -x509", 1)
-        admin_source = admin_source.replace("openssl x509 -req", "openssl x509 -passin pass:synthetic-test-only -req", 1)
+        self.assertNotIn("openssl req -x509 -newkey", section)
+        self.assertIn("自签名或企业内部CA", section)
+        self.assertIn("Microsoft Trusted CA List", section)
         with tempfile.TemporaryDirectory() as directory:
-            for source in (api_source, admin_source):
-                result = subprocess.run(["bash"], input=source, cwd=directory, capture_output=True, text=True, timeout=60, check=False)
-                self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run(["bash"], input=api_source, cwd=directory, capture_output=True, text=True, timeout=60, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
             api_directory = next((Path(directory) / "temp").glob("api-csr.*"))
             csr = x509.load_pem_x509_csr((api_directory / "api.csr").read_bytes())
             self.assertTrue(csr.is_signature_valid)
             self.assertEqual(csr.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName), ["llm-api.customer.invalid"])
             api_key = serialization.load_pem_private_key((api_directory / "api.key").read_bytes(), password=None)
             self.assertEqual(api_key.public_key().public_numbers(), csr.public_key().public_numbers())
-            admin_directory = next((Path(directory) / "temp").glob("admin-pki.*"))
-            self.assertEqual(admin_directory.stat().st_mode & 0o777, 0o700)
-            self.assertEqual((admin_directory / "admin.key").stat().st_mode & 0o777, 0o600)
-            self.assertIn(b"BEGIN ENCRYPTED PRIVATE KEY", (admin_directory / "admin-ca.key").read_bytes())
-            certificate = x509.load_pem_x509_certificate((admin_directory / "admin.crt").read_bytes())
-            self.assertFalse(certificate.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
-            self.assertIn(ExtendedKeyUsageOID.SERVER_AUTH, certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value)
-            bundle = (admin_directory / "admin.crt").read_text() + "\n" + (admin_directory / "admin.key").read_text()
-            self.assertLess(len(bundle.encode()), 25 * 1024)
-            material = certificate_material(bundle, "llm-admin.customer.invalid")
-            self.assertRegex(material["sha256"], r"^[0-9a-f]{64}$")
 
     def test_manual_certificate_validation_outputs_metadata_only_and_rejects_oversize(self):
         import io

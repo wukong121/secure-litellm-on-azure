@@ -13,13 +13,12 @@ The delivery target covers both staged migration of existing gateways and greenf
 **Phase-one audit decision (2026-09-10):** use native Spend Logs for approved prompt/response retention in private PostgreSQL. Custom L3 capture, Blob/HSM and recovery/governance services are optional enhancements, not a universal launch requirement. Native logging remains disabled in the current configuration; publishing, query access and stage evidence gates still need adaptation. See the [phase-one brief](docs/litellm-content-audit-phase1-customer-brief-zh.md) and [deployment guide](docs/customer-deployment-workflows-zh.md). Do not skip existing gates to enable it.
 
 ```text
-API clients -> llm-api.<customer-domain> -> Front Door / WAF -> private API ingress
-                                                               -> Entra API proxy
-Administrators -> private llm-admin.<customer-domain> -> Entra admin proxy
-                                                                  |
-                                                       LiteLLM on Private AKS
-                                                                  |
-                                                      Azure OpenAI / Foundry
+API clients ----------> llm-api.<customer-domain>   -> API Front Door endpoint / WAF ------> API PLS -> private API ingress
+Certificate-bearing admins -> llm-admin.<customer-domain> -> Admin Front Door endpoint / mTLS/WAF -> Admin PLS -> private Admin ingress
+                                                                                                            |
+                                                                                               LiteLLM on Private AKS
+                                                                                                            |
+                                                                                               Azure OpenAI / Foundry
 
 Supporting services: Key Vault, PostgreSQL Flexible Server, Managed Redis,
 private ACR and metadata-only monitoring. Native Spend Logs retain approved
@@ -29,7 +28,7 @@ content in PostgreSQL; independent L3 storage is an optional enhancement.
 | Area | Design and implementation scope |
 | --- | --- |
 | Network | Private AKS, private endpoints/DNS, controlled egress and default-deny network policies |
-| Identity | Entra authentication, separate API/admin policies, workload identities and customer-owned authorization |
+| Identity | Separate API/admin edges and private origins; mandatory Admin client certificates with inner Entra or native login; workload identities and customer-owned authorization |
 | Data and secrets | Key Vault/CSI, managed PostgreSQL and Redis templates, backup and restore controls |
 | Runtime | Digest-pinned containers, non-root/read-only baseline, HA and routing components |
 | Audit and observation | Phase-one native Spend Logs retention (integration pending); metadata monitoring; optional L3, tracing and Guardrail components |

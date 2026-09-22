@@ -1,5 +1,7 @@
 # 阶段9：边缘入口、试点与切流准备
 
+> **历史记录：** 本文记录2026-09-07的API-only边缘决策。2026-09-22当前实现已改为API/Admin独立endpoint、双PLS和Admin严格mTLS；执行以[当前迁移指南](customer-migration-guide-zh.md#阶段9试点切流与回退窗口)及[边缘模块说明](../infra/edge/README_ZH.md)为准。本文中的“Admin不进入Front Door”不再是现行要求。
+
 > 2026-09-10审计范围更新：基础版已选择原生Spend Logs，自建L3按需选用。本文保留历史发布契约与检查，不能把旧L3条件直接视为基础版最终清单；代码中的前序证据和release检查尚待按审计模式适配，禁止跳过或伪造通过。原生正文/查询/容量/留存/故障及数据库回退、身份和协议仍需验收，详见[当前迁移指南](customer-migration-guide-zh.md)。
 
 > 日期：2026-09-07  

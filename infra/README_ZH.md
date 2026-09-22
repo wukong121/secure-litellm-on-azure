@@ -12,7 +12,7 @@
 - [monitoring](monitoring/README_ZH.md)：阶段1旧网关最小告警，需匹配客户实际日志与命名；
 - [audit-storage](audit-storage/main.bicep)：可选增强L3的独立CMK私有审计存储及分离权限，不用于原生Spend Logs正文；
 - [audit-detection](audit-detection/main.bicep)：默认禁用的检测规则及响应契约，非已运行的自动响应；
-- [edge](edge/README_ZH.md)及[edge-origin](edge-origin/main.bicep)：阶段9 Front Door/WAF和API专用Private Link Service。
+- [edge](edge/README_ZH.md)及[edge-origin](edge-origin/main.bicep)：阶段9 API/Admin独立Front Door endpoint、WAF、Admin严格mTLS及两套Private Link Service。
 
 这些模板和本地验证结果不等于客户资源已部署。提交的环境参数默认关闭资源创建；客户迁移工具只为选定阶段生成显式参数和只读预览，不执行部署。尚未完成的身份、入口、数据认证和观测接线见[收尾台账](../docs/litellm-code-completion-backlog-2026-09-07.md)。
 

@@ -108,7 +108,7 @@ az network vnet show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET
 | 新应用 → 模型账号 | 实际模型资源ID/区域/访问身份、私网接入与共享依赖；关闭共享账号公网或Local Auth前必须保证旧业务不受影响 |
 | Runner构建/扫描及工作负载出口 | 必需依赖FQDN/服务和批准出站方案；不使用全开放出口、跳过TLS或关闭扫描兜底 |
 | Private DNS | 沿用现有zone还是新建、谁负责link/转发；createStage5*PrivateDnsZone开关须与实际归属一致，不重复创建冲突zone |
-| API/admin域名与证书 | baseDomain归属和DNS管理人；API可走Front Door，admin保持私网；Stage4可用的证书Vault/签发方式与Owner，不依赖尚未建立的后续业务Vault |
+| API/Admin域名与证书 | baseDomain归属和DNS管理人；两个域使用独立Front Door endpoint，Admin严格mTLS；两份公有CA源站证书、客户端PKI/吊销服务、边缘信任Vault及Owner，不依赖后续业务Vault |
 
 **network_capacity通过标准：** 区域/规格/预算选择有依据，所需配额已核对，网段/容量无未处理冲突，私网/DNS/证书与出口路线明确且获批。尚未建设的链路记录后续实施与实测节点，不声称此时已通过连接测试。
 
@@ -254,7 +254,7 @@ Stage2只冻结决策，Stage8/application发布时才生成`store_prompts_in_sp
 
 ### P-3 写出后续正反向验收计划
 
-至少明确：真实客户端正常调用/连续对话/所需流式与工具能力；缺Token/缺vkey/过期Token/无效或撤销Key的拒绝；越权模型与预算限制；必要管理操作及admin私网；获准正文读取和未获准读取拒绝。每项记录预期结果、测试人、无敏感测试数据及费用上限。
+至少明确：真实客户端正常调用/连续对话/所需流式与工具能力；缺Token/缺vkey/过期Token/无效或撤销Key的拒绝；越权模型与预算限制；Admin无客户端证书、错误FQDN、过期/吊销证书和错误密码的拒绝；获准正文读取和未获准读取拒绝。每项记录预期结果、测试人、无敏感测试数据及费用上限。
 
 Stage4验证网络/TLS和镜像，Stage5验证数据恢复/密文，Stage6验证后台/容量，Stage7验证新入口身份与实际协议/管理范围，Stage8验证原生日志与读取。测试客户端必须关联到真实候选入口，不能悄悄回退官方服务或旧网关后算通过。
 

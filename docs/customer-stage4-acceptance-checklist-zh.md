@@ -308,7 +308,7 @@ az deployment group show --subscription "$SUBSCRIPTION_ID" --resource-group "$TA
 
 ### P-3 核对TLS、Host隔离和当前LB状态
 
-执行流程已从实际Runner连接两个私网IP：校验证书叶指纹、域名/SNI和系统信任链，并向每个入口发送另一个平面的Host，要求404或421。确认这些步骤成功且admin私有CA已安装在实际Runner信任库。
+执行流程已从实际Runner连接两个私网IP：校验证书叶指纹、域名/SNI和系统信任链，并向每个入口发送另一个平面的Host，要求404或421。确认两个源站证书的完整链均受系统公有信任；若计划Stage9接入Front Door，Admin证书不得依赖只安装在Runner上的企业私有根。
 
 再次运行新的S4-11 plan可读取现状，不执行apply。审核`ingressObservation`和详细events：两个Service应存在、各有一个LB IP、EndpointSlice有ready endpoint，修复之后不再增长`SyncLoadBalancerFailed`/`AuthorizationFailed`/`LinkedAuthorizationFailed`。历史事件可以保留，但必须按first/last timestamp区分旧错误与当前错误。
 

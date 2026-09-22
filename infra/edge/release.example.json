@@ -7,9 +7,23 @@
     "privateLinkServiceId": "REPLACE_API_PRIVATE_LINK_SERVICE_ID",
     "privateLinkLocation": "westus"
   },
+  "adminPrivateOrigin": {
+    "privateLinkServiceId": "REPLACE_ADMIN_PRIVATE_LINK_SERVICE_ID",
+    "privateLinkLocation": "westus"
+  },
+  "adminMtls": {
+    "keyVaultResourceGroupName": "REPLACE_EDGE_TRUST_VAULT_RESOURCE_GROUP",
+    "keyVaultName": "REPLACE_EDGE_TRUST_VAULT_NAME",
+    "allowedCertificateFqdns": ["REPLACE_CLIENT_CERTIFICATE_FQDN"],
+    "trustedClientCaSecrets": [{
+      "secretName": "REPLACE_CLIENT_CA_CHAIN_SECRET_NAME",
+      "secretVersion": "REPLACE_CLIENT_CA_CHAIN_SECRET_VERSION"
+    }]
+  },
   "logAnalyticsWorkspaceName": "REPLACE_LOG_ANALYTICS_WORKSPACE",
   "frontDoorId": "REPLACE_EXPECTED_FRONT_DOOR_ID",
   "rateLimitPerMinute": 600,
+  "adminRateLimitPerMinute": 120,
   "wafMode": "Detection",
   "changeTicket": "REPLACE_APPROVED_CHANGE_TICKET",
   "approvedBy": [],

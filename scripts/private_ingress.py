@@ -25,6 +25,13 @@ def native_api_rule(host, front_door_id=None):
     return rule
 
 
+def native_admin_rule(host, front_door_id=None):
+    rule = f"Host(`{host}`)"
+    if front_door_id is not None:
+        rule += f" && HeaderRegexp(`X-Azure-FDID`, `(?i)^{front_door_id}$`)"
+    return rule
+
+
 def native_health_rule(host):
     return f"Host(`{host}`) && Method(`GET`) && Path(`/readyz`)"
 
@@ -91,8 +98,12 @@ def preserve_native_front_door_binding(config, documents, current_config_map):
     result = copy.deepcopy(documents)
     if not current_config_map:
         return result
+    config_map = next(item for item in result if item["kind"] == "ConfigMap")
+    match = re.fullmatch(r"llm-(api|admin)-ingress", config_map["metadata"]["name"])
+    require(match is not None, "Cannot preserve a Front Door binding for an unknown ingress plane")
+    plane = match[1]
     current = yaml.safe_load(current_config_map.get("data", {}).get("routes.yaml", ""))
-    current_rule = (current or {}).get("http", {}).get("routers", {}).get("api", {}).get("rule", "")
+    current_rule = (current or {}).get("http", {}).get("routers", {}).get(plane, {}).get("rule", "")
     matches = re.findall(r"HeaderRegexp\(`X-Azure-FDID`,\s*`\(\?i\)\^([a-fA-F0-9-]+)\$`\)", current_rule)
     require(len(matches) <= 1, "Existing native API ingress has ambiguous Front Door bindings")
     if not matches:
@@ -100,11 +111,11 @@ def preserve_native_front_door_binding(config, documents, current_config_map):
     from uuid import UUID
     identifier = matches[0]
     require(UUID(identifier).int != 0, "Existing native API ingress has an invalid Front Door binding")
-    config_map = next(item for item in result if item["kind"] == "ConfigMap")
     deployment = next(item for item in result if item["kind"] == "Deployment")
     dynamic = yaml.safe_load(config_map["data"]["routes.yaml"])
-    require("X-Azure-FDID" not in dynamic["http"]["routers"]["api"]["rule"], "Rendered native API ingress unexpectedly contains a Front Door binding")
-    dynamic["http"]["routers"]["api"]["rule"] = native_api_rule(domain_hosts(config["baseDomain"])["api"], identifier)
+    require("X-Azure-FDID" not in dynamic["http"]["routers"][plane]["rule"], f"Rendered native {plane} ingress unexpectedly contains a Front Door binding")
+    rule = native_api_rule if plane == "api" else native_admin_rule
+    dynamic["http"]["routers"][plane]["rule"] = rule(domain_hosts(config["baseDomain"])[plane], identifier)
     config_map["data"]["routes.yaml"] = yaml.safe_dump(dynamic, sort_keys=False)
     annotations = deployment["spec"]["template"]["metadata"].setdefault("annotations", {})
     annotations["llmgw/front-door-id"] = identifier
@@ -122,15 +133,17 @@ def render_ingress(config, plane, image, ranges):
     name = f"llm-{plane}-ingress"
     labels = {"app.kubernetes.io/name": "llmgw-ingress", "app.kubernetes.io/component": "controller", "app.kubernetes.io/managed-by": "llmgw-workflow", "plane": plane}
     network = config["parameters"]["platform"]["stage4Network"]
-    allowed = source_ranges([*ranges, network["ingressSubnetPrefix"]] if plane == "api" else ranges)
+    allowed = source_ranges([*ranges, network["ingressSubnetPrefix"]])
     metadata = {"name": name, "namespace": name, "labels": labels}
     upstream = "http://litellm.litellm.svc.cluster.local:4000" if native else f"http://llm-{plane}-proxy.litellm.svc.cluster.local:8080"
-    routers = {plane: {"rule": f"Host(`{hosts[plane]}`)", "entryPoints": ["websecure"], "service": plane, "tls": {}}}
+    business_rule = native_api_rule(hosts[plane]) if native and plane == "api" else native_admin_rule(hosts[plane]) if native else f"Host(`{hosts[plane]}`)"
+    routers = {plane: {"rule": business_rule, "entryPoints": ["websecure"], "service": plane, "tls": {}}}
     middlewares = {}
-    if native and plane == "api":
-        routers[plane]["rule"] = native_api_rule(hosts[plane])
-        routers["api-health"] = {"rule": native_health_rule(hosts[plane]), "entryPoints": ["websecure"], "service": plane, "middlewares": ["api-health-path"], "tls": {}}
-        middlewares["api-health-path"] = {"replacePath": {"path": "/health/readiness"}}
+    if native:
+        health = f"{plane}-health"
+        health_path = f"{plane}-health-path"
+        routers[health] = {"rule": native_health_rule(hosts[plane]), "entryPoints": ["websecure"], "service": plane, "middlewares": [health_path], "tls": {}}
+        middlewares[health_path] = {"replacePath": {"path": "/health/readiness"}}
     dynamic = {
         "http": {
             "routers": routers,

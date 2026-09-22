@@ -78,6 +78,21 @@ class MigrationDeploymentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             assert_change_scope(config, "aks-ingress-role", [change, change])
 
+    def test_edge_scope_allows_only_configured_admin_mtls_vault_access(self):
+        config = customer_config()
+        vault_group = config["parameters"]["edge"]["adminMtls"]["keyVaultResourceGroupName"]
+        vault = f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{vault_group}/providers/Microsoft.KeyVault/vaults/{config['parameters']['edge']['adminMtls']['keyVaultName']}"
+        assignment = vault + "/providers/Microsoft.Authorization/roleAssignments/11111111-2222-4333-8444-555555555555"
+        nested = f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{vault_group}/providers/Microsoft.Resources/deployments/admin-mtls-vault-access-abcdefghijklm"
+        assert_change_scope(config, "edge", [{"resourceId": assignment, "changeType": "Create"}, {"resourceId": nested, "changeType": "Create"}])
+        for resource in (
+            assignment.replace("/vaults/" + config["parameters"]["edge"]["adminMtls"]["keyVaultName"], "/vaults/other"),
+            nested.replace("admin-mtls-vault-access-", "unrelated-"),
+            f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{vault_group}/providers/Microsoft.KeyVault/vaults/{config['parameters']['edge']['adminMtls']['keyVaultName']}/secrets/ca",
+        ):
+            with self.subTest(resource=resource), self.assertRaisesRegex(ValueError, "outside"):
+                assert_change_scope(config, "edge", [{"resourceId": resource, "changeType": "Create"}])
+
     def test_target_connectivity_is_stage4_only_and_preserves_early_fingerprints(self):
         from scripts.runner_target_connectivity import target_connectivity_settings
         config = self.target_connectivity_config()
@@ -470,20 +485,33 @@ class MigrationDeploymentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicts"):
             inspect_connectivity(config, azure)
 
-    def test_managed_release_requires_matching_api_edge_binding_receipt(self):
+    def test_managed_release_requires_matching_dual_plane_edge_binding_receipt(self):
         from unittest.mock import Mock
-        from scripts.customer_migration import stage_fingerprint
+        from scripts.customer_migration import fingerprint, stage_fingerprint
         from scripts.edge_binding import require_edge_binding
         config = customer_config()
+        config["proxy"] = {"image": "synthetic.azurecr.io/auth-proxy@sha256:" + "a" * 64}
         identifier = "11111111-1111-4111-8111-111111111111"
-        receipt = {"revision": "a" * 40, "configSha256": stage_fingerprint(config, 9), "frontDoorId": identifier, "apiHost": "llm-api." + config["baseDomain"], "clusterResourceId": group_id(config) + "/providers/Microsoft.ContainerService/managedClusters/new-aks", "rolloutVerified": True, "deploymentUid": "api-original", "podTemplateSha256": "b" * 64}
+        deployments = {}
+        for plane in ("api", "admin"):
+            name = f"llm-{plane}-proxy"
+            deployments[plane] = {"metadata": {"name": name, "uid": plane + "-original"}, "spec": {"template": {"spec": {"serviceAccountName": name, "containers": [{"name": "auth-proxy", "image": config["proxy"]["image"], "env": [{"name": "FRONT_DOOR_ID", "value": identifier}]}]}}}}
+        current_edge = {"profileResourceId": group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic", "frontDoorId": identifier, "apiHost": "llm-api." + config["baseDomain"], "adminHost": "llm-admin." + config["baseDomain"], "endpointHost": "api.azurefd.net", "adminEndpointHost": "admin.azurefd.net", "routeId": "/synthetic/api-route", "adminRouteId": "/synthetic/admin-route", "adminMtlsMode": "ClientCertificateRequiredAndValidated", "privateOrigin": config["parameters"]["edge"]["privateOrigin"], "adminPrivateOrigin": config["parameters"]["edge"]["adminPrivateOrigin"], "adminMtls": config["parameters"]["edge"]["adminMtls"]}
+        receipt = {**current_edge, "revision": "a" * 40, "configSha256": stage_fingerprint(config, 9), "clusterResourceId": group_id(config) + "/providers/Microsoft.ContainerService/managedClusters/new-aks", "rolloutVerified": True, "planes": {plane: {"deploymentUid": deployments[plane]["metadata"]["uid"], "podTemplateSha256": fingerprint(deployments[plane]["spec"]["template"])} for plane in ("api", "admin")}}
         azure = Mock()
+        client = Mock()
+        client.get.side_effect = lambda kind, name: copy.deepcopy(deployments["api" if name == "llm-api-proxy" else "admin"])
         azure.scoped.return_value = {"state": "Succeeded", "binding": receipt}
-        require_edge_binding(config, "a" * 40, identifier, azure)
-        for updates in ({"revision": "c" * 40}, {"frontDoorId": "other"}, {"rolloutVerified": False}, {"clusterResourceId": "/other"}, {"podTemplateSha256": ""}):
-            azure.scoped.return_value = {"state": "Succeeded", "binding": {**receipt, **updates}}
-            with self.subTest(updates=updates), self.assertRaises(ValueError):
-                require_edge_binding(config, "a" * 40, identifier, azure)
+        with patch("scripts.edge_binding.deployed_edge", return_value=current_edge):
+            require_edge_binding(config, "a" * 40, identifier, azure, client)
+            for updates in ({"revision": "c" * 40}, {"frontDoorId": "other"}, {"rolloutVerified": False}, {"clusterResourceId": "/other"}, {"adminMtlsMode": "Disabled"}, {"planes": {"api": receipt["planes"]["api"]}}):
+                azure.scoped.return_value = {"state": "Succeeded", "binding": {**receipt, **updates}}
+                with self.subTest(updates=updates), self.assertRaises(ValueError):
+                    require_edge_binding(config, "a" * 40, identifier, azure, client)
+            azure.scoped.return_value = {"state": "Succeeded", "binding": receipt}
+            deployments["admin"]["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"] = "22222222-2222-4222-8222-222222222222"
+            with self.assertRaisesRegex(ValueError, "differs|no longer enforces"):
+                require_edge_binding(config, "a" * 40, identifier, azure, client)
 
     def test_recovery_identity_is_explicit_separate_and_automatically_resolved(self):
         from unittest.mock import Mock
@@ -747,15 +775,33 @@ class MigrationDeploymentTests(unittest.TestCase):
                 deploy_component(self.config, 0, "bootstrap", self.revision, "plan", [], directory, azure=azure, release={})
             self.assertFalse(any("create" in call for call in azure.calls))
 
-    def test_edge_resolves_successful_origin_output_only(self):
+    def test_edge_resolves_both_successful_origin_outputs_only(self):
         self.config["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"] = "auto"
+        self.config["parameters"]["edge"]["adminPrivateOrigin"]["privateLinkServiceId"] = "auto"
         from unittest.mock import Mock
         azure = Mock()
-        expected = group_id(self.config) + "/providers/Microsoft.Network/privateLinkServices/api"
-        azure.scoped.return_value = {"state": "Succeeded", "origin": {"privateLinkServiceId": expected, "privateLinkLocation": "westus"}}
+        expected_api = group_id(self.config) + "/providers/Microsoft.Network/privateLinkServices/api"
+        expected_admin = group_id(self.config) + "/providers/Microsoft.Network/privateLinkServices/admin"
+        origin = {
+            "state": "Succeeded",
+            "api": {"privateLinkServiceId": expected_api, "privateLinkLocation": "westus"},
+            "admin": {"privateLinkServiceId": expected_admin, "privateLinkLocation": "westus"},
+        }
+        mtls = self.config["parameters"]["edge"]["adminMtls"]
+        vault = {"id": f"/subscriptions/{self.config['azure']['subscriptionId']}/resourceGroups/{mtls['keyVaultResourceGroupName']}/providers/Microsoft.KeyVault/vaults/{mtls['keyVaultName']}", "rbac": True, "publicNetworkAccess": "Disabled", "bypass": "AzureServices"}
+        provider = {"state": "Registered", "resourceTypes": [{"resourceType": kind, "apiVersions": ["2026-08-01-preview"]} for kind in ("profiles/customdomains", "profiles/secrets")]}
+        azure.scoped.side_effect = [origin, vault, provider]
         resolved = resolve_origin(self.config, "edge", azure)
-        self.assertEqual(resolved["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"], expected)
+        self.assertEqual(resolved["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"], expected_api)
+        self.assertEqual(resolved["parameters"]["edge"]["adminPrivateOrigin"]["privateLinkServiceId"], expected_admin)
         self.assertEqual(self.config["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"], "auto")
-        azure.scoped.return_value["state"] = "Failed"
+        self.assertEqual(self.config["parameters"]["edge"]["adminPrivateOrigin"]["privateLinkServiceId"], "auto")
+        azure.scoped.side_effect = [{**origin, "state": "Failed"}]
         with self.assertRaises(ValueError):
+            resolve_origin(self.config, "edge", azure)
+        azure.scoped.side_effect = [origin, {**vault, "bypass": "None"}]
+        with self.assertRaisesRegex(ValueError, "trusted-services"):
+            resolve_origin(self.config, "edge", azure)
+        azure.scoped.side_effect = [origin, vault, {**provider, "resourceTypes": []}]
+        with self.assertRaisesRegex(ValueError, "preview APIs"):
             resolve_origin(self.config, "edge", azure)

@@ -46,3 +46,15 @@ class Stage9TemplateTests(unittest.TestCase):
         edge["parameters"]["deployEdge"]["defaultValue"] = True
         with self.assertRaises(AssertionError):
             validate_templates(edge, self.origin)
+
+    def test_admin_domain_requires_strict_mtls(self):
+        resources = self.edge["resources"]
+        resources = resources.values() if isinstance(resources, dict) else resources
+        domains = [item for item in resources if item["type"] == "Microsoft.Cdn/profiles/customDomains"]
+        admin = next(item for item in domains if "llm-admin" in item["name"])
+        self.assertEqual(admin["apiVersion"], "2026-08-01-preview")
+        mtls = admin["properties"]["mtlsSettings"]
+        self.assertEqual(mtls["scenario"], "ClientCertificateRequiredAndValidated")
+        self.assertEqual(mtls["certificateRevocationCheck"], "Enabled")
+        secrets = next(item for item in mtls["copy"] if item["name"] == "secrets")
+        self.assertIn("Microsoft.Cdn/profiles/secrets", secrets["input"]["id"])

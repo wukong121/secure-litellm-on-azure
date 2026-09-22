@@ -19,65 +19,149 @@ from scripts.private_ingress import render_ingress
 from tests.test_proxy_config import APPS, proxy_customer
 
 
+def edge_deployment_output(config, identifier, profile):
+    configured = config["parameters"]["edge"]
+    origins = {}
+    for plane, parameter in (("api", "privateOrigin"), ("admin", "adminPrivateOrigin")):
+        origin = copy.deepcopy(configured[parameter])
+        if origin["privateLinkServiceId"] == "auto":
+            origin["privateLinkServiceId"] = group_id(config) + "/providers/Microsoft.Network/privateLinkServices/" + plane
+        origins[parameter] = origin
+    return {"provisioned": True, "apiHost": "llm-api." + config["baseDomain"], "adminHost": "llm-admin." + config["baseDomain"], "endpointHost": "api.azurefd.net", "adminEndpointHost": "admin.azurefd.net", "routeId": profile + "/afdEndpoints/api/routes/api", "adminRouteId": profile + "/afdEndpoints/admin/routes/admin", "adminMtlsMode": "ClientCertificateRequiredAndValidated", "privateOrigin": origins["privateOrigin"], "adminPrivateOrigin": origins["adminPrivateOrigin"], "adminMtls": copy.deepcopy(configured["adminMtls"]), "profileId": identifier}
+
+
+def live_edge_resource(config, identifier, profile, arguments, connection_status="Approved", edge_output=None):
+    if arguments[0] != "resource":
+        return None
+    resource_id = arguments[arguments.index("--ids") + 1]
+    if resource_id == profile:
+        return {"id": profile, "properties": {"frontDoorId": identifier}}
+    edge = edge_output or edge_deployment_output(config, identifier, profile)
+    for plane, parameter in (("api", "privateOrigin"), ("admin", "adminPrivateOrigin")):
+        origin_id = profile + f"/originGroups/private-{plane}/origins/private-{plane}"
+        if resource_id == origin_id:
+            host = f"llm-{plane}." + config["baseDomain"]
+            origin = edge[parameter]
+            return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "enabledState": "Enabled", "hostName": host, "originHostHeader": host, "enforceCertificateNameCheck": True, "sharedPrivateLinkResource": {"privateLink": {"id": origin["privateLinkServiceId"]}, "privateLinkLocation": origin["privateLinkLocation"], "status": "Approved"}}}
+        if resource_id == edge[parameter]["privateLinkServiceId"]:
+            return {"id": resource_id, "properties": {"autoApproval": {"subscriptions": []}, "privateEndpointConnections": [{"properties": {"privateEndpoint": {"id": "/synthetic/front-door-private-endpoint/" + plane}, "privateLinkServiceConnectionState": {"status": connection_status}}}]}}
+    mtls = edge["adminMtls"]
+    vault = f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{mtls['keyVaultResourceGroupName']}/providers/Microsoft.KeyVault/vaults/{mtls['keyVaultName']}"
+    for index, trusted_ca in enumerate(mtls["trustedClientCaSecrets"], 1):
+        secret_id = profile + f"/secrets/admin-client-ca-{index}"
+        if resource_id == secret_id:
+            return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "deploymentStatus": "Succeeded", "parameters": {"type": "MtlsCertificateChain", "secretSource": {"id": vault + "/secrets/" + trusted_ca["secretName"]}, "secretVersion": trusted_ca["secretVersion"]}}}
+    if resource_id == profile + "/customDomains/llm-api":
+        return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "deploymentStatus": "Succeeded", "domainValidationState": "Approved", "hostName": "llm-api." + config["baseDomain"], "tlsSettings": {"certificateType": "ManagedCertificate", "minimumTlsVersion": "TLS12"}}}
+    if resource_id == profile + "/customDomains/llm-admin":
+        return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "deploymentStatus": "Succeeded", "domainValidationState": "Approved", "hostName": "llm-admin." + config["baseDomain"], "tlsSettings": {"certificateType": "ManagedCertificate", "minimumTlsVersion": "TLS12"}, "mtlsSettings": {"scenario": "ClientCertificateRequiredAndValidated", "certificateRevocationCheck": "Enabled", "allowedFqdns": mtls["allowedCertificateFqdns"], "secrets": [{"id": profile + f"/secrets/admin-client-ca-{index}"} for index in range(1, len(mtls["trustedClientCaSecrets"]) + 1)]}}}
+    raise AssertionError("Unexpected live edge resource: " + resource_id)
+
+
 class ProxyManifestTests(unittest.TestCase):
-    def test_native_edge_binding_verifies_private_api_ingress_without_proxy(self):
-        from scripts.edge_binding import bind_edge, native_ingress_document_state, require_edge_binding
+    def test_native_admin_ingress_binding_applies_only_to_business_route(self):
+        from scripts.edge_binding import bind_native_ingress, native_ingress_document_state
         config = proxy_customer()
         config.pop("proxy")
         config.pop("entra", None)
         config["application"]["authentication"] = {"mode": "native", "adminUsername": "gateway-admin"}
         config["parameters"]["platform"]["stage4Network"].update(ingressSubnetName="snet-ingress", ingressSubnetPrefix="10.30.4.0/24")
         config["privateIngress"] = {plane: {"tlsSecretId": f"https://synthetic.vault.azure.net/secrets/{plane}-tls", "allowedCidrs": ["10.30.0.0/16"]} for plane in ("api", "admin")}
-        identifier = "11111111-1111-4111-8111-111111111111"
-        profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
-        documents = render_ingress(config, "api", "registry.invalid/traefik@sha256:" + "a" * 64, ["10.30.0.0/16"])
+        documents = render_ingress(config, "admin", "registry.invalid/traefik@sha256:" + "a" * 64, ["10.30.0.0/16"])
         resources = {item["kind"].lower(): item for item in documents}
         for item in resources.values():
             item.setdefault("metadata", {}).setdefault("uid", item["metadata"]["name"] + "-uid")
-        azure, client = Mock(), Mock()
+        client = Mock()
+        client.get.side_effect = lambda kind, name: copy.deepcopy(resources[kind])
+        identifier = "11111111-1111-4111-8111-111111111111"
+        _current_config, _current_deployment, desired_config, desired_deployment, _current, desired = bind_native_ingress(config, client, identifier, plane="admin")
+        dynamic = yaml.safe_load(desired_config["data"]["routes.yaml"])
+        self.assertIn(identifier, dynamic["http"]["routers"]["admin"]["rule"])
+        self.assertNotIn("X-Azure-FDID", dynamic["http"]["routers"]["admin-health"]["rule"])
+        self.assertEqual(desired["frontDoorHeaderBound"], identifier)
+        native_ingress_document_state(config, desired_config, desired_deployment, resources["service"], identifier, plane="admin")
+
+    def test_native_edge_binding_verifies_both_private_ingresses_without_proxy(self):
+        from scripts.edge_binding import bind_edge, native_ingress_document_state, require_edge_binding
+        config = proxy_customer()
+        config.pop("proxy")
+        config.pop("entra", None)
+        config["application"]["authentication"] = {"mode": "native", "adminUsername": "gateway-admin"}
+        config["parameters"]["platform"]["stage4Network"].update(ingressSubnetName="snet-ingress", ingressSubnetPrefix="10.30.4.0/24")
+        config["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"] = "auto"
+        config["parameters"]["edge"]["adminPrivateOrigin"]["privateLinkServiceId"] = "auto"
+        config["privateIngress"] = {plane: {"tlsSecretId": f"https://synthetic.vault.azure.net/secrets/{plane}-tls", "allowedCidrs": ["10.30.0.0/16"]} for plane in ("api", "admin")}
+        identifier = "11111111-1111-4111-8111-111111111111"
+        profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
+        edge_output = edge_deployment_output(config, identifier, profile)
+        resources, clients = {}, {}
+        for plane in ("api", "admin"):
+            documents = render_ingress(config, plane, "registry.invalid/traefik@sha256:" + "a" * 64, ["10.30.0.0/16"])
+            resources[plane] = {item["kind"].lower(): item for item in documents}
+            for item in resources[plane].values():
+                item.setdefault("metadata", {}).setdefault("uid", item["metadata"]["name"] + "-uid")
+            clients[plane] = Mock()
+            clients[plane].get.side_effect = lambda kind, name, selected=plane: copy.deepcopy(resources[selected][kind])
+            def change(kind, name, operations, selected=plane):
+                self.assertEqual(name, f"llm-{selected}-ingress")
+                self.assertEqual(operations[0]["value"], resources[selected][kind]["metadata"]["uid"])
+                target = operations[-1]["path"].removeprefix("/")
+                resources[selected][kind][target] = copy.deepcopy(operations[-1]["value"])
+            clients[plane].patch.side_effect = change
+        azure = Mock()
         def cloud(arguments):
             if arguments[:3] == ["deployment", "group", "show"]:
-                return {"state": "Succeeded", "edge": {"provisioned": True, "apiHost": "llm-api." + config["baseDomain"], "routeId": profile + "/afdEndpoints/api/routes/api", "profileId": identifier}}
-            if arguments[0] == "resource":
-                return {"id": profile, "properties": {"frontDoorId": identifier}}
+                return {"state": "Succeeded", "edge": edge_output}
+            resource = live_edge_resource(config, identifier, profile, arguments, edge_output=edge_output)
+            if resource is not None:
+                return resource
             return {"properties": {"provisioningState": "Succeeded"}}
         azure.scoped.side_effect = cloud
-        client.get.side_effect = lambda kind, name: copy.deepcopy(resources[kind])
-        def change(kind, name, operations):
-            self.assertEqual(name, "llm-api-ingress")
-            self.assertEqual(operations[0]["value"], resources[kind]["metadata"]["uid"])
-            target = operations[-1]["path"].removeprefix("/")
-            resources[kind][target] = copy.deepcopy(operations[-1]["value"])
-        client.patch.side_effect = change
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
             directory = Path(folder)
-            plan = bind_edge(config, "plan", "a" * 40, directory, "", azure, client)
+            plan = bind_edge(config, "plan", "a" * 40, directory, "", azure, clients)
             self.assertEqual(plan["bindingMode"], "native-private-ingress")
-            result = bind_edge(config, "execute", "a" * 40, directory, plan["planSha256"], azure, client)
+            result = bind_edge(config, "execute", "a" * 40, directory, plan["planSha256"], azure, clients)
             self.assertTrue(result["applied"])
             receipt = json.loads((directory / "edge-binding-receipt.json").read_text())["outputs"]["edgeBinding"]["value"]
             self.assertEqual(receipt["frontDoorId"], identifier)
             self.assertEqual(receipt["bindingMode"], "native-private-ingress")
-            self.assertEqual(client.patch.call_count, 2)
-            dynamic = yaml.safe_load(resources["configmap"]["data"]["routes.yaml"])
-            self.assertIn(f"HeaderRegexp(`X-Azure-FDID`, `(?i)^{identifier}$`)", dynamic["http"]["routers"]["api"]["rule"])
-            self.assertNotIn("X-Azure-FDID", dynamic["http"]["routers"]["api-health"]["rule"])
-            azure.scoped.side_effect = None
-            azure.scoped.return_value = {"state": "Succeeded", "binding": receipt}
-            require_edge_binding(config, "a" * 40, identifier, azure, client)
-            resources["configmap"]["data"]["routes.yaml"] = resources["configmap"]["data"]["routes.yaml"].replace(identifier, "22222222-2222-4222-8222-222222222222")
+            self.assertEqual(set(receipt["planes"]), {"api", "admin"})
+            for plane in ("api", "admin"):
+                self.assertEqual(clients[plane].patch.call_count, 2)
+                dynamic = yaml.safe_load(resources[plane]["configmap"]["data"]["routes.yaml"])
+                self.assertIn(f"HeaderRegexp(`X-Azure-FDID`, `(?i)^{identifier}$`)", dynamic["http"]["routers"][plane]["rule"])
+                self.assertNotIn("X-Azure-FDID", dynamic["http"]["routers"][f"{plane}-health"]["rule"])
+            def release_cloud(arguments):
+                if arguments[:3] == ["deployment", "group", "show"] and arguments[arguments.index("--name") + 1].endswith("edge-bind"):
+                    return {"state": "Succeeded", "binding": receipt}
+                return cloud(arguments)
+            azure.scoped.side_effect = release_cloud
+            require_edge_binding(config, "a" * 40, identifier, azure, clients)
+            resources["admin"]["configmap"]["data"]["routes.yaml"] = resources["admin"]["configmap"]["data"]["routes.yaml"].replace(identifier, "22222222-2222-4222-8222-222222222222")
             with self.assertRaisesRegex(ValueError, "another or no Front Door|differs from"):
-                require_edge_binding(config, "a" * 40, identifier, azure, client)
-            broadened = copy.deepcopy(resources["configmap"])
+                require_edge_binding(config, "a" * 40, identifier, azure, clients)
+            resources["admin"]["configmap"]["data"]["routes.yaml"] = resources["admin"]["configmap"]["data"]["routes.yaml"].replace("22222222-2222-4222-8222-222222222222", identifier)
+            changed_edge = copy.deepcopy(edge_output)
+            changed_edge["adminPrivateOrigin"]["privateLinkServiceId"] = group_id(config) + "/providers/Microsoft.Network/privateLinkServices/replaced-admin"
+            def changed_cloud(arguments):
+                if arguments[:3] == ["deployment", "group", "show"]:
+                    name = arguments[arguments.index("--name") + 1]
+                    return {"state": "Succeeded", "binding": receipt} if name.endswith("edge-bind") else {"state": "Succeeded", "edge": changed_edge}
+                return live_edge_resource(config, identifier, profile, arguments, edge_output=changed_edge)
+            azure.scoped.side_effect = changed_cloud
+            with self.assertRaisesRegex(ValueError, "receipt differs"):
+                require_edge_binding(config, "a" * 40, identifier, azure, clients)
+            broadened = copy.deepcopy(resources["api"]["configmap"])
             broadened_dynamic = yaml.safe_load(broadened["data"]["routes.yaml"])
             broadened_dynamic["http"]["routers"]["management-bypass"] = copy.deepcopy(broadened_dynamic["http"]["routers"]["api"])
             broadened["data"]["routes.yaml"] = yaml.safe_dump(broadened_dynamic, sort_keys=False)
             with self.assertRaisesRegex(ValueError, "unexpected router"):
-                native_ingress_document_state(config, broadened, resources["deployment"], resources["service"])
-            wrong_service = copy.deepcopy(resources["service"])
+                native_ingress_document_state(config, broadened, resources["api"]["deployment"], resources["api"]["service"])
+            wrong_service = copy.deepcopy(resources["api"]["service"])
             wrong_service["spec"]["selector"]["plane"] = "admin"
             with self.assertRaisesRegex(ValueError, "private routing contract"):
-                native_ingress_document_state(config, resources["configmap"], resources["deployment"], wrong_service)
+                native_ingress_document_state(config, resources["api"]["configmap"], resources["api"]["deployment"], wrong_service)
 
     def test_front_door_binding_survives_generated_application_publish(self):
         from scripts.edge_binding import bind_deployment, preserve_binding
@@ -93,29 +177,34 @@ class ProxyManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another"):
             bind_deployment(live, "22222222-2222-4222-8222-222222222222")
 
-    def test_edge_binding_plans_then_applies_only_api_and_saves_receipt(self):
+    def test_edge_binding_plans_then_applies_both_proxies_and_saves_receipt(self):
         from scripts.edge_binding import bind_edge
         config = proxy_customer()
         config["proxy"]["image"] = "customerregistry.azurecr.io/auth-proxy@sha256:" + "a" * 64
         identifier = "11111111-1111-4111-8111-111111111111"
         profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
+        edge_output = edge_deployment_output(config, identifier, profile)
         azure, client = Mock(), Mock()
         def cloud(arguments):
             if arguments[:3] == ["deployment", "group", "show"]:
-                return {"state": "Succeeded", "edge": {"provisioned": True, "apiHost": "llm-api." + config["baseDomain"], "routeId": profile + "/afdEndpoints/api/routes/api", "profileId": identifier}}
-            if arguments[0] == "resource":
-                return {"id": profile, "properties": {"frontDoorId": identifier}}
+                return {"state": "Succeeded", "edge": edge_output}
+            resource = live_edge_resource(config, identifier, profile, arguments, edge_output=edge_output)
+            if resource is not None:
+                return resource
             return {"properties": {"provisioningState": "Succeeded"}}
         azure.scoped.side_effect = cloud
         api = {"metadata": {"name": "llm-api-proxy", "uid": "api-original"}, "spec": {"template": {"spec": {"serviceAccountName": "llm-api-proxy", "containers": [{"name": "auth-proxy", "image": config["proxy"]["image"]}]}}}}
         admin = copy.deepcopy(api)
         admin["metadata"]["name"] = "llm-admin-proxy"
-        client.get.side_effect = lambda kind, name: copy.deepcopy(api if name == "llm-api-proxy" else admin)
+        admin["metadata"]["uid"] = "admin-original"
+        admin["spec"]["template"]["spec"]["serviceAccountName"] = "llm-admin-proxy"
+        workloads = {"api": api, "admin": admin}
+        client.get.side_effect = lambda kind, name: copy.deepcopy(workloads["api" if name == "llm-api-proxy" else "admin"])
         def change(kind, name, operations):
-            self.assertEqual(name, "llm-api-proxy")
-            self.assertEqual(operations[0]["value"], api["metadata"]["uid"])
-            self.assertEqual(operations[1]["value"], api["spec"])
-            api["spec"] = copy.deepcopy(operations[2]["value"])
+            plane = "api" if name == "llm-api-proxy" else "admin"
+            self.assertEqual(operations[0]["value"], workloads[plane]["metadata"]["uid"])
+            self.assertEqual(operations[1]["value"], workloads[plane]["spec"])
+            workloads[plane]["spec"] = copy.deepcopy(operations[2]["value"])
         client.patch.side_effect = change
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
             directory = Path(folder)
@@ -128,10 +217,65 @@ class ProxyManifestTests(unittest.TestCase):
             self.assertFalse(result["trafficVerified"])
             receipt = json.loads((directory / "edge-binding-receipt.json").read_text())["outputs"]["edgeBinding"]["value"]
             self.assertEqual(receipt["frontDoorId"], identifier)
-            self.assertNotIn("FRONT_DOOR_ID", json.dumps(admin))
+            self.assertEqual(set(receipt["planes"]), {"api", "admin"})
+            self.assertEqual(client.patch.call_count, 2)
+            for workload in workloads.values():
+                self.assertIn("FRONT_DOOR_ID", json.dumps(workload))
             azure.scoped.side_effect = lambda arguments: {"state": "Succeeded", "edge": {"provisioned": True, "apiHost": "other.invalid"}}
-            with self.assertRaisesRegex(ValueError, "matching"):
+            with self.assertRaisesRegex(ValueError, "domains|matching"):
                 bind_edge(config, "plan", "a" * 40, directory, "", azure, client)
+
+    def test_edge_binding_rejects_pending_private_link_connection(self):
+        from scripts.edge_binding import deployed_edge
+        config = proxy_customer()
+        identifier = "11111111-1111-4111-8111-111111111111"
+        profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
+        edge = edge_deployment_output(config, identifier, profile)
+        azure = Mock()
+        def cloud(arguments):
+            if arguments[:3] == ["deployment", "group", "show"]:
+                return {"state": "Succeeded", "edge": edge}
+            return live_edge_resource(config, identifier, profile, arguments, connection_status="Pending", edge_output=edge)
+        azure.scoped.side_effect = cloud
+        with self.assertRaisesRegex(ValueError, "exactly one approved"):
+            deployed_edge(config, azure)
+
+    def test_deployed_edge_resolves_auto_private_origins_from_outputs(self):
+        from scripts.edge_binding import deployed_edge
+        config = proxy_customer()
+        config["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"] = "auto"
+        config["parameters"]["edge"]["adminPrivateOrigin"]["privateLinkServiceId"] = "auto"
+        identifier = "11111111-1111-4111-8111-111111111111"
+        profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
+        edge = edge_deployment_output(config, identifier, profile)
+        azure = Mock()
+        def cloud(arguments):
+            if arguments[:3] == ["deployment", "group", "show"]:
+                return {"state": "Succeeded", "edge": edge}
+            return live_edge_resource(config, identifier, profile, arguments, edge_output=edge)
+        azure.scoped.side_effect = cloud
+        result = deployed_edge(config, azure)
+        self.assertNotEqual(result["privateOrigin"]["privateLinkServiceId"], "auto")
+        self.assertNotEqual(result["adminPrivateOrigin"]["privateLinkServiceId"], "auto")
+        self.assertEqual(config["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"], "auto")
+
+    def test_deployed_edge_rejects_live_admin_mtls_drift(self):
+        from scripts.edge_binding import deployed_edge
+        config = proxy_customer()
+        identifier = "11111111-1111-4111-8111-111111111111"
+        profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
+        edge = edge_deployment_output(config, identifier, profile)
+        azure = Mock()
+        def cloud(arguments):
+            if arguments[:3] == ["deployment", "group", "show"]:
+                return {"state": "Succeeded", "edge": edge}
+            resource = live_edge_resource(config, identifier, profile, arguments, edge_output=edge)
+            if resource["id"].endswith("/customDomains/llm-admin"):
+                resource["properties"]["mtlsSettings"]["certificateRevocationCheck"] = "Disabled"
+            return resource
+        azure.scoped.side_effect = cloud
+        with self.assertRaisesRegex(ValueError, "strict mTLS and revocation"):
+            deployed_edge(config, azure)
 
     def test_preparation_requires_access_receipt_for_same_applications(self):
         config = proxy_customer()

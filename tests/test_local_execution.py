@@ -549,7 +549,7 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertIn("local_execution/requirements.txt", guide)
         for value in ("BACKEND_IMAGE_SUMMARY", "BACKEND_IMAGE_PREFIX", "BACKEND_DIGEST", ".signatureVerified == true", "CURRENT_REVISION=\"$(git rev-parse HEAD)\"", "${BACKEND_IMAGE##*@sha256:}", "REPLACE_BUILT_64_HEX_DIGEST"):
             self.assertIn(value, later_guide)
-        for value in ("--option native-auth", "仅新增`litellm-ui-password=generate`", "Master Key继续不向任何人工用户", "--resolve \"llm-api.${BASE_DOMAIN}:443:${API_PRIVATE_IP}\"", "native_virtual_key_acl", "admin继续通过私网LB访问"):
+        for value in ("--option native-auth", "仅新增`litellm-ui-password=generate`", "Master Key继续不向任何人工用户", "--resolve \"llm-api.${BASE_DOMAIN}:443:${API_PRIVATE_IP}\"", "native_virtual_key_acl", "私有Admin LB仅作Front Door回源"):
             self.assertIn(value, later_guide)
         self.assertNotIn("runner-connectivity", example["parameters"])
         self.assertIn("在线Runner VM绝不能挂载高权限UAMI", guide)
@@ -619,6 +619,11 @@ class LocalExecutionTests(unittest.TestCase):
             "REPLACE_APPROVED_AUDIT_TEAM_ID": "approved-team",
             "REPLACE_AUDIT_CMK_VAULT": "synthetic-audit-vault",
             "REPLACE_AUDIT_CMK_KEY": "audit-key",
+            "REPLACE_EDGE_TRUST_VAULT_RESOURCE_GROUP": "rg-edge-trust",
+            "REPLACE_EDGE_TRUST_VAULT_NAME": "synthetic-edge-trust",
+            "REPLACE_CLIENT_CERTIFICATE_FQDN": "admin-device.customer.invalid",
+            "REPLACE_CLIENT_CA_CHAIN_SECRET_NAME": "admin-client-ca",
+            "REPLACE_CLIENT_CA_CHAIN_SECRET_VERSION": "4" * 32,
             "REPLACE_AZURE_REGION": source["location"],
         }
 

@@ -37,7 +37,7 @@
 
 Traefik 的版本和 digest 以[入口镜像锁定文件](../deploy/private-ingress-image.json)为准，发布路径将固定镜像引入批准的 ACR，不使用浮动 `latest`。
 
-## 3. 三条独立的证书路径
+## 3. 四条独立的证书路径
 
 ```mermaid
 flowchart TB
@@ -46,23 +46,25 @@ flowchart TB
     ApiLB -->|TCP 443 转发至 8443| ApiIngress[API Traefik：API 源站证书]
     ApiIngress -->|HTTP 8080| ApiProxy[API 认证代理]
     ApiProxy -->|HTTP 4000| Backend[LiteLLM]
-    Admin[批准的私网管理终端] -->|HTTPS：企业提供的证书| AdminLB[Admin 内部 LoadBalancer]
+    Admin[持客户证书的管理终端] -->|HTTPS + 客户端证书| AdminFD[Admin Front Door：严格 mTLS]
+    AdminFD -->|HTTPS 经独立 Private Link / PLS| AdminLB[Admin 内部 LoadBalancer]
     AdminLB -->|TCP 443 转发至 8443| AdminIngress[Admin Traefik]
     AdminIngress -->|HTTP 8080| AdminProxy[Admin 认证代理]
     AdminProxy -->|HTTP 4000| Backend
 ```
 
-上图描述启用 Front Door 后的目标流量路径。API、admin 分别使用 `llm-api.<baseDomain>` 和 `llm-admin.<baseDomain>`；管理域名不配置到 Front Door 的公开路由中。
+上图描述启用 Front Door 后的目标流量路径。API、Admin分别使用`llm-api.<baseDomain>`和`llm-admin.<baseDomain>`，但绑定不同endpoint、WAF、route、PLS和内部LB。Admin域公网可解析，只有通过严格客户端证书验证后才进入私有回源。
 
 | TLS 连接 | 服务端出示的证书 | 信任与生命周期责任 |
 | --- | --- | --- |
-| 客户端到 Front Door | Azure Front Door 托管证书 | Azure 管理该边缘证书；客户仍须完成域名验证和正确的 DNS 配置 |
+| API/Admin客户端到各自Front Door endpoint | Azure Front Door托管服务端证书 | Azure管理边缘服务端证书；客户仍须完成两个域名验证和DNS配置 |
+| Admin客户端到Front Door | 客户PKI签发的客户端叶证书；边缘信任1–2条客户CA公钥链 | 客户负责Client Authentication EKU、SAN FQDN、发放、到期和吊销；CA/客户端私钥不得进入仓库或Front Door Secret |
 | Front Door 到 API Traefik 源站 | API 域名证书，自动路径由 Let's Encrypt 签发 | workflow 签发、存储、发布；证书须满足 Front Door 源站验证要求，保持主机名、SNI、证书链一致 |
-| 私网管理员到 admin Traefik | 客户提供的管理域名证书，可采用企业 PKI | 企业负责签发及续期，workflow 发布；管理客户端及执行证书校验的 runner 必须信任其 CA 链 |
+| Front Door到Admin Traefik源站 | Admin域名的公有CA证书 | 根必须在Microsoft Trusted CA List中，完整链和SAN匹配；内部CA/自签名不受支持。当前由客户手工提供，workflow仅发布和验证 |
 
-即使前两段使用相同 API 域名，也仍是两份独立证书和两次 TLS 握手。**边缘证书有效，不代表源站证书有效；源站已续期，也不代表边缘证书状态正常。**
+Admin客户端证书与Admin源站证书方向、EKU和信任根完全不同。**边缘服务端证书有效，不代表客户端mTLS或源站证书有效；任一证书续期也不会自动更新另外两条链。**
 
-入口发布器也可以读取外部准备好的 API 证书，不强制先运行 ACME 操作，但该证书必须通过发布校验，并满足实际访问方的信任要求。
+入口发布器可以读取外部准备好的API/Admin源站证书。当前自动ACME只覆盖API；选择Admin Front Door mTLS后，Admin源站也必须由Microsoft信任列表中的公有CA签发，不能继续使用仅安装到Runner或管理浏览器的企业私有CA来回源。
 
 ## 4. 设计理由与取舍
 
@@ -172,7 +174,7 @@ NetworkPolicy 提供网络访问隔离，不为 HTTP 内容加密。若客户要
 - DNS-01 签发和重复执行行为正确，不覆盖其他 TXT 值；受限网络中的 runner 能完成所需调用。
 - API 与管理证书主机名、用途、信任链和有效期正确；不受信任证书、错误主机名及错误入口 Host 被拒绝。
 - 更新后，实际提供服务的证书指纹与批准版本一致，入口 rollout 和长连接、SSE 等客户必需协议满足要求。
-- Front Door 对外证书与私有源站 TLS 分别通过验证；PLS 连接经过批准，admin 不进入公开路由。
+- 两个Front Door边缘证书、Admin客户端mTLS及两份私有源站TLS分别通过验证；两条PLS连接经过批准，Admin无证书、错误FQDN、过期和吊销证书均被拒绝。
 - 真实 API Token 与 vkey 认证、管理登录和来源隔离通过验证，不能仅靠匿名拒绝测试宣布业务可用。
 - 证书即将到期、签发失败、Key Vault 写入失败、发布失败、CA 信任链变化及可行回退都有明确处理责任和验证结果。
 

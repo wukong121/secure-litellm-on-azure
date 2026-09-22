@@ -228,8 +228,8 @@ def publish(config, stage, action, operation, revision, directory, approved, ima
             documents = [document for document in yaml.safe_load_all(manifest) if document]
         if stage >= 7 and not ("application" in config and application_authentication(config)["mode"] == "native"):
             from scripts.edge_binding import preserve_binding
-            existing_api = json.loads(run_command([*kube, "get", "deployment", "llm-api-proxy", "--ignore-not-found", "-o", "json"], directory, "existing-api-edge-binding") or "null")
-            documents = preserve_binding(documents, existing_api)
+            existing_bindings = {plane: json.loads(run_command([*kube, "get", "deployment", f"llm-{plane}-proxy", "--ignore-not-found", "-o", "json"], directory, f"existing-{plane}-edge-binding") or "null") for plane in ("api", "admin")}
+            documents = preserve_binding(documents, existing_bindings)
         check_application(documents, stage, config)
         path = directory / "workload.yaml"
         private_write(path, yaml.safe_dump_all(documents, sort_keys=False))

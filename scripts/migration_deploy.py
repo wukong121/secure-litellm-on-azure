@@ -65,7 +65,21 @@ def assert_change_scope(config, component, changes, connectivity=None):
             resource.startswith(account + "/providers/microsoft.authorization/roleassignments/")
             for account in external_accounts
         )
-        require(local or external_role, "Plan attempts to modify a resource outside the approved component scope")
+        external_edge = False
+        if component == "edge":
+            mtls = config["parameters"]["edge"]["adminMtls"]
+            vault_group = f"/subscriptions/{config['azure']['subscriptionId']}/resourcegroups/{mtls['keyVaultResourceGroupName']}".lower()
+            vault = vault_group + "/providers/microsoft.keyvault/vaults/" + mtls["keyVaultName"].lower()
+            assignment = vault + "/providers/microsoft.authorization/roleassignments/"
+            deployment = vault_group + "/providers/microsoft.resources/deployments/admin-mtls-vault-access-"
+            external_edge = (
+                resource.startswith(assignment)
+                and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", resource.removeprefix(assignment)) is not None
+            ) or (
+                resource.startswith(deployment)
+                and re.fullmatch(r"[a-z0-9]{13}", resource.removeprefix(deployment)) is not None
+            )
+        require(local or external_role or external_edge, "Plan attempts to modify a resource outside the approved component scope")
         if component in {"monitoring", "legacy-logging"}:
             kinds = ("microsoft.operationalinsights/workspaces", "microsoft.resources/deployments") if component == "legacy-logging" else (
                 "microsoft.insights/actiongroups", "microsoft.insights/scheduledqueryrules",
@@ -80,7 +94,7 @@ class AzureCommands:
         self.directory = directory
         self.counter = 0
 
-    def run(self, arguments):
+    def _run(self, arguments, allow_empty=False):
         self.counter += 1
         result = subprocess.run(["az", *arguments, "--only-show-errors", "--output", "json"], capture_output=True, text=True, check=False)
         private_write(self.directory / f"command-{self.counter}.stdout.json", result.stdout)
@@ -89,14 +103,25 @@ class AzureCommands:
         if result.returncode:
             raise MigrationError(f"Azure command failed ({operation}): {command_failure_summary(result.stdout, result.stderr, result.returncode)}")
         if not result.stdout.strip():
+            if allow_empty:
+                return None
             raise MigrationError(f"{operation} returned no JSON output")
         try:
             return json.loads(result.stdout)
         except ValueError:
             raise MigrationError(f"{operation} returned invalid JSON") from None
 
+    def run(self, arguments):
+        return self._run(arguments)
+
+    def run_allow_empty(self, arguments):
+        return self._run(arguments, allow_empty=True)
+
     def scoped(self, arguments):
         return self.run([*arguments, "--subscription", self.config["azure"]["subscriptionId"]])
+
+    def scoped_allow_empty(self, arguments):
+        return self.run_allow_empty([*arguments, "--subscription", self.config["azure"]["subscriptionId"]])
 
 
 def resolve_origin(config, component, azure):
@@ -118,21 +143,38 @@ def resolve_origin(config, component, azure):
                     audit[key] = foundation[role]["principalId"]
         require(len({audit[role + "PrincipalId"].lower() for role in roles}) == len(roles), "Audit roles must be distinct service principals")
     elif component == "edge":
-        origin = resolved["parameters"]["edge"]["privateOrigin"]
-        if not configured(origin["privateLinkServiceId"]) or origin["privateLinkServiceId"] == "auto":
+        origins = {
+            "api": resolved["parameters"]["edge"]["privateOrigin"],
+            "admin": resolved["parameters"]["edge"]["adminPrivateOrigin"],
+        }
+        if any(not configured(origin["privateLinkServiceId"]) or origin["privateLinkServiceId"] == "auto" for origin in origins.values()):
             output = azure.scoped([
                 "deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"],
                 "--name", deployment_name(config, 9, "origin"),
-                "--query", "{state:properties.provisioningState,origin:properties.outputs.privateOrigin.value}",
+                "--query", "{state:properties.provisioningState,api:properties.outputs.privateOrigin.value,admin:properties.outputs.adminPrivateOrigin.value}",
             ])
             require(output.get("state") == "Succeeded", "Deploy the origin component before resolving edge")
-            origin.update(output["origin"])
-        require(origin["privateLinkServiceId"].lower().startswith(group_id(config).lower() + "/providers/microsoft.network/privatelinkservices/"), "PLS must belong to the approved target resource group")
+            for plane, origin in origins.items():
+                if not configured(origin["privateLinkServiceId"]) or origin["privateLinkServiceId"] == "auto":
+                    require(isinstance(output.get(plane), dict), f"Origin deployment lacks the {plane} Private Link Service output")
+                    origin.update(output[plane])
+        prefix = group_id(config).lower() + "/providers/microsoft.network/privatelinkservices/"
+        require(all(origin["privateLinkServiceId"].lower().startswith(prefix) for origin in origins.values()), "PLS resources must belong to the approved target resource group")
+        require(origins["api"]["privateLinkServiceId"].lower() != origins["admin"]["privateLinkServiceId"].lower(), "API and Admin must use separate Private Link Services")
+        mtls = resolved["parameters"]["edge"]["adminMtls"]
+        vault = azure.scoped(["keyvault", "show", "--resource-group", mtls["keyVaultResourceGroupName"], "--name", mtls["keyVaultName"], "--query", "{id:id,rbac:properties.enableRbacAuthorization,publicNetworkAccess:properties.publicNetworkAccess,bypass:properties.networkAcls.bypass}"])
+        expected_vault = f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{mtls['keyVaultResourceGroupName']}/providers/Microsoft.KeyVault/vaults/{mtls['keyVaultName']}"
+        require(vault.get("id", "").lower() == expected_vault.lower() and vault.get("rbac") is True, "Admin mTLS trust Vault must be the configured same-subscription RBAC Vault")
+        require(vault.get("bypass") == "AzureServices" and vault.get("publicNetworkAccess") in {"Enabled", "Disabled"}, "Admin mTLS trust Vault must allow the Front Door trusted-services path and must not rely on an unsupported perimeter mode")
+        provider = azure.scoped(["provider", "show", "--namespace", "Microsoft.Cdn", "--query", "{state:registrationState,resourceTypes:resourceTypes}"])
+        resource_types = {item.get("resourceType", "").lower(): set(item.get("apiVersions", [])) for item in provider.get("resourceTypes", [])}
+        preview = "2026-08-01-preview"
+        require(provider.get("state") == "Registered" and all(preview in resource_types.get(kind, set()) for kind in ("profiles/customdomains", "profiles/secrets")), "Customer subscription does not advertise the required Front Door Admin mTLS preview APIs")
     elif component == "origin":
         cluster_name = config["parameters"]["platform"]["stage4Aks"]["name"]
         node_group = azure.scoped(["aks", "show", "--resource-group", config["target"]["resourceGroup"], "--name", cluster_name, "--query", "nodeResourceGroup"])
-        load_balancer = resolved["parameters"]["origin"]["apiLoadBalancer"]
-        managed_address = None
+        load_balancers = {plane: resolved["parameters"]["origin"][plane + "LoadBalancer"] for plane in ("api", "admin")}
+        managed_addresses = {}
         if "privateIngress" in config:
             output = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 4, "private-ingress"), "--query", "{state:properties.provisioningState,ingress:properties.outputs.privateIngress.value}"])
             require(output.get("state") == "Succeeded", "Deploy and verify private-ingress before creating the origin")
@@ -141,34 +183,38 @@ def resolve_origin(config, component, azure):
             from scripts.backend_manifest import application_authentication
             expected_authentication = application_authentication(config)["mode"] if "application" in config else "entra"
             require(ingress.get("authenticationMode", "entra") == expected_authentication, "Private ingress authentication mode differs from the application; replan and execute private-ingress")
-            managed = ingress["api"]
-            managed_address = managed["privateIpAddress"]
-            require(managed_address != ingress["admin"]["privateIpAddress"], "API/admin private frontends must be separate")
-            for key in ("resourceGroupName", "name", "frontendName"):
-                require(load_balancer[key] == "auto" or not configured(load_balancer[key]) or load_balancer[key] == managed[key], "Configured origin differs from the verified API ingress")
-                load_balancer[key] = managed[key]
-        supplied_group = load_balancer["resourceGroupName"]
-        require(supplied_group == "auto" or not configured(supplied_group) or supplied_group.lower() == node_group.lower(), "Configured load balancer group differs from actual AKS node resource group")
+            for plane, load_balancer in load_balancers.items():
+                managed = ingress[plane]
+                managed_addresses[plane] = managed["privateIpAddress"]
+                for key in ("resourceGroupName", "name", "frontendName"):
+                    require(load_balancer[key] == "auto" or not configured(load_balancer[key]) or load_balancer[key] == managed[key], f"Configured origin differs from the verified {plane} ingress")
+                    load_balancer[key] = managed[key]
+            require(managed_addresses["api"] != managed_addresses["admin"], "API/Admin private frontends must have separate addresses")
         candidates = azure.scoped(["network", "lb", "list", "--resource-group", node_group])
-        matches = []
-        for candidate in candidates:
-            if candidate.get("sku", {}).get("name") != "Standard":
-                continue
-            if configured(load_balancer["name"]) and load_balancer["name"] != "auto" and candidate["name"] != load_balancer["name"]:
-                continue
-            for frontend in candidate.get("frontendIPConfigurations", []):
-                if frontend.get("publicIPAddress") or not frontend.get("privateIPAddress"):
+        selected = {}
+        expected_subnet = group_id(config) + "/providers/Microsoft.Network/virtualNetworks/" + resolved["parameters"]["origin"]["virtualNetworkName"] + "/subnets/" + resolved["parameters"]["origin"]["ingressSubnetName"]
+        for plane, load_balancer in load_balancers.items():
+            supplied_group = load_balancer["resourceGroupName"]
+            require(supplied_group == "auto" or not configured(supplied_group) or supplied_group.lower() == node_group.lower(), "Configured load balancer group differs from actual AKS node resource group")
+            matches = []
+            for candidate in candidates:
+                if candidate.get("sku", {}).get("name") != "Standard":
                     continue
-                if managed_address and frontend["privateIPAddress"] != managed_address:
+                if configured(load_balancer["name"]) and load_balancer["name"] != "auto" and candidate["name"] != load_balancer["name"]:
                     continue
-                if configured(load_balancer["frontendName"]) and load_balancer["frontendName"] != "auto" and frontend["name"] != load_balancer["frontendName"]:
-                    continue
-                subnet = frontend.get("subnet", {}).get("id", "")
-                expected = group_id(config) + "/providers/Microsoft.Network/virtualNetworks/" + resolved["parameters"]["origin"]["virtualNetworkName"] + "/subnets/" + resolved["parameters"]["origin"]["ingressSubnetName"]
-                if subnet.lower() == expected.lower():
-                    matches.append({"resourceGroupName": node_group, "name": candidate["name"], "frontendName": frontend["name"]})
-        require(len(matches) == 1, "Expected exactly one reviewed private API frontend; specify actual LB/frontend names to resolve ambiguity")
-        resolved["parameters"]["origin"]["apiLoadBalancer"] = matches[0]
+                for frontend in candidate.get("frontendIPConfigurations", []):
+                    if frontend.get("publicIPAddress") or not frontend.get("privateIPAddress"):
+                        continue
+                    if managed_addresses.get(plane) and frontend["privateIPAddress"] != managed_addresses[plane]:
+                        continue
+                    if configured(load_balancer["frontendName"]) and load_balancer["frontendName"] != "auto" and frontend["name"] != load_balancer["frontendName"]:
+                        continue
+                    if frontend.get("subnet", {}).get("id", "").lower() == expected_subnet.lower():
+                        matches.append({"resourceGroupName": node_group, "name": candidate["name"], "frontendName": frontend["name"]})
+            require(len(matches) == 1, f"Expected exactly one reviewed private {plane} frontend; specify actual LB/frontend names to resolve ambiguity")
+            selected[plane] = matches[0]
+            resolved["parameters"]["origin"][plane + "LoadBalancer"] = matches[0]
+        require(selected["api"] != selected["admin"], "API and Admin origins must not share one load balancer frontend")
     return resolved
 
 
@@ -245,7 +291,9 @@ def deploy_component(config, stage, component, revision, operation, previous, di
         require(release.get("revision") == revision and release.get("configSha256") == stage_fingerprint(config, 9), "Release must bind the reviewed code and stage configuration")
         require(release["environmentName"] == config["environment"] and release["baseDomain"] == config["baseDomain"], "Release environment/domain mismatch")
         require(release["privateOrigin"] == resolved["parameters"]["edge"]["privateOrigin"], "Release PLS differs from deployed origin")
-        require(release["logAnalyticsWorkspaceName"] == resolved["parameters"]["edge"]["logAnalyticsWorkspaceName"] and release["rateLimitPerMinute"] == resolved["parameters"]["edge"].get("rateLimitPerMinute", 600), "Release logging/rate configuration mismatch")
+        require(release["adminPrivateOrigin"] == resolved["parameters"]["edge"]["adminPrivateOrigin"], "Release Admin PLS differs from deployed origin")
+        require(release["adminMtls"] == resolved["parameters"]["edge"]["adminMtls"], "Release Admin mTLS configuration differs from the reviewed edge")
+        require(release["logAnalyticsWorkspaceName"] == resolved["parameters"]["edge"]["logAnalyticsWorkspaceName"] and release["rateLimitPerMinute"] == resolved["parameters"]["edge"].get("rateLimitPerMinute", 600) and release["adminRateLimitPerMinute"] == resolved["parameters"]["edge"].get("adminRateLimitPerMinute", 120), "Release logging/rate configuration mismatch")
         previous_edge = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 9, "edge"), "--query", "{state:properties.provisioningState,edge:properties.outputs.edge.value}"])
         require(previous_edge.get("state") == "Succeeded", "Provision the disabled edge before releasing traffic")
         require(release.get("frontDoorId") == previous_edge.get("edge", {}).get("profileId"), "Release Front Door identity differs from the provisioned edge")
@@ -255,16 +303,19 @@ def deploy_component(config, stage, component, revision, operation, previous, di
                 require_private_ingress_backends(config, revision, azure)
             from scripts.edge_binding import require_edge_binding
             binding_client = None
+            from scripts.audit_runtime import AuditCluster
+            from scripts.migration_runtime import connect_cluster
+            kube = connect_cluster(config, directory, legacy=False)
             if expected_authentication == "native":
-                from scripts.audit_runtime import AuditCluster
-                from scripts.migration_runtime import connect_cluster
-                kube = connect_cluster(config, directory, legacy=False)
                 if kube[-2:] == ["--namespace", "litellm"]:
                     kube = kube[:-2]
-                binding_client = AuditCluster([*kube, "--namespace", "llm-api-ingress"], directory)
+                binding_client = {plane: AuditCluster([*kube, "--namespace", f"llm-{plane}-ingress"], directory) for plane in ("api", "admin")}
+            else:
+                binding_client = AuditCluster(kube, directory)
             require_edge_binding(config, revision, release["frontDoorId"], azure, binding_client)
         document = json.loads(path.read_text())
         document["parameters"]["enableApiTraffic"] = {"value": release["phase"] != "prepare"}
+        document["parameters"]["enableAdminTraffic"] = {"value": release["phase"] != "prepare"}
         document["parameters"]["wafMode"] = {"value": release["wafMode"]}
         private_write(path, json.dumps(document, indent=2) + "\n")
     compiled = directory / "template.json"

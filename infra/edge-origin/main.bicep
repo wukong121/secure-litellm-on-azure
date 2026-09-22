@@ -4,6 +4,7 @@ targetScope = 'resourceGroup'
 param deployPrivateOrigin bool = false
 param location string = resourceGroup().location
 param privateLinkServiceName string = 'pls-llm-api'
+param adminPrivateLinkServiceName string = 'pls-llm-admin'
 param virtualNetworkName string = 'litellm-security-vnet'
 param ingressSubnetName string = 'snet-private-ingress'
 
@@ -13,6 +14,7 @@ type internalLoadBalancerConfiguration = {
   frontendName: string
 }
 param apiLoadBalancer internalLoadBalancerConfiguration
+param adminLoadBalancer internalLoadBalancerConfiguration
 param tags object = {}
 
 resource network 'Microsoft.Network/virtualNetworks@2024-07-01' existing = {
@@ -22,15 +24,23 @@ resource subnet 'Microsoft.Network/virtualNetworks/subnets@2024-07-01' existing 
   parent: network
   name: ingressSubnetName
 }
-resource loadBalancer 'Microsoft.Network/loadBalancers@2024-07-01' existing = {
+resource apiLoadBalancerResource 'Microsoft.Network/loadBalancers@2024-07-01' existing = {
   scope: resourceGroup(apiLoadBalancer.resourceGroupName)
   name: apiLoadBalancer.name
 }
-resource frontend 'Microsoft.Network/loadBalancers/frontendIPConfigurations@2024-07-01' existing = {
-  parent: loadBalancer
+resource apiFrontend 'Microsoft.Network/loadBalancers/frontendIPConfigurations@2024-07-01' existing = {
+  parent: apiLoadBalancerResource
   name: apiLoadBalancer.frontendName
 }
-resource service 'Microsoft.Network/privateLinkServices@2024-07-01' = if (deployPrivateOrigin) {
+resource adminLoadBalancerResource 'Microsoft.Network/loadBalancers@2024-07-01' existing = {
+  scope: resourceGroup(adminLoadBalancer.resourceGroupName)
+  name: adminLoadBalancer.name
+}
+resource adminFrontend 'Microsoft.Network/loadBalancers/frontendIPConfigurations@2024-07-01' existing = {
+  parent: adminLoadBalancerResource
+  name: adminLoadBalancer.frontendName
+}
+resource apiService 'Microsoft.Network/privateLinkServices@2024-07-01' = if (deployPrivateOrigin) {
   name: privateLinkServiceName
   location: location
   tags: tags
@@ -38,7 +48,7 @@ resource service 'Microsoft.Network/privateLinkServices@2024-07-01' = if (deploy
     enableProxyProtocol: false
     autoApproval: { subscriptions: [] }
     visibility: { subscriptions: ['*'] }
-    loadBalancerFrontendIpConfigurations: [{ id: frontend.id }]
+    loadBalancerFrontendIpConfigurations: [{ id: apiFrontend.id }]
     ipConfigurations: [{
       name: 'api-origin-nat'
       properties: {
@@ -51,7 +61,33 @@ resource service 'Microsoft.Network/privateLinkServices@2024-07-01' = if (deploy
   }
 }
 
+resource adminService 'Microsoft.Network/privateLinkServices@2024-07-01' = if (deployPrivateOrigin) {
+  name: adminPrivateLinkServiceName
+  location: location
+  tags: tags
+  properties: {
+    enableProxyProtocol: false
+    autoApproval: { subscriptions: [] }
+    visibility: { subscriptions: ['*'] }
+    loadBalancerFrontendIpConfigurations: [{ id: adminFrontend.id }]
+    ipConfigurations: [{
+      name: 'admin-origin-nat'
+      properties: {
+        primary: true
+        privateIPAddressVersion: 'IPv4'
+        privateIPAllocationMethod: 'Dynamic'
+        subnet: { id: subnet.id }
+      }
+    }]
+  }
+}
+
 output privateOrigin object = {
-  privateLinkServiceId: deployPrivateOrigin ? service!.id : ''
+  privateLinkServiceId: deployPrivateOrigin ? apiService!.id : ''
+  privateLinkLocation: location
+}
+
+output adminPrivateOrigin object = {
+  privateLinkServiceId: deployPrivateOrigin ? adminService!.id : ''
   privateLinkLocation: location
 }

@@ -1,4 +1,4 @@
-"""Bind a managed API proxy to its deployed Front Door before traffic release."""
+"""Bind managed API and Admin planes to their deployed Front Door before release."""
 
 import copy
 import json
@@ -9,7 +9,7 @@ import yaml
 
 from scripts.customer_migration import fingerprint, private_write, require, stage_fingerprint
 from scripts.migration_deploy import AzureCommands, deployment_name, group_id
-from scripts.private_ingress import native_api_rule, native_health_rule, source_ranges
+from scripts.private_ingress import native_admin_rule, native_api_rule, native_health_rule, source_ranges
 
 
 def front_door_id(deployment):
@@ -26,9 +26,9 @@ def front_door_id(deployment):
 
 def bind_deployment(deployment, identifier):
     require(isinstance(identifier, str) and UUID(identifier).int != 0, "Invalid deployed Front Door identity")
-    require(deployment["metadata"]["name"] == "llm-api-proxy", "Only the API proxy can bind Front Door")
+    require(deployment["metadata"]["name"] in {"llm-api-proxy", "llm-admin-proxy"}, "Only managed API/Admin proxies can bind Front Door")
     existing = front_door_id(deployment)
-    require(existing is None or existing.lower() == identifier.lower(), "Existing API proxy trusts another Front Door; review that change separately")
+    require(existing is None or existing.lower() == identifier.lower(), "Existing proxy trusts another Front Door; review that change separately")
     desired = copy.deepcopy(deployment)
     containers = desired["spec"]["template"]["spec"]["containers"]
     require(len(containers) == 1 and containers[0]["name"] == "auth-proxy", "Unexpected managed API proxy container set")
@@ -38,63 +38,141 @@ def bind_deployment(deployment, identifier):
 
 
 def preserve_binding(documents, live):
-    identifier = front_door_id(live)
+    live_items = live.values() if isinstance(live, dict) and "metadata" not in live else [live]
+    existing = {item["metadata"]["name"]: item for item in live_items if item}
     result = copy.deepcopy(documents)
     for index, item in enumerate(result):
         if item["kind"] != "Deployment":
             continue
-        if item["metadata"]["name"] == "llm-admin-proxy":
-            require(front_door_id(item) is None, "Admin proxy must not be bound to a public Front Door")
-        elif item["metadata"]["name"] == "llm-api-proxy" and identifier:
-            result[index] = bind_deployment(item, identifier)
+        name = item["metadata"]["name"]
+        if name in {"llm-api-proxy", "llm-admin-proxy"} and name in existing:
+            identifier = front_door_id(existing[name])
+            if identifier:
+                result[index] = bind_deployment(item, identifier)
     return result
+
+
+def deployed_resource(azure, resource_id, api_version):
+    value = azure.scoped(["resource", "show", "--ids", resource_id, "--api-version", api_version])
+    require(value.get("id", "").lower() == resource_id.lower(), "Azure returned a resource outside the reviewed edge scope")
+    return value
+
+
+def validate_private_edge_resources(config, azure, profile_resource_id, deployed_origins):
+    edge = config["parameters"]["edge"]
+    hosts = {"api": "llm-api." + config["baseDomain"], "admin": "llm-admin." + config["baseDomain"]}
+    for plane in ("api", "admin"):
+        origin_id = profile_resource_id + f"/originGroups/private-{plane}/origins/private-{plane}"
+        origin = deployed_resource(azure, origin_id, "2025-04-15")
+        properties = origin.get("properties", {})
+        shared = properties.get("sharedPrivateLinkResource", {})
+        require(properties.get("provisioningState") == "Succeeded" and properties.get("enabledState") == "Enabled", f"Front Door {plane} private origin is not provisioned and enabled")
+        require(properties.get("hostName") == hosts[plane] and properties.get("originHostHeader") == hosts[plane] and properties.get("enforceCertificateNameCheck") is True, f"Front Door {plane} origin TLS identity differs from the reviewed contract")
+        require(shared.get("privateLink", {}).get("id", "").lower() == deployed_origins[plane]["privateLinkServiceId"].lower() and shared.get("privateLinkLocation") == deployed_origins[plane]["privateLinkLocation"] and str(shared.get("status", "")).lower() == "approved", f"Front Door {plane} private connection is not approved for the reviewed PLS")
+        service = deployed_resource(azure, deployed_origins[plane]["privateLinkServiceId"], "2024-07-01")
+        service_properties = service.get("properties", {})
+        active = []
+        for connection in service_properties.get("privateEndpointConnections", []):
+            status = str(connection.get("properties", {}).get("privateLinkServiceConnectionState", {}).get("status", "")).lower()
+            if status in {"approved", "pending"}:
+                active.append((status, connection.get("properties", {}).get("privateEndpoint", {}).get("id")))
+        require(len(active) == 1 and active[0][0] == "approved" and isinstance(active[0][1], str) and bool(active[0][1]), f"{plane} PLS must have exactly one approved connection and no unexpected pending connection")
+        require(service_properties.get("autoApproval", {}).get("subscriptions") == [], f"{plane} PLS must not auto-approve consumers")
+    mtls = edge["adminMtls"]
+    vault_id = f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{mtls['keyVaultResourceGroupName']}/providers/Microsoft.KeyVault/vaults/{mtls['keyVaultName']}"
+    api_domain = deployed_resource(azure, profile_resource_id + "/customDomains/llm-api", "2025-04-15")
+    api_properties = api_domain.get("properties", {})
+    require(api_properties.get("provisioningState") == "Succeeded" and api_properties.get("deploymentStatus") == "Succeeded" and api_properties.get("domainValidationState") == "Approved", "Front Door API custom domain ownership or edge certificate is not ready")
+    require(api_properties.get("hostName") == hosts["api"] and api_properties.get("tlsSettings", {}).get("certificateType") == "ManagedCertificate" and api_properties.get("tlsSettings", {}).get("minimumTlsVersion") == "TLS12", "Front Door API custom domain TLS differs from the reviewed contract")
+    secret_ids = []
+    for index, trusted_ca in enumerate(mtls["trustedClientCaSecrets"], 1):
+        secret_id = profile_resource_id + f"/secrets/admin-client-ca-{index}"
+        secret_ids.append(secret_id.lower())
+        secret = deployed_resource(azure, secret_id, "2026-08-01-preview")
+        properties = secret.get("properties", {})
+        parameters = properties.get("parameters", {})
+        require(properties.get("provisioningState") == "Succeeded" and properties.get("deploymentStatus") == "Succeeded" and parameters.get("type") == "MtlsCertificateChain", "Front Door Admin client CA secret is not provisioned globally")
+        require(parameters.get("secretSource", {}).get("id", "").lower() == f"{vault_id}/secrets/{trusted_ca['secretName']}".lower() and parameters.get("secretVersion", "").lower() == trusted_ca["secretVersion"].lower(), "Front Door Admin client CA secret differs from the fixed reviewed Vault version")
+    domain_id = profile_resource_id + "/customDomains/llm-admin"
+    domain = deployed_resource(azure, domain_id, "2026-08-01-preview")
+    properties = domain.get("properties", {})
+    settings = properties.get("mtlsSettings", {})
+    require(properties.get("provisioningState") == "Succeeded" and properties.get("deploymentStatus") == "Succeeded" and properties.get("domainValidationState") == "Approved" and properties.get("hostName") == hosts["admin"], "Front Door Admin custom domain ownership or edge certificate is not ready")
+    require(properties.get("tlsSettings", {}).get("certificateType") == "ManagedCertificate" and properties.get("tlsSettings", {}).get("minimumTlsVersion") == "TLS12", "Front Door Admin custom domain TLS differs from the reviewed contract")
+    require(settings.get("scenario") == "ClientCertificateRequiredAndValidated" and settings.get("certificateRevocationCheck") == "Enabled", "Front Door Admin custom domain does not enforce strict mTLS and revocation")
+    require({value.lower() for value in settings.get("allowedFqdns", [])} == {value.lower() for value in mtls["allowedCertificateFqdns"]} and {item.get("id", "").lower() for item in settings.get("secrets", [])} == set(secret_ids), "Front Door Admin mTLS identities or CA chains differ from the reviewed configuration")
 
 
 def deployed_edge(config, azure):
     output = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 9, "edge"), "--query", "{state:properties.provisioningState,edge:properties.outputs.edge.value}"])
     edge = output.get("edge", {})
-    require(output.get("state") == "Succeeded" and edge.get("provisioned") is True and edge.get("apiHost") == "llm-api." + config["baseDomain"], "Provision the matching disabled Front Door before binding")
-    route = edge.get("routeId", "")
+    require(output.get("state") == "Succeeded" and edge.get("provisioned") is True, "Provision the matching disabled Front Door before binding")
+    require(edge.get("apiHost") == "llm-api." + config["baseDomain"] and edge.get("adminHost") == "llm-admin." + config["baseDomain"], "Front Door domains differ from the customer configuration")
+    require(edge.get("adminMtlsMode") == "ClientCertificateRequiredAndValidated", "Admin Front Door does not enforce strict mTLS")
     prefix = group_id(config) + "/providers/Microsoft.Cdn/profiles/"
-    match = re.fullmatch(re.escape(prefix) + r"([A-Za-z0-9-]+)/afdEndpoints/[A-Za-z0-9-]+/routes/[A-Za-z0-9-]+", route, re.I)
-    require(match is not None, "Front Door route belongs to another target scope")
-    resource_id = prefix + match[1]
-    profile = azure.scoped(["resource", "show", "--ids", resource_id, "--api-version", "2025-04-15"])
+    matches = []
+    for key in ("routeId", "adminRouteId"):
+        match = re.fullmatch(re.escape(prefix) + r"([A-Za-z0-9-]+)/afdEndpoints/([A-Za-z0-9-]+)/routes/[A-Za-z0-9-]+", edge.get(key, ""), re.I)
+        require(match is not None, f"Front Door {key} belongs to another target scope")
+        matches.append((match[1], match[2]))
+    require(matches[0][0].lower() == matches[1][0].lower(), "API and Admin routes must belong to the same reviewed Front Door profile")
+    require(matches[0][1].lower() != matches[1][1].lower(), "API and Admin routes must use separate Front Door endpoints")
+    endpoint_pattern = r"[a-z0-9-]+\.(?:[a-z0-9-]+\.)?azurefd\.net"
+    require(re.fullmatch(endpoint_pattern, edge.get("endpointHost", "")) and re.fullmatch(endpoint_pattern, edge.get("adminEndpointHost", "")) and edge["endpointHost"].lower() != edge["adminEndpointHost"].lower(), "API and Admin must use distinct deployed Front Door endpoint hosts")
+    resource_id = prefix + matches[0][0]
+    profile = deployed_resource(azure, resource_id, "2025-04-15")
     identifier = edge.get("profileId")
-    require(isinstance(identifier, str) and UUID(identifier).int != 0 and profile.get("id", "").lower() == resource_id.lower() and profile.get("properties", {}).get("frontDoorId") == identifier, "Actual Front Door identity differs from deployment outputs")
-    return {"profileResourceId": resource_id, "frontDoorId": identifier, "apiHost": edge["apiHost"]}
+    require(isinstance(identifier, str) and UUID(identifier).int != 0 and profile.get("properties", {}).get("frontDoorId") == identifier, "Actual Front Door identity differs from deployment outputs")
+    configured_edge = config["parameters"]["edge"]
+    deployed_origins = {"api": edge.get("privateOrigin"), "admin": edge.get("adminPrivateOrigin")}
+    prefix_pls = group_id(config).lower() + "/providers/microsoft.network/privatelinkservices/"
+    for plane, parameter in (("api", "privateOrigin"), ("admin", "adminPrivateOrigin")):
+        origin = deployed_origins[plane]
+        configured_origin = configured_edge[parameter]
+        require(isinstance(origin, dict) and origin.get("privateLinkServiceId", "").lower().startswith(prefix_pls) and origin.get("privateLinkLocation") == configured_origin["privateLinkLocation"], f"Deployed {plane} private origin differs from the approved target scope")
+        require(configured_origin["privateLinkServiceId"] == "auto" or origin == configured_origin, f"Deployed {plane} private origin differs from the explicit customer configuration")
+    require(deployed_origins["api"]["privateLinkServiceId"].lower() != deployed_origins["admin"]["privateLinkServiceId"].lower(), "Deployed API and Admin origins reuse one Private Link Service")
+    require(edge.get("adminMtls") == configured_edge["adminMtls"], "Deployed Admin mTLS configuration differs from the customer configuration")
+    validate_private_edge_resources(config, azure, resource_id, deployed_origins)
+    return {"profileResourceId": resource_id, "frontDoorId": identifier, "apiHost": edge["apiHost"], "adminHost": edge["adminHost"], "endpointHost": edge["endpointHost"], "adminEndpointHost": edge["adminEndpointHost"], "routeId": edge["routeId"], "adminRouteId": edge["adminRouteId"], "adminMtlsMode": edge["adminMtlsMode"], "privateOrigin": deployed_origins["api"], "adminPrivateOrigin": deployed_origins["admin"], "adminMtls": edge["adminMtls"]}
 
 
-def native_ingress_state(config, client, identifier=None):
-    config_map = client.get("configmap", "llm-api-ingress")
-    deployment = client.get("deployment", "llm-api-ingress")
-    service = client.get("service", "llm-api-ingress")
-    return native_ingress_document_state(config, config_map, deployment, service, identifier)
+def native_ingress_state(config, client, identifier=None, plane="api"):
+    require(plane in {"api", "admin"}, "Unknown native ingress plane")
+    name = f"llm-{plane}-ingress"
+    config_map = client.get("configmap", name)
+    deployment = client.get("deployment", name)
+    service = client.get("service", name)
+    return native_ingress_document_state(config, config_map, deployment, service, identifier, plane)
 
 
-def native_ingress_document_state(config, config_map, deployment, service, identifier=None):
+def native_ingress_document_state(config, config_map, deployment, service, identifier=None, plane="api"):
+    require(plane in {"api", "admin"}, "Unknown native ingress plane")
     for item in (config_map, deployment, service):
-        require(item.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/managed-by") == "llmgw-workflow", "Native API ingress must remain workflow managed")
+        require(item.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/managed-by") == "llmgw-workflow", f"Native {plane} ingress must remain workflow managed")
     dynamic = yaml.safe_load(config_map.get("data", {}).get("routes.yaml", ""))
     require(isinstance(dynamic, dict), "Native API ingress route configuration is missing")
     http = dynamic.get("http", {})
     routers = http.get("routers", {})
-    require(set(routers) == {"api", "api-health"}, "Native API ingress contains an unexpected router")
-    api = routers["api"]
-    health = routers["api-health"]
-    rule = api.get("rule", "")
+    health_name = f"{plane}-health"
+    health_path = f"{plane}-health-path"
+    require(set(routers) == {plane, health_name}, f"Native {plane} ingress contains an unexpected router")
+    business = routers[plane]
+    health = routers[health_name]
+    rule = business.get("rule", "")
     bound = re.findall(r"HeaderRegexp\(`X-Azure-FDID`,\s*`\(\?i\)\^([a-fA-F0-9-]+)\$`\)", rule)
-    require(len(bound) <= 1 and (not bound or UUID(bound[0]).int != 0), "Native API ingress has an invalid Front Door header binding")
-    host = "llm-api." + config["baseDomain"]
-    require(api == {"rule": native_api_rule(host, bound[0] if bound else None), "entryPoints": ["websecure"], "service": "api", "tls": {}}, "Native API ingress does not enforce the exact reviewed inference routes")
-    require(health == {"rule": native_health_rule(host), "entryPoints": ["websecure"], "service": "api", "middlewares": ["api-health-path"], "tls": {}}, "Native API ingress health router differs from the reviewed contract")
+    require(len(bound) <= 1 and (not bound or UUID(bound[0]).int != 0), f"Native {plane} ingress has an invalid Front Door header binding")
+    host = f"llm-{plane}." + config["baseDomain"]
     if identifier is not None:
-        require(bound and bound[0].lower() == identifier.lower(), "Native API ingress trusts another or no Front Door")
-    require(http.get("middlewares") == {"api-health-path": {"replacePath": {"path": "/health/readiness"}}}, "Native API ingress middleware differs from the reviewed contract")
-    require(http.get("services") == {"api": {"loadBalancer": {"servers": [{"url": "http://litellm.litellm.svc.cluster.local:4000"}], "passHostHeader": True}}}, "Native API ingress targets an unexpected service")
+        require(bound and bound[0].lower() == identifier.lower(), f"Native {plane} ingress trusts another or no Front Door")
+    expected_rule = native_api_rule(host, bound[0] if bound else None) if plane == "api" else native_admin_rule(host, bound[0] if bound else None)
+    require(business == {"rule": expected_rule, "entryPoints": ["websecure"], "service": plane, "tls": {}}, f"Native {plane} ingress business route differs from the reviewed contract")
+    require(health == {"rule": native_health_rule(host), "entryPoints": ["websecure"], "service": plane, "middlewares": [health_path], "tls": {}}, f"Native {plane} ingress health router differs from the reviewed contract")
+    require(http.get("middlewares") == {health_path: {"replacePath": {"path": "/health/readiness"}}}, f"Native {plane} ingress middleware differs from the reviewed contract")
+    require(http.get("services") == {plane: {"loadBalancer": {"servers": [{"url": "http://litellm.litellm.svc.cluster.local:4000"}], "passHostHeader": True}}}, f"Native {plane} ingress targets an unexpected service")
     service_spec = service.get("spec", {})
-    expected_sources = source_ranges([*config["privateIngress"]["api"]["allowedCidrs"], config["parameters"]["platform"]["stage4Network"]["ingressSubnetPrefix"]])
-    expected_labels = {"app.kubernetes.io/name": "llmgw-ingress", "app.kubernetes.io/component": "controller", "app.kubernetes.io/managed-by": "llmgw-workflow", "plane": "api"}
+    expected_sources = source_ranges([*config["privateIngress"][plane]["allowedCidrs"], config["parameters"]["platform"]["stage4Network"]["ingressSubnetPrefix"]])
+    expected_labels = {"app.kubernetes.io/name": "llmgw-ingress", "app.kubernetes.io/component": "controller", "app.kubernetes.io/managed-by": "llmgw-workflow", "plane": plane}
     annotations = service.get("metadata", {}).get("annotations", {})
     ports = service_spec.get("ports", [])
     port_contract = len(ports) == 1 and all(ports[0].get(key) == value for key, value in {"name": "https", "port": 443, "targetPort": "https", "protocol": "TCP"}.items())
@@ -110,12 +188,12 @@ def native_ingress_document_state(config, config_map, deployment, service, ident
         and annotations.get("service.beta.kubernetes.io/azure-load-balancer-internal") == "true"
         and annotations.get("service.beta.kubernetes.io/azure-load-balancer-internal-subnet") == config["parameters"]["platform"]["stage4Network"]["ingressSubnetName"]
     )
-    require(service_contract, "Native API ingress Service differs from the reviewed private routing contract")
+    require(service_contract, f"Native {plane} ingress Service differs from the reviewed private routing contract")
     labels = deployment.get("spec", {}).get("template", {}).get("metadata", {}).get("labels", {})
     require(labels == expected_labels, "Native API ingress deployment labels changed")
     pod = deployment["spec"]["template"]["spec"]
     dynamic_volumes = [item for item in pod.get("volumes", []) if item.get("name") == "dynamic"]
-    require(dynamic_volumes == [{"name": "dynamic", "configMap": {"name": "llm-api-ingress"}}], "Native API ingress does not mount the reviewed route ConfigMap")
+    require(dynamic_volumes == [{"name": "dynamic", "configMap": {"name": f"llm-{plane}-ingress"}}], f"Native {plane} ingress does not mount the reviewed route ConfigMap")
     containers = pod.get("containers", [])
     require(len(containers) == 1 and containers[0].get("name") == "traefik" and {"name": "dynamic", "mountPath": "/dynamic", "readOnly": True} in containers[0].get("volumeMounts", []), "Native API ingress controller does not read the reviewed route ConfigMap")
     return {
@@ -130,24 +208,27 @@ def native_ingress_document_state(config, config_map, deployment, service, ident
     }
 
 
-def bind_native_ingress(config, client, identifier):
+def bind_native_ingress(config, client, identifier, plane="api"):
     require(isinstance(identifier, str) and UUID(identifier).int != 0, "Invalid deployed Front Door identity")
-    config_map = client.get("configmap", "llm-api-ingress")
-    deployment = client.get("deployment", "llm-api-ingress")
-    service = client.get("service", "llm-api-ingress")
-    current = native_ingress_document_state(config, config_map, deployment, service)
-    require(current["frontDoorHeaderBound"] is None or current["frontDoorHeaderBound"].lower() == identifier.lower(), "Existing native API ingress trusts another Front Door")
+    require(plane in {"api", "admin"}, "Unknown native ingress plane")
+    name = f"llm-{plane}-ingress"
+    config_map = client.get("configmap", name)
+    deployment = client.get("deployment", name)
+    service = client.get("service", name)
+    current = native_ingress_document_state(config, config_map, deployment, service, plane=plane)
+    require(current["frontDoorHeaderBound"] is None or current["frontDoorHeaderBound"].lower() == identifier.lower(), f"Existing native {plane} ingress trusts another Front Door")
     desired_config_map = copy.deepcopy(config_map)
     desired_deployment = copy.deepcopy(deployment)
     dynamic = yaml.safe_load(desired_config_map["data"]["routes.yaml"])
-    rule = dynamic["http"]["routers"]["api"]["rule"]
+    rule = dynamic["http"]["routers"][plane]["rule"]
     if current["frontDoorHeaderBound"] is None:
-        dynamic["http"]["routers"]["api"]["rule"] = native_api_rule("llm-api." + config["baseDomain"], identifier)
+        renderer = native_api_rule if plane == "api" else native_admin_rule
+        dynamic["http"]["routers"][plane]["rule"] = renderer(f"llm-{plane}." + config["baseDomain"], identifier)
     desired_config_map["data"]["routes.yaml"] = yaml.safe_dump(dynamic, sort_keys=False)
     annotations = desired_deployment["spec"]["template"]["metadata"].setdefault("annotations", {})
     annotations["llmgw/front-door-id"] = identifier
     annotations["llmgw/routes-sha256"] = fingerprint(dynamic)
-    desired = native_ingress_document_state(config, desired_config_map, desired_deployment, service, identifier)
+    desired = native_ingress_document_state(config, desired_config_map, desired_deployment, service, identifier, plane)
     return config_map, deployment, desired_config_map, desired_deployment, current, desired
 
 
@@ -165,12 +246,22 @@ def bind_edge(config, operation, revision, directory, approved, azure=None, clie
         kube = connect_cluster(config, directory, legacy=False)
         if native and kube[-2:] == ["--namespace", "litellm"]:
             kube = kube[:-2]
-        client = AuditCluster([*kube, "--namespace", "llm-api-ingress"] if native else kube, directory)
+        client = {plane: AuditCluster([*kube, "--namespace", f"llm-{plane}-ingress"], directory) for plane in ("api", "admin")} if native else AuditCluster(kube, directory)
     if native:
-        current_config_map, current_deployment, desired_config_map, desired_deployment, current_state, desired_state = bind_native_ingress(config, client, edge["frontDoorId"])
+        require(isinstance(client, dict) and set(client) == {"api", "admin"}, "Native edge binding requires isolated API and Admin clients")
         scope = {"stage": 9, "action": "edge-bind", "revision": revision, "configSha256": stage_fingerprint(config, 9),
                  "clusterResourceId": group_id(config) + "/providers/Microsoft.ContainerService/managedClusters/" + config["parameters"]["platform"]["stage4Aks"]["name"], **edge}
-        plan = {**scope, "bindingMode": "native-private-ingress", "configMapUid": current_config_map["metadata"]["uid"], "deploymentUid": current_deployment["metadata"]["uid"], "serviceUid": desired_state["serviceUid"], "currentRouteConfigSha256": current_state["routeConfigSha256"], "currentPodTemplateSha256": current_state["podTemplateSha256"], "desiredRouteConfigSha256": desired_state["routeConfigSha256"], "desiredPodTemplateSha256": desired_state["podTemplateSha256"]}
+        changes = {}
+        for plane in ("api", "admin"):
+            current_config_map, current_deployment, desired_config_map, desired_deployment, current_state, desired_state = bind_native_ingress(config, client[plane], edge["frontDoorId"], plane)
+            changes[plane] = {
+                "currentConfigMap": current_config_map,
+                "currentDeployment": current_deployment,
+                "desiredConfigMap": desired_config_map,
+                "desiredDeployment": desired_deployment,
+                "plan": {"configMapUid": current_config_map["metadata"]["uid"], "deploymentUid": current_deployment["metadata"]["uid"], "serviceUid": desired_state["serviceUid"], "currentRouteConfigSha256": current_state["routeConfigSha256"], "currentPodTemplateSha256": current_state["podTemplateSha256"], "desiredRouteConfigSha256": desired_state["routeConfigSha256"], "desiredPodTemplateSha256": desired_state["podTemplateSha256"]},
+            }
+        plan = {**scope, "bindingMode": "native-private-ingress", "planes": {plane: changes[plane]["plan"] for plane in ("api", "admin")}}
         digest = fingerprint(plan)
         summary = {**scope, "bindingMode": "native-private-ingress", "planSha256": digest, "applied": False, "stageAccepted": False, "trafficVerified": False}
         private_write(directory / "runtime-review.json", json.dumps(plan, indent=2))
@@ -178,34 +269,42 @@ def bind_edge(config, operation, revision, directory, approved, azure=None, clie
         if operation == "plan":
             return summary
         require(digest == approved, "Edge binding plan changed or was not approved")
-        observed_config_map = client.get("configmap", "llm-api-ingress")
-        observed_deployment = client.get("deployment", "llm-api-ingress")
-        require(observed_config_map["metadata"]["uid"] == plan["configMapUid"] and observed_config_map["data"] == current_config_map["data"] and observed_deployment["metadata"]["uid"] == plan["deploymentUid"] and observed_deployment["spec"] == current_deployment["spec"], "Native API ingress changed during approval")
-        if observed_config_map["data"] != desired_config_map["data"]:
-            client.patch("configmap", "llm-api-ingress", [{"op": "test", "path": "/metadata/uid", "value": plan["configMapUid"]}, {"op": "test", "path": "/data", "value": observed_config_map["data"]}, {"op": "replace", "path": "/data", "value": desired_config_map["data"]}])
-        if observed_deployment["spec"] != desired_deployment["spec"]:
-            client.patch("deployment", "llm-api-ingress", [{"op": "test", "path": "/metadata/uid", "value": plan["deploymentUid"]}, {"op": "test", "path": "/spec", "value": observed_deployment["spec"]}, {"op": "replace", "path": "/spec", "value": desired_deployment["spec"]}])
-        client.run(["rollout", "status", "deployment/llm-api-ingress", "--timeout=15m"])
-        after = native_ingress_state(config, client, edge["frontDoorId"])
-        require(after["deploymentUid"] == plan["deploymentUid"] and after["serviceUid"] == plan["serviceUid"] and after["routeConfigSha256"] == plan["desiredRouteConfigSha256"] and after["podTemplateSha256"] == plan["desiredPodTemplateSha256"], "Native API ingress changed during rollout verification")
-        receipt = {**scope, **after, "configMapUid": plan["configMapUid"], "rolloutVerified": True}
+        for plane in ("api", "admin"):
+            name = f"llm-{plane}-ingress"
+            change = changes[plane]
+            plane_plan = plan["planes"][plane]
+            observed_config_map = client[plane].get("configmap", name)
+            observed_deployment = client[plane].get("deployment", name)
+            require(observed_config_map["metadata"]["uid"] == plane_plan["configMapUid"] and observed_config_map["data"] == change["currentConfigMap"]["data"] and observed_deployment["metadata"]["uid"] == plane_plan["deploymentUid"] and observed_deployment["spec"] == change["currentDeployment"]["spec"], f"Native {plane} ingress changed during approval")
+            if observed_config_map["data"] != change["desiredConfigMap"]["data"]:
+                client[plane].patch("configmap", name, [{"op": "test", "path": "/metadata/uid", "value": plane_plan["configMapUid"]}, {"op": "test", "path": "/data", "value": observed_config_map["data"]}, {"op": "replace", "path": "/data", "value": change["desiredConfigMap"]["data"]}])
+            if observed_deployment["spec"] != change["desiredDeployment"]["spec"]:
+                client[plane].patch("deployment", name, [{"op": "test", "path": "/metadata/uid", "value": plane_plan["deploymentUid"]}, {"op": "test", "path": "/spec", "value": observed_deployment["spec"]}, {"op": "replace", "path": "/spec", "value": change["desiredDeployment"]["spec"]}])
+            client[plane].run(["rollout", "status", f"deployment/{name}", "--timeout=15m"])
+        after = {plane: native_ingress_state(config, client[plane], edge["frontDoorId"], plane) for plane in ("api", "admin")}
+        for plane, state in after.items():
+            plane_plan = plan["planes"][plane]
+            require(state["deploymentUid"] == plane_plan["deploymentUid"] and state["serviceUid"] == plane_plan["serviceUid"] and state["routeConfigSha256"] == plane_plan["desiredRouteConfigSha256"] and state["podTemplateSha256"] == plane_plan["desiredPodTemplateSha256"], f"Native {plane} ingress changed during rollout verification")
+        receipt = {**scope, "bindingMode": "native-private-ingress", "planes": after, "rolloutVerified": True}
         template = {"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#", "contentVersion": "1.0.0.0", "resources": [], "outputs": {"edgeBinding": {"type": "object", "value": receipt}}}
         path = directory / "edge-binding-receipt.json"
         private_write(path, json.dumps(template))
         saved = azure.scoped(["deployment", "group", "create", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 9, "edge-bind"), "--mode", "Incremental", "--template-file", str(path)])
-        require(saved.get("properties", {}).get("provisioningState") == "Succeeded", "Native API ingress verified but saving the binding receipt failed")
+        require(saved.get("properties", {}).get("provisioningState") == "Succeeded", "Native ingresses verified but saving the binding receipt failed")
         summary.update(applied=True, rolloutVerified=True)
         private_write(directory / "runtime-summary.json", json.dumps(summary, indent=2))
         return summary
-    current = client.get("deployment", "llm-api-proxy")
-    admin = client.get("deployment", "llm-admin-proxy")
-    require(front_door_id(admin) is None, "Admin proxy must not trust Front Door")
-    desired = bind_deployment(current, edge["frontDoorId"])
-    pod = desired["spec"]["template"]["spec"]
-    require(pod.get("serviceAccountName") == "llm-api-proxy" and pod["containers"][0].get("image") == config.get("proxy", {}).get("image"), "Bind only the approved managed API workload and image")
+    workloads = {}
+    for plane in ("api", "admin"):
+        name = f"llm-{plane}-proxy"
+        current = client.get("deployment", name)
+        desired = bind_deployment(current, edge["frontDoorId"])
+        pod = desired["spec"]["template"]["spec"]
+        require(pod.get("serviceAccountName") == name and pod["containers"][0].get("image") == config.get("proxy", {}).get("image"), f"Bind only the approved managed {plane} workload and image")
+        workloads[plane] = {"current": current, "desired": desired}
     scope = {"stage": 9, "action": "edge-bind", "revision": revision, "configSha256": stage_fingerprint(config, 9),
              "clusterResourceId": group_id(config) + "/providers/Microsoft.ContainerService/managedClusters/" + config["parameters"]["platform"]["stage4Aks"]["name"], **edge}
-    plan = {**scope, "deploymentUid": current["metadata"]["uid"], "currentSpecSha256": fingerprint(current["spec"]), "desiredSpecSha256": fingerprint(desired["spec"])}
+    plan = {**scope, "planes": {plane: {"deploymentUid": workloads[plane]["current"]["metadata"]["uid"], "currentSpecSha256": fingerprint(workloads[plane]["current"]["spec"]), "desiredSpecSha256": fingerprint(workloads[plane]["desired"]["spec"])} for plane in ("api", "admin")}}
     digest = fingerprint(plan)
     summary = {**scope, "planSha256": digest, "applied": False, "stageAccepted": False, "trafficVerified": False}
     private_write(directory / "runtime-review.json", json.dumps(plan, indent=2))
@@ -213,17 +312,22 @@ def bind_edge(config, operation, revision, directory, approved, azure=None, clie
     if operation == "plan":
         return summary
     require(digest == approved, "Edge binding plan changed or was not approved")
-    if current["spec"] != desired["spec"]:
-        client.patch("deployment", "llm-api-proxy", [{"op": "test", "path": "/metadata/uid", "value": current["metadata"]["uid"]}, {"op": "test", "path": "/spec", "value": current["spec"]}, {"op": "replace", "path": "/spec", "value": desired["spec"]}])
-    client.run(["rollout", "status", "deployment/llm-api-proxy", "--timeout=15m"])
-    after = client.get("deployment", "llm-api-proxy")
-    require(after["metadata"]["uid"] == plan["deploymentUid"] and after["spec"] == desired["spec"] and front_door_id(after) == edge["frontDoorId"], "API binding changed during rollout; do not release traffic")
-    receipt = {**scope, "deploymentUid": after["metadata"]["uid"], "podTemplateSha256": fingerprint(after["spec"]["template"]), "rolloutVerified": True}
+    for plane in ("api", "admin"):
+        name = f"llm-{plane}-proxy"
+        current = workloads[plane]["current"]
+        desired = workloads[plane]["desired"]
+        if current["spec"] != desired["spec"]:
+            client.patch("deployment", name, [{"op": "test", "path": "/metadata/uid", "value": current["metadata"]["uid"]}, {"op": "test", "path": "/spec", "value": current["spec"]}, {"op": "replace", "path": "/spec", "value": desired["spec"]}])
+        client.run(["rollout", "status", f"deployment/{name}", "--timeout=15m"])
+    after = {plane: client.get("deployment", f"llm-{plane}-proxy") for plane in ("api", "admin")}
+    for plane, deployment in after.items():
+        require(deployment["metadata"]["uid"] == plan["planes"][plane]["deploymentUid"] and deployment["spec"] == workloads[plane]["desired"]["spec"] and front_door_id(deployment) == edge["frontDoorId"], f"{plane} binding changed during rollout; do not release traffic")
+    receipt = {**scope, "planes": {plane: {"deploymentUid": after[plane]["metadata"]["uid"], "podTemplateSha256": fingerprint(after[plane]["spec"]["template"])} for plane in ("api", "admin")}, "rolloutVerified": True}
     template = {"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#", "contentVersion": "1.0.0.0", "resources": [], "outputs": {"edgeBinding": {"type": "object", "value": receipt}}}
     path = directory / "edge-binding-receipt.json"
     private_write(path, json.dumps(template))
     saved = azure.scoped(["deployment", "group", "create", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 9, "edge-bind"), "--mode", "Incremental", "--template-file", str(path)])
-    require(saved.get("properties", {}).get("provisioningState") == "Succeeded", "API binding applied but receipt storage failed; replan before release")
+    require(saved.get("properties", {}).get("provisioningState") == "Succeeded", "Proxy bindings applied but receipt storage failed; replan before release")
     summary.update(applied=True, rolloutVerified=True)
     private_write(directory / "runtime-summary.json", json.dumps(summary, indent=2))
     return summary
@@ -233,14 +337,36 @@ def require_edge_binding(config, revision, identifier, azure, client=None):
     result = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 9, "edge-bind"), "--query", "{state:properties.provisioningState,binding:properties.outputs.edgeBinding.value}"])
     receipt = result.get("binding", {})
     require(result.get("state") == "Succeeded" and receipt.get("rolloutVerified") is True, "Run edge-bind and verify its rollout before enabling traffic")
+    current_edge = deployed_edge(config, azure)
+    require(current_edge["frontDoorId"] == identifier, "Current Front Door identity differs from the release")
     expected = {"revision": revision, "configSha256": stage_fingerprint(config, 9), "frontDoorId": identifier,
-                "apiHost": "llm-api." + config["baseDomain"], "clusterResourceId": group_id(config) + "/providers/Microsoft.ContainerService/managedClusters/" + config["parameters"]["platform"]["stage4Aks"]["name"]}
+                "apiHost": "llm-api." + config["baseDomain"], "adminHost": "llm-admin." + config["baseDomain"],
+                "adminMtlsMode": "ClientCertificateRequiredAndValidated",
+                "clusterResourceId": group_id(config) + "/providers/Microsoft.ContainerService/managedClusters/" + config["parameters"]["platform"]["stage4Aks"]["name"]}
     require(all(receipt.get(key) == value for key, value in expected.items()), "Edge binding receipt is stale or belongs to a different environment")
+    for key in ("profileResourceId", "endpointHost", "adminEndpointHost", "routeId", "adminRouteId", "privateOrigin", "adminPrivateOrigin", "adminMtls"):
+        require(receipt.get(key) == current_edge.get(key), "Edge binding receipt differs from the current Front Door and private-origin configuration")
     from scripts.backend_manifest import application_authentication
     if application_authentication(config)["mode"] == "native":
-        require(receipt.get("bindingMode") == "native-private-ingress" and isinstance(receipt.get("serviceUid"), str) and re.fullmatch(r"[a-f0-9]{64}", receipt.get("routeConfigSha256", "")) and re.fullmatch(r"[a-f0-9]{64}", receipt.get("serviceSpecSha256", "")), "Native edge binding receipt lacks the verified private API ingress")
-        require(client is not None, "Native traffic release requires live access to the private API ingress")
-        live = native_ingress_state(config, client, identifier)
-        for key in ("configMapUid", "deploymentUid", "serviceUid", "serviceSpecSha256", "podTemplateSha256", "routeConfigSha256", "frontDoorHeaderBound"):
-            require(receipt.get(key) == live.get(key), "Native API ingress differs from the verified edge binding receipt")
-    require(isinstance(receipt.get("deploymentUid"), str) and bool(receipt["deploymentUid"]) and re.fullmatch(r"[a-f0-9]{64}", receipt.get("podTemplateSha256", "")), "Edge binding receipt lacks the verified API workload")
+        planes = receipt.get("planes", {})
+        require(receipt.get("bindingMode") == "native-private-ingress" and isinstance(planes, dict) and set(planes) == {"api", "admin"}, "Native edge binding receipt lacks both verified private ingresses")
+        require(isinstance(client, dict) and set(client) == {"api", "admin"}, "Native traffic release requires live access to both private ingresses")
+        for plane in ("api", "admin"):
+            state = planes[plane]
+            require(isinstance(state.get("serviceUid"), str) and re.fullmatch(r"[a-f0-9]{64}", state.get("routeConfigSha256", "")) and re.fullmatch(r"[a-f0-9]{64}", state.get("serviceSpecSha256", "")), f"Native edge binding receipt lacks the verified private {plane} ingress")
+            live = native_ingress_state(config, client[plane], identifier, plane)
+            for key in ("configMapUid", "deploymentUid", "serviceUid", "serviceSpecSha256", "podTemplateSha256", "routeConfigSha256", "frontDoorHeaderBound"):
+                require(state.get(key) == live.get(key), f"Native {plane} ingress differs from the verified edge binding receipt")
+    else:
+        planes = receipt.get("planes", {})
+        require(isinstance(planes, dict) and set(planes) == {"api", "admin"}, "Edge binding receipt lacks both verified proxy workloads")
+        require(client is not None, "Proxy traffic release requires live access to both managed proxy workloads")
+        for plane in ("api", "admin"):
+            state = planes[plane]
+            require(isinstance(state.get("deploymentUid"), str) and bool(state["deploymentUid"]) and re.fullmatch(r"[a-f0-9]{64}", state.get("podTemplateSha256", "")), f"Edge binding receipt lacks the verified {plane} workload")
+            name = f"llm-{plane}-proxy"
+            live = client.get("deployment", name)
+            pod = live.get("spec", {}).get("template", {}).get("spec", {})
+            containers = pod.get("containers", [])
+            require(live.get("metadata", {}).get("uid") == state["deploymentUid"] and fingerprint(live["spec"]["template"]) == state["podTemplateSha256"], f"Managed {plane} proxy differs from the verified edge binding receipt")
+            require(pod.get("serviceAccountName") == name and len(containers) == 1 and containers[0].get("name") == "auth-proxy" and containers[0].get("image") == config.get("proxy", {}).get("image") and front_door_id(live) == identifier, f"Managed {plane} proxy no longer enforces the reviewed Front Door binding")
