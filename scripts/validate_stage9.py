@@ -52,6 +52,9 @@ def validate_templates(edge, origin):
     assert set(endpoints) == {"api", "admin"}
     assert endpoints["api"]["properties"]["enabledState"] == "[variables('apiTrafficState')]"
     assert endpoints["admin"]["properties"]["enabledState"] == "[variables('adminTrafficState')]"
+    assert endpoints["admin"]["apiVersion"] == "2026-08-01-preview"
+    assert endpoints["admin"]["properties"]["enforceMtls"] == "Enabled"
+    assert "enforceMtls" not in endpoints["api"]["properties"]
     domains = {"admin" if "llm-admin" in item["name"] else "api": item for item in by_type["Microsoft.Cdn/profiles/customDomains"]}
     assert set(domains) == {"api", "admin"}
     assert domains["api"]["properties"]["hostName"] == "[variables('apiHost')]" and "mtlsSettings" not in domains["api"]["properties"]

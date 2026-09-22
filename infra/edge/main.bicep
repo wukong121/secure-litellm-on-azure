@@ -108,11 +108,14 @@ resource endpoint 'Microsoft.Cdn/profiles/afdEndpoints@2025-04-15' = if (deployE
   properties: { enabledState: apiTrafficState }
 }
 
-resource adminEndpoint 'Microsoft.Cdn/profiles/afdEndpoints@2025-04-15' = if (deployEdge) {
+resource adminEndpoint 'Microsoft.Cdn/profiles/afdEndpoints@2026-08-01-preview' = if (deployEdge) {
   parent: profile
   name: 'llm-admin-${environmentName}-${suffix}'
   location: 'global'
-  properties: { enabledState: adminTrafficState }
+  properties: {
+    enabledState: adminTrafficState
+    enforceMtls: 'Enabled'
+  }
 }
 
 resource domain 'Microsoft.Cdn/profiles/customDomains@2025-04-15' = if (deployEdge) {

@@ -169,7 +169,7 @@ def resolve_origin(config, component, azure):
         provider = azure.scoped(["provider", "show", "--namespace", "Microsoft.Cdn", "--query", "{state:registrationState,resourceTypes:resourceTypes}"])
         resource_types = {item.get("resourceType", "").lower(): set(item.get("apiVersions", [])) for item in provider.get("resourceTypes", [])}
         preview = "2026-08-01-preview"
-        require(provider.get("state") == "Registered" and all(preview in resource_types.get(kind, set()) for kind in ("profiles/customdomains", "profiles/secrets")), "Customer subscription does not advertise the required Front Door Admin mTLS preview APIs")
+        require(provider.get("state") == "Registered" and all(preview in resource_types.get(kind, set()) for kind in ("profiles/afdendpoints", "profiles/customdomains", "profiles/secrets")), "Customer subscription does not advertise the required Front Door Admin mTLS preview APIs")
     elif component == "origin":
         cluster_name = config["parameters"]["platform"]["stage4Aks"]["name"]
         node_group = azure.scoped(["aks", "show", "--resource-group", config["target"]["resourceGroup"], "--name", cluster_name, "--query", "nodeResourceGroup"])

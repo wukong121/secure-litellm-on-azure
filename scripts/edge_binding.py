@@ -58,9 +58,15 @@ def deployed_resource(azure, resource_id, api_version):
     return value
 
 
-def validate_private_edge_resources(config, azure, profile_resource_id, deployed_origins):
+def validate_private_edge_resources(config, azure, profile_resource_id, deployed_origins, edge_output):
     edge = config["parameters"]["edge"]
     hosts = {"api": "llm-api." + config["baseDomain"], "admin": "llm-admin." + config["baseDomain"]}
+    api_endpoint_id = edge_output["routeId"].rsplit("/routes/", 1)[0]
+    admin_endpoint_id = edge_output["adminRouteId"].rsplit("/routes/", 1)[0]
+    api_endpoint = deployed_resource(azure, api_endpoint_id, "2025-04-15").get("properties", {})
+    admin_endpoint = deployed_resource(azure, admin_endpoint_id, "2026-08-01-preview").get("properties", {})
+    require(api_endpoint.get("provisioningState") == "Succeeded" and api_endpoint.get("enforceMtls") in {None, "Disabled"}, "Front Door API endpoint unexpectedly enforces mTLS")
+    require(admin_endpoint.get("provisioningState") == "Succeeded" and admin_endpoint.get("enforceMtls") == "Enabled", "Front Door Admin endpoint does not enforce mTLS")
     for plane in ("api", "admin"):
         origin_id = profile_resource_id + f"/originGroups/private-{plane}/origins/private-{plane}"
         origin = deployed_resource(azure, origin_id, "2025-04-15")
@@ -133,7 +139,7 @@ def deployed_edge(config, azure):
         require(configured_origin["privateLinkServiceId"] == "auto" or origin == configured_origin, f"Deployed {plane} private origin differs from the explicit customer configuration")
     require(deployed_origins["api"]["privateLinkServiceId"].lower() != deployed_origins["admin"]["privateLinkServiceId"].lower(), "Deployed API and Admin origins reuse one Private Link Service")
     require(edge.get("adminMtls") == configured_edge["adminMtls"], "Deployed Admin mTLS configuration differs from the customer configuration")
-    validate_private_edge_resources(config, azure, resource_id, deployed_origins)
+    validate_private_edge_resources(config, azure, resource_id, deployed_origins, edge)
     return {"profileResourceId": resource_id, "frontDoorId": identifier, "apiHost": edge["apiHost"], "adminHost": edge["adminHost"], "endpointHost": edge["endpointHost"], "adminEndpointHost": edge["adminEndpointHost"], "routeId": edge["routeId"], "adminRouteId": edge["adminRouteId"], "adminMtlsMode": edge["adminMtlsMode"], "privateOrigin": deployed_origins["api"], "adminPrivateOrigin": deployed_origins["admin"], "adminMtls": edge["adminMtls"]}
 
 
