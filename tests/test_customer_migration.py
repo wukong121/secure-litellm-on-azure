@@ -25,7 +25,7 @@ def customer_config():
         "parameters": {"platform": {"containerRegistryName": "customerregistry", "logAnalyticsWorkspaceName": "customer-logs", "stage4Network": {"virtualNetworkName": "target-vnet"}, "stage4Aks": {"name": "new-aks"}}, "monitoring": {"logAnalyticsWorkspaceName": "legacy-logs"}, "edge": {
             "privateOrigin": {"privateLinkServiceId": target_id + "/providers/Microsoft.Network/privateLinkServices/api", "privateLinkLocation": "westus"},
             "adminPrivateOrigin": {"privateLinkServiceId": target_id + "/providers/Microsoft.Network/privateLinkServices/admin", "privateLinkLocation": "westus"},
-            "adminMtls": {"keyVaultResourceGroupName": "rg-edge-secrets", "keyVaultName": "kvedgesecrets", "allowedCertificateFqdns": ["admin-device.customer.invalid"], "trustedClientCaSecrets": [{"secretName": "admin-client-ca", "secretVersion": "a" * 32}]},
+            "adminAllowedCidrs": ["20.30.40.50/32"],
             "logAnalyticsWorkspaceName": "target-logs",
         }},
     }
@@ -178,9 +178,6 @@ class CustomerMigrationTests(unittest.TestCase):
         for stage in (0, 3, 5):
             with self.assertRaisesRegex(ValueError, "does not belong"):
                 parameters_for(self.config, stage, "certificate-vault")
-        self.config["parameters"]["edge"]["adminMtls"]["keyVaultName"] = self.config["parameters"]["certificate-vault"]["vaultName"]
-        with self.assertRaisesRegex(ValueError, "dedicated"):
-            validate_config(self.config, "test")
 
     def test_supply_chain_gates_separate_source_from_private_target(self):
         self.assertIn("source_image_sbom_scan", stage_checks(3, self.config))
@@ -224,20 +221,15 @@ class CustomerMigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parameters_for(self.config, 8, "edge")
 
-    def test_edge_requires_version_pinned_admin_mtls_ca(self):
-        for mutate in (
-            lambda value: value.update(trustedClientCaSecrets=[]),
-            lambda value: value["trustedClientCaSecrets"][0].update(secretVersion="latest"),
-            lambda value: value.update(allowedCertificateFqdns=[]),
-        ):
+    def test_edge_requires_bounded_public_admin_source_cidrs(self):
+        for value in ([], ["0.0.0.0/0"], ["10.50.0.0/24"], ["20.30.0.0/16"], ["20.30.40.50"]):
             invalid = copy.deepcopy(self.config)
-            mutate(invalid["parameters"]["edge"]["adminMtls"])
-            with self.subTest(config=invalid["parameters"]["edge"]["adminMtls"]), self.assertRaises(ValueError):
+            invalid["parameters"]["edge"]["adminAllowedCidrs"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
                 parameters_for(invalid, 9, "edge")
 
-    def test_future_admin_mtls_placeholders_do_not_block_earlier_stages(self):
-        mtls = self.config["parameters"]["edge"]["adminMtls"]
-        mtls.update(keyVaultResourceGroupName="REPLACE_EDGE_TRUST_VAULT_RESOURCE_GROUP", keyVaultName="REPLACE_EDGE_TRUST_VAULT_NAME", allowedCertificateFqdns=["REPLACE_CLIENT_CERTIFICATE_FQDN"], trustedClientCaSecrets=[{"secretName": "REPLACE_CA_SECRET", "secretVersion": "REPLACE_CA_VERSION"}])
+    def test_future_admin_allowlist_placeholder_does_not_block_earlier_stages(self):
+        self.config["parameters"]["edge"]["adminAllowedCidrs"] = ["REPLACE_ADMIN_ALLOWED_PUBLIC_CIDR"]
         validate_config(self.config, "test")
         parameters_for(self.config, 4, "platform")
         with self.assertRaises(ValueError):

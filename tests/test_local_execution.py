@@ -619,11 +619,7 @@ class LocalExecutionTests(unittest.TestCase):
             "REPLACE_APPROVED_AUDIT_TEAM_ID": "approved-team",
             "REPLACE_AUDIT_CMK_VAULT": "synthetic-audit-vault",
             "REPLACE_AUDIT_CMK_KEY": "audit-key",
-            "REPLACE_EDGE_TRUST_VAULT_RESOURCE_GROUP": "rg-edge-trust",
-            "REPLACE_EDGE_TRUST_VAULT_NAME": "synthetic-edge-trust",
-            "REPLACE_CLIENT_CERTIFICATE_FQDN": "admin-device.customer.invalid",
-            "REPLACE_CLIENT_CA_CHAIN_SECRET_NAME": "admin-client-ca",
-            "REPLACE_CLIENT_CA_CHAIN_SECRET_VERSION": "4" * 32,
+            "REPLACE_ADMIN_ALLOWED_PUBLIC_CIDRS": ["20.30.40.50/32"],
             "REPLACE_AZURE_REGION": source["location"],
         }
 
@@ -634,7 +630,10 @@ class LocalExecutionTests(unittest.TestCase):
                 return [replace(item) for item in value]
             if isinstance(value, str):
                 for old, new in replacements.items():
-                    value = value.replace(old, new)
+                    if value == old and isinstance(new, list):
+                        return copy.deepcopy(new)
+                    if old in value:
+                        value = value.replace(old, new)
                 self.assertNotIn("REPLACE_", value)
             return value
 
@@ -781,6 +780,10 @@ class LocalExecutionTests(unittest.TestCase):
         merged, missing = merge_stage(source, catalog, 3, values={"REPLACE_ACR_NAME": "mergedregistry"})
         self.assertFalse(missing)
         self.assertEqual(merged["parameters"]["platform"]["containerRegistryName"], "mergedregistry")
+        array_catalog = {"catalogVersion": 1, "stages": {"9": {"customerConfig": {"parameters": {"edge": {"adminAllowedCidrs": "REPLACE_ADMIN_ALLOWED_PUBLIC_CIDRS"}}}, "localExecutionForPrepare": {"features": {"allowTrafficRelease": False}}}}}
+        merged, missing = merge_stage(source, array_catalog, 9, values={"REPLACE_ADMIN_ALLOWED_PUBLIC_CIDRS": ["20.30.40.50/32", "21.31.41.51/32"]})
+        self.assertFalse(missing)
+        self.assertEqual(merged["parameters"]["edge"]["adminAllowedCidrs"], ["20.30.40.50/32", "21.31.41.51/32"])
 
     def test_config_merge_options_are_explicit_and_enhanced_l3_removes_native_audit(self):
         source = self.configuration()

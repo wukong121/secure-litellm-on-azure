@@ -6,7 +6,7 @@ param deployEdge bool = false
 @description('Separate traffic gate. Keep false until private origin, WAF association and release evidence are reviewed.')
 param enableApiTraffic bool = false
 
-@description('Independent Admin traffic gate. Keep false until mTLS, private origin and release evidence are reviewed.')
+@description('Independent Admin traffic gate. Keep false until the source-IP allowlist, private origin and release evidence are reviewed.')
 param enableAdminTraffic bool = false
 
 @allowed(['dev', 'test', 'prod'])
@@ -20,26 +20,16 @@ type privateOriginConfiguration = {
   privateLinkLocation: string
 }
 
-type trustedClientCaConfiguration = {
-  secretName: string
-  secretVersion: string
-}
-
-type adminMtlsConfiguration = {
-  keyVaultResourceGroupName: string
-  keyVaultName: string
-  allowedCertificateFqdns: string[]
-  trustedClientCaSecrets: trustedClientCaConfiguration[]
-}
-
 @description('Existing, reviewed API-only Private Link Service. Never use the Admin ingress or the legacy public gateway.')
 param privateOrigin privateOriginConfiguration
 
 @description('Existing, reviewed Admin-only Private Link Service. Never reuse the API frontend.')
 param adminPrivateOrigin privateOriginConfiguration
 
-@description('Version-pinned client CA chains and certificate identities accepted by the strict Admin mTLS endpoint.')
-param adminMtls adminMtlsConfiguration
+@minLength(1)
+@maxLength(32)
+@description('Public client egress CIDRs allowed to reach the Admin domain. All other source socket addresses are blocked by the Admin WAF policy.')
+param adminAllowedCidrs string[]
 
 @description('Existing workspace for edge access, health and WAF diagnostics.')
 param logAnalyticsWorkspaceName string
@@ -54,7 +44,7 @@ param rateLimitPerMinute int = 600
 
 @minValue(1)
 @maxValue(10000)
-@description('Admin per-client-IP rate threshold per minute; mTLS is still mandatory before WAF evaluation.')
+@description('Admin per-client-IP rate threshold per minute after source-IP admission.')
 param adminRateLimitPerMinute int = 120
 
 param tags object = {}
@@ -64,7 +54,6 @@ var apiHost = 'llm-api.${baseDomain}'
 var adminHost = 'llm-admin.${baseDomain}'
 var apiTrafficState = enableApiTraffic ? 'Enabled' : 'Disabled'
 var adminTrafficState = enableAdminTraffic ? 'Enabled' : 'Disabled'
-var adminMtlsVaultId = resourceId(subscription().subscriptionId, adminMtls.keyVaultResourceGroupName, 'Microsoft.KeyVault/vaults', adminMtls.keyVaultName)
 
 resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
   name: logAnalyticsWorkspaceName
@@ -75,31 +64,8 @@ resource profile 'Microsoft.Cdn/profiles@2025-04-15' = if (deployEdge) {
   location: 'global'
   tags: tags
   sku: { name: 'Premium_AzureFrontDoor' }
-  identity: { type: 'SystemAssigned' }
   properties: { originResponseTimeoutSeconds: 240 }
 }
-
-module adminMtlsVaultAccess '../modules/key-vault-secret-reader-role/main.bicep' = if (deployEdge) {
-  scope: resourceGroup(adminMtls.keyVaultResourceGroupName)
-  name: 'admin-mtls-vault-access-${suffix}'
-  params: {
-    vaultName: adminMtls.keyVaultName
-    principalId: profile!.identity.principalId
-  }
-}
-
-resource adminMtlsCaSecrets 'Microsoft.Cdn/profiles/secrets@2026-08-01-preview' = [for (trustedCa, index) in adminMtls.trustedClientCaSecrets: if (deployEdge) {
-  parent: profile
-  name: 'admin-client-ca-${index + 1}'
-  properties: {
-    parameters: {
-      type: 'MtlsCertificateChain'
-      secretSource: { id: '${adminMtlsVaultId}/secrets/${trustedCa.secretName}' }
-      secretVersion: trustedCa.secretVersion
-    }
-  }
-  dependsOn: [adminMtlsVaultAccess]
-}]
 
 resource endpoint 'Microsoft.Cdn/profiles/afdEndpoints@2025-04-15' = if (deployEdge) {
   parent: profile
@@ -108,14 +74,11 @@ resource endpoint 'Microsoft.Cdn/profiles/afdEndpoints@2025-04-15' = if (deployE
   properties: { enabledState: apiTrafficState }
 }
 
-resource adminEndpoint 'Microsoft.Cdn/profiles/afdEndpoints@2026-08-01-preview' = if (deployEdge) {
+resource adminEndpoint 'Microsoft.Cdn/profiles/afdEndpoints@2025-04-15' = if (deployEdge) {
   parent: profile
   name: 'llm-admin-${environmentName}-${suffix}'
   location: 'global'
-  properties: {
-    enabledState: adminTrafficState
-    enforceMtls: 'Enabled'
-  }
+  properties: { enabledState: adminTrafficState }
 }
 
 resource domain 'Microsoft.Cdn/profiles/customDomains@2025-04-15' = if (deployEdge) {
@@ -130,7 +93,7 @@ resource domain 'Microsoft.Cdn/profiles/customDomains@2025-04-15' = if (deployEd
   }
 }
 
-resource adminDomain 'Microsoft.Cdn/profiles/customDomains@2026-08-01-preview' = if (deployEdge) {
+resource adminDomain 'Microsoft.Cdn/profiles/customDomains@2025-04-15' = if (deployEdge) {
   parent: profile
   name: 'llm-admin'
   properties: {
@@ -138,12 +101,6 @@ resource adminDomain 'Microsoft.Cdn/profiles/customDomains@2026-08-01-preview' =
     tlsSettings: {
       certificateType: 'ManagedCertificate'
       minimumTlsVersion: 'TLS12'
-    }
-    mtlsSettings: {
-      scenario: 'ClientCertificateRequiredAndValidated'
-      allowedFqdns: adminMtls.allowedCertificateFqdns
-      certificateRevocationCheck: 'Enabled'
-      secrets: [for (trustedCa, index) in adminMtls.trustedClientCaSecrets: { id: adminMtlsCaSecrets[index].id }]
     }
   }
 }
@@ -282,7 +239,7 @@ resource adminWaf 'Microsoft.Network/frontDoorWebApplicationFirewallPolicies@202
   properties: {
     policySettings: {
       enabledState: 'Enabled'
-      mode: wafMode
+      mode: 'Prevention'
       requestBodyCheck: 'Enabled'
       logScrubbing: {
         state: 'Enabled'
@@ -301,6 +258,19 @@ resource adminWaf 'Microsoft.Network/frontDoorWebApplicationFirewallPolicies@202
     }
     customRules: {
       rules: [
+        {
+          name: 'BlockUnapprovedAdminSources'
+          priority: 5
+          enabledState: 'Enabled'
+          ruleType: 'MatchRule'
+          action: 'Block'
+          matchConditions: [{
+            matchVariable: 'SocketAddr'
+            operator: 'IPMatch'
+            negateCondition: true
+            matchValue: adminAllowedCidrs
+          }]
+        }
         {
           name: 'BlockUnsafeMethods'
           priority: 10
@@ -374,7 +344,7 @@ resource route 'Microsoft.Cdn/profiles/afdEndpoints/routes@2025-04-15' = if (dep
 
 resource adminRoute 'Microsoft.Cdn/profiles/afdEndpoints/routes@2025-04-15' = if (deployEdge) {
   parent: adminEndpoint
-  name: 'admin-mtls-only'
+  name: 'admin-ip-allowlist-only'
   properties: {
     enabledState: adminTrafficState
     customDomains: [{ id: adminDomain!.id }]
@@ -410,9 +380,11 @@ output edge object = {
   adminEndpointHost: deployEdge ? adminEndpoint!.properties.hostName : ''
   routeId: deployEdge ? route!.id : ''
   adminRouteId: deployEdge ? adminRoute!.id : ''
-  adminMtlsMode: 'ClientCertificateRequiredAndValidated'
+  adminWafId: deployEdge ? adminWaf!.id : ''
+  adminAccessMode: 'SourceIpAllowlistAndNativeLogin'
   privateOrigin: privateOrigin
   adminPrivateOrigin: adminPrivateOrigin
-  adminMtls: adminMtls
+  adminAllowedCidrs: adminAllowedCidrs
+  adminRateLimitPerMinute: adminRateLimitPerMinute
   profileId: deployEdge ? profile!.properties.frontDoorId : ''
 }

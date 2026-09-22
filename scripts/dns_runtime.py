@@ -85,7 +85,7 @@ def change_dns(config, action, operation, revision, directory, approved, *, clie
     endpoint_pattern = r"[a-z0-9-]+\.(?:[a-z0-9-]+\.)?azurefd\.net"
     require(edge.get("apiHost") == "llm-api." + config["baseDomain"] and edge.get("adminHost") == "llm-admin." + config["baseDomain"], "DNS hosts must match the deployed split-plane Front Door")
     require(re.fullmatch(endpoint_pattern, edge.get("endpointHost", "")) and re.fullmatch(endpoint_pattern, edge.get("adminEndpointHost", "")) and edge["endpointHost"].lower() != edge["adminEndpointHost"].lower(), "DNS targets must be distinct deployed Front Door endpoints")
-    require(edge.get("adminMtlsMode") == "ClientCertificateRequiredAndValidated", "Admin DNS requires strict Front Door mTLS")
+    require(edge.get("adminAccessMode") == "SourceIpAllowlistAndNativeLogin", "Admin DNS requires the reviewed source-IP and native-login access mode")
     record_ids = {plane: settings["zoneResourceId"] + "/CNAME/" + record for plane, record in settings["records"].items()}
     scope = {"configSha256": stage_fingerprint(config, 9), "records": record_ids}
     current = client.read()

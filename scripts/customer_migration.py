@@ -45,7 +45,7 @@ COMPONENTS = {
     "proxy-foundation": (7, "proxy-foundation", set()),
     "audit": (8, "audit-storage", {"storageAccountName", "virtualNetworkName", "privateEndpointSubnetName", "logAnalyticsWorkspaceName", "cmkVaultName", "cmkKeyName", "writerPrincipalId", "readerPrincipalId", "retentionPrincipalId", "recoveryPrincipalId"}),
     "origin": (9, "edge-origin", {"privateLinkServiceName", "adminPrivateLinkServiceName", "virtualNetworkName", "ingressSubnetName", "apiLoadBalancer", "adminLoadBalancer"}),
-    "edge": (9, "edge", {"privateOrigin", "adminPrivateOrigin", "adminMtls", "logAnalyticsWorkspaceName", "rateLimitPerMinute", "adminRateLimitPerMinute"}),
+    "edge": (9, "edge", {"privateOrigin", "adminPrivateOrigin", "adminAllowedCidrs", "logAnalyticsWorkspaceName", "rateLimitPerMinute", "adminRateLimitPerMinute"}),
 }
 REQUIRED = {
     "bootstrap": set(),
@@ -63,7 +63,7 @@ REQUIRED = {
     "proxy-foundation": set(),
     "audit": {"virtualNetworkName", "privateEndpointSubnetName", "logAnalyticsWorkspaceName", "cmkVaultName", "cmkKeyName", "writerPrincipalId", "readerPrincipalId", "retentionPrincipalId"},
     "origin": {"virtualNetworkName", "ingressSubnetName", "apiLoadBalancer", "adminLoadBalancer"},
-    "edge": {"privateOrigin", "adminPrivateOrigin", "adminMtls", "logAnalyticsWorkspaceName"},
+    "edge": {"privateOrigin", "adminPrivateOrigin", "adminAllowedCidrs", "logAnalyticsWorkspaceName"},
 }
 
 
@@ -191,19 +191,20 @@ def configured(value):
     return value is not None
 
 
-def admin_mtls_parameters(value):
-    require(isinstance(value, dict) and set(value) == {"keyVaultResourceGroupName", "keyVaultName", "allowedCertificateFqdns", "trustedClientCaSecrets"}, "adminMtls requires the CA Vault, accepted certificate FQDNs and version-pinned CA Secrets")
-    require(re.fullmatch(r"[a-zA-Z0-9_().-]{1,90}", value["keyVaultResourceGroupName"] or "") is not None and not value["keyVaultResourceGroupName"].endswith("."), "Invalid Admin mTLS Key Vault resource group")
-    require(re.fullmatch(r"[a-z][a-z0-9-]{1,22}[a-z0-9]", value["keyVaultName"] or "") is not None and "--" not in value["keyVaultName"], "Invalid Admin mTLS Key Vault name")
-    fqdns = value["allowedCertificateFqdns"]
-    fqdn_pattern = r"(?=.{1,253}\Z)(?:(?!xn--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,61}"
-    require(isinstance(fqdns, list) and bool(fqdns) and len({item.lower() for item in fqdns if isinstance(item, str)}) == len(fqdns) and all(re.fullmatch(fqdn_pattern, item) for item in fqdns), "Admin mTLS requires unique explicit client certificate FQDNs")
-    secrets = value["trustedClientCaSecrets"]
-    require(isinstance(secrets, list) and 1 <= len(secrets) <= 2, "Admin mTLS requires one or two trusted client CA Secrets")
-    for secret in secrets:
-        require(isinstance(secret, dict) and set(secret) == {"secretName", "secretVersion"}, "Each Admin mTLS CA reference requires secretName and secretVersion")
-        require(re.fullmatch(r"[A-Za-z0-9-]{1,127}", secret["secretName"] or "") is not None and re.fullmatch(r"[a-fA-F0-9]{32}", secret["secretVersion"] or "") is not None, "Admin mTLS CA Secrets must use valid names and fixed Key Vault versions")
-    return value
+def admin_source_cidrs(value):
+    require(isinstance(value, list) and 1 <= len(value) <= 32, "Admin access requires one to 32 explicit public source CIDRs")
+    networks = []
+    for item in value:
+        require(isinstance(item, str) and "/" in item, "Admin source entries must use explicit CIDR notation")
+        try:
+            network = ipaddress.ip_network(item, strict=True)
+        except ValueError:
+            raise MigrationError("Invalid Admin source CIDR") from None
+        minimum_prefix = 24 if network.version == 4 else 64
+        require(network.is_global and network.prefixlen >= minimum_prefix, "Admin source CIDRs must be public and no broader than /24 IPv4 or /64 IPv6")
+        networks.append(str(network))
+    require(len(set(networks)) == len(networks), "Admin source CIDRs must be unique")
+    return sorted(networks)
 
 
 def validate_config(config, environment):
@@ -278,15 +279,12 @@ def validate_config(config, environment):
         require(isinstance(parameters, dict) and not set(parameters) - COMPONENTS[component][2], "Unknown or reserved component parameter")
         require(mode != "greenfield" or component not in {"monitoring", "legacy-logging"}, "Legacy monitoring components do not apply to greenfield")
     edge = config["parameters"].get("edge")
-    if edge is not None and "adminMtls" in edge and configured(edge["adminMtls"]):
-        admin_mtls_parameters(edge["adminMtls"])
+    if edge is not None and "adminAllowedCidrs" in edge and configured(edge["adminAllowedCidrs"]):
+        admin_source_cidrs(edge["adminAllowedCidrs"])
     certificate_vault = config["parameters"].get("certificate-vault")
     if certificate_vault is not None and (configured(certificate_vault) or "privateIngress" in config):
         from scripts.certificate_vault import certificate_vault_parameters
         certificate_vault_parameters(config)
-    edge = config["parameters"].get("edge")
-    if certificate_vault is not None and edge is not None and "adminMtls" in edge and configured(edge["adminMtls"]):
-        require(certificate_vault.get("vaultName", "").lower() != edge["adminMtls"]["keyVaultName"].lower(), "Admin mTLS requires a dedicated trust Vault; do not grant Front Door access to the ingress private-key Vault")
     target_connectivity = config["parameters"].get("runner-target-connectivity")
     if target_connectivity is not None and configured(target_connectivity):
         from scripts.runner_target_connectivity import target_connectivity_settings
@@ -423,7 +421,7 @@ def parameters_for(config, stage, component):
     elif component == "origin":
         parameters["deployPrivateOrigin"] = True
     elif component == "edge":
-        admin_mtls_parameters(parameters["adminMtls"])
+        parameters["adminAllowedCidrs"] = admin_source_cidrs(parameters["adminAllowedCidrs"])
         parameters.update(deployEdge=True, enableApiTraffic=False, enableAdminTraffic=False, environmentName=config["environment"], baseDomain=config["baseDomain"], wafMode="Detection")
     if component not in {"edge", "aks-ingress-role"}:
         parameters["location"] = config["location"]

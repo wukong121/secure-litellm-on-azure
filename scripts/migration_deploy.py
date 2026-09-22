@@ -65,21 +65,7 @@ def assert_change_scope(config, component, changes, connectivity=None):
             resource.startswith(account + "/providers/microsoft.authorization/roleassignments/")
             for account in external_accounts
         )
-        external_edge = False
-        if component == "edge":
-            mtls = config["parameters"]["edge"]["adminMtls"]
-            vault_group = f"/subscriptions/{config['azure']['subscriptionId']}/resourcegroups/{mtls['keyVaultResourceGroupName']}".lower()
-            vault = vault_group + "/providers/microsoft.keyvault/vaults/" + mtls["keyVaultName"].lower()
-            assignment = vault + "/providers/microsoft.authorization/roleassignments/"
-            deployment = vault_group + "/providers/microsoft.resources/deployments/admin-mtls-vault-access-"
-            external_edge = (
-                resource.startswith(assignment)
-                and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", resource.removeprefix(assignment)) is not None
-            ) or (
-                resource.startswith(deployment)
-                and re.fullmatch(r"[a-z0-9]{13}", resource.removeprefix(deployment)) is not None
-            )
-        require(local or external_role or external_edge, "Plan attempts to modify a resource outside the approved component scope")
+        require(local or external_role, "Plan attempts to modify a resource outside the approved component scope")
         if component in {"monitoring", "legacy-logging"}:
             kinds = ("microsoft.operationalinsights/workspaces", "microsoft.resources/deployments") if component == "legacy-logging" else (
                 "microsoft.insights/actiongroups", "microsoft.insights/scheduledqueryrules",
@@ -161,15 +147,6 @@ def resolve_origin(config, component, azure):
         prefix = group_id(config).lower() + "/providers/microsoft.network/privatelinkservices/"
         require(all(origin["privateLinkServiceId"].lower().startswith(prefix) for origin in origins.values()), "PLS resources must belong to the approved target resource group")
         require(origins["api"]["privateLinkServiceId"].lower() != origins["admin"]["privateLinkServiceId"].lower(), "API and Admin must use separate Private Link Services")
-        mtls = resolved["parameters"]["edge"]["adminMtls"]
-        vault = azure.scoped(["keyvault", "show", "--resource-group", mtls["keyVaultResourceGroupName"], "--name", mtls["keyVaultName"], "--query", "{id:id,rbac:properties.enableRbacAuthorization,publicNetworkAccess:properties.publicNetworkAccess,bypass:properties.networkAcls.bypass}"])
-        expected_vault = f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{mtls['keyVaultResourceGroupName']}/providers/Microsoft.KeyVault/vaults/{mtls['keyVaultName']}"
-        require(vault.get("id", "").lower() == expected_vault.lower() and vault.get("rbac") is True, "Admin mTLS trust Vault must be the configured same-subscription RBAC Vault")
-        require(vault.get("bypass") == "AzureServices" and vault.get("publicNetworkAccess") in {"Enabled", "Disabled"}, "Admin mTLS trust Vault must allow the Front Door trusted-services path and must not rely on an unsupported perimeter mode")
-        provider = azure.scoped(["provider", "show", "--namespace", "Microsoft.Cdn", "--query", "{state:registrationState,resourceTypes:resourceTypes}"])
-        resource_types = {item.get("resourceType", "").lower(): set(item.get("apiVersions", [])) for item in provider.get("resourceTypes", [])}
-        preview = "2026-08-01-preview"
-        require(provider.get("state") == "Registered" and all(preview in resource_types.get(kind, set()) for kind in ("profiles/afdendpoints", "profiles/customdomains", "profiles/secrets")), "Customer subscription does not advertise the required Front Door Admin mTLS preview APIs")
     elif component == "origin":
         cluster_name = config["parameters"]["platform"]["stage4Aks"]["name"]
         node_group = azure.scoped(["aks", "show", "--resource-group", config["target"]["resourceGroup"], "--name", cluster_name, "--query", "nodeResourceGroup"])
@@ -292,7 +269,7 @@ def deploy_component(config, stage, component, revision, operation, previous, di
         require(release["environmentName"] == config["environment"] and release["baseDomain"] == config["baseDomain"], "Release environment/domain mismatch")
         require(release["privateOrigin"] == resolved["parameters"]["edge"]["privateOrigin"], "Release PLS differs from deployed origin")
         require(release["adminPrivateOrigin"] == resolved["parameters"]["edge"]["adminPrivateOrigin"], "Release Admin PLS differs from deployed origin")
-        require(release["adminMtls"] == resolved["parameters"]["edge"]["adminMtls"], "Release Admin mTLS configuration differs from the reviewed edge")
+        require(release["adminAllowedCidrs"] == resolved["parameters"]["edge"]["adminAllowedCidrs"], "Release Admin source-IP allowlist differs from the reviewed edge")
         require(release["logAnalyticsWorkspaceName"] == resolved["parameters"]["edge"]["logAnalyticsWorkspaceName"] and release["rateLimitPerMinute"] == resolved["parameters"]["edge"].get("rateLimitPerMinute", 600) and release["adminRateLimitPerMinute"] == resolved["parameters"]["edge"].get("adminRateLimitPerMinute", 120), "Release logging/rate configuration mismatch")
         previous_edge = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 9, "edge"), "--query", "{state:properties.provisioningState,edge:properties.outputs.edge.value}"])
         require(previous_edge.get("state") == "Succeeded", "Provision the disabled edge before releasing traffic")

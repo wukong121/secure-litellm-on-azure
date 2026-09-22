@@ -116,8 +116,12 @@ def replace_placeholders(value, values):
         return value
     for placeholder, replacement in values.items():
         require(isinstance(placeholder, str) and PLACEHOLDER.fullmatch(placeholder), "Values keys must be complete REPLACE_* placeholders")
-        require(isinstance(replacement, str), "Placeholder replacement values must be strings")
-        value = value.replace(placeholder, replacement)
+        if value == placeholder and isinstance(replacement, list):
+            require(bool(replacement) and all(isinstance(item, str) for item in replacement), "Array placeholder replacements must be nonempty string arrays")
+            return copy.deepcopy(replacement)
+        if placeholder in value:
+            require(isinstance(replacement, str), "Embedded placeholder replacement values must be strings")
+            value = value.replace(placeholder, replacement)
     return value
 
 
@@ -230,7 +234,10 @@ def main():
     source = read_json(args.config, "local customer configuration")
     catalog = read_json(args.catalog, "Stage fragment catalog")
     supplied_values = read_json(args.values, "placeholder values") if args.values else {}
-    require(all(isinstance(value, str) and value.strip() and not PLACEHOLDER.search(value) for value in supplied_values.values()), "Placeholder values must be nonempty strings without REPLACE_* tokens")
+    def valid_value(value):
+        values = value if isinstance(value, list) else [value]
+        return bool(values) and all(isinstance(item, str) and item.strip() and not PLACEHOLDER.search(item) for item in values)
+    require(all(valid_value(value) for value in supplied_values.values()), "Placeholder values must be nonempty strings or string arrays without REPLACE_* tokens")
     merged, missing = merge_stage(source, catalog, args.stage, args.option, supplied_values)
     directory = operation_directory(args.output_root, args.stage)
     preview = directory / "customer.merged.json"

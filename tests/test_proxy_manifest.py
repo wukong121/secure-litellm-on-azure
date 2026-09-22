@@ -15,7 +15,7 @@ from scripts.backend_manifest import render_backend_manifest
 from scripts.migration_runtime import check_application, publish
 from scripts.customer_migration import ROOT, stage_fingerprint
 from scripts.runtime_secrets import BACKEND_SECRETS
-from scripts.private_ingress import render_ingress
+from scripts.private_ingress import NATIVE_API_PATHS, render_ingress
 from tests.test_proxy_config import APPS, proxy_customer
 
 
@@ -27,7 +27,7 @@ def edge_deployment_output(config, identifier, profile):
         if origin["privateLinkServiceId"] == "auto":
             origin["privateLinkServiceId"] = group_id(config) + "/providers/Microsoft.Network/privateLinkServices/" + plane
         origins[parameter] = origin
-    return {"provisioned": True, "apiHost": "llm-api." + config["baseDomain"], "adminHost": "llm-admin." + config["baseDomain"], "endpointHost": "api.azurefd.net", "adminEndpointHost": "admin.azurefd.net", "routeId": profile + "/afdEndpoints/api/routes/api", "adminRouteId": profile + "/afdEndpoints/admin/routes/admin", "adminMtlsMode": "ClientCertificateRequiredAndValidated", "privateOrigin": origins["privateOrigin"], "adminPrivateOrigin": origins["adminPrivateOrigin"], "adminMtls": copy.deepcopy(configured["adminMtls"]), "profileId": identifier}
+    return {"provisioned": True, "apiTrafficEnabled": False, "adminTrafficEnabled": False, "apiHost": "llm-api." + config["baseDomain"], "adminHost": "llm-admin." + config["baseDomain"], "endpointHost": "api.azurefd.net", "adminEndpointHost": "admin.azurefd.net", "routeId": profile + "/afdEndpoints/api/routes/api", "adminRouteId": profile + "/afdEndpoints/admin/routes/admin", "adminWafId": group_id(config) + "/providers/Microsoft.Network/frontDoorWebApplicationFirewallPolicies/admin", "adminAccessMode": "SourceIpAllowlistAndNativeLogin", "privateOrigin": origins["privateOrigin"], "adminPrivateOrigin": origins["adminPrivateOrigin"], "adminAllowedCidrs": copy.deepcopy(configured["adminAllowedCidrs"]), "adminRateLimitPerMinute": configured.get("adminRateLimitPerMinute", 120), "profileId": identifier}
 
 
 def live_edge_resource(config, identifier, profile, arguments, connection_status="Approved", edge_output=None):
@@ -37,10 +37,14 @@ def live_edge_resource(config, identifier, profile, arguments, connection_status
     if resource_id == profile:
         return {"id": profile, "properties": {"frontDoorId": identifier}}
     edge = edge_output or edge_deployment_output(config, identifier, profile)
+    for plane, route_key, traffic_key in (("api", "routeId", "apiTrafficEnabled"), ("admin", "adminRouteId", "adminTrafficEnabled")):
+        if resource_id == edge[route_key]:
+            patterns = list(NATIVE_API_PATHS) if plane == "api" else ["/*"]
+            return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "deploymentStatus": "Succeeded", "enabledState": "Enabled" if edge[traffic_key] else "Disabled", "supportedProtocols": ["Https"], "forwardingProtocol": "HttpsOnly", "httpsRedirect": "Enabled", "linkToDefaultDomain": "Disabled", "patternsToMatch": patterns, "ruleSets": [], "customDomains": [{"id": profile + f"/customDomains/llm-{plane}"}], "originGroup": {"id": profile + f"/originGroups/private-{plane}"}}}
     if resource_id == edge["routeId"].rsplit("/routes/", 1)[0]:
         return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "enabledState": "Disabled"}}
     if resource_id == edge["adminRouteId"].rsplit("/routes/", 1)[0]:
-        return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "enabledState": "Disabled", "enforceMtls": "Enabled"}}
+        return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "enabledState": "Disabled"}}
     for plane, parameter in (("api", "privateOrigin"), ("admin", "adminPrivateOrigin")):
         origin_id = profile + f"/originGroups/private-{plane}/origins/private-{plane}"
         if resource_id == origin_id:
@@ -49,16 +53,15 @@ def live_edge_resource(config, identifier, profile, arguments, connection_status
             return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "enabledState": "Enabled", "hostName": host, "originHostHeader": host, "enforceCertificateNameCheck": True, "sharedPrivateLinkResource": {"privateLink": {"id": origin["privateLinkServiceId"]}, "privateLinkLocation": origin["privateLinkLocation"], "status": "Approved"}}}
         if resource_id == edge[parameter]["privateLinkServiceId"]:
             return {"id": resource_id, "properties": {"autoApproval": {"subscriptions": []}, "privateEndpointConnections": [{"properties": {"privateEndpoint": {"id": "/synthetic/front-door-private-endpoint/" + plane}, "privateLinkServiceConnectionState": {"status": connection_status}}}]}}
-    mtls = edge["adminMtls"]
-    vault = f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{mtls['keyVaultResourceGroupName']}/providers/Microsoft.KeyVault/vaults/{mtls['keyVaultName']}"
-    for index, trusted_ca in enumerate(mtls["trustedClientCaSecrets"], 1):
-        secret_id = profile + f"/secrets/admin-client-ca-{index}"
-        if resource_id == secret_id:
-            return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "deploymentStatus": "Succeeded", "parameters": {"type": "MtlsCertificateChain", "secretSource": {"id": vault + "/secrets/" + trusted_ca["secretName"]}, "secretVersion": trusted_ca["secretVersion"]}}}
-    if resource_id == profile + "/customDomains/llm-api":
-        return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "deploymentStatus": "Succeeded", "domainValidationState": "Approved", "hostName": "llm-api." + config["baseDomain"], "tlsSettings": {"certificateType": "ManagedCertificate", "minimumTlsVersion": "TLS12"}}}
-    if resource_id == profile + "/customDomains/llm-admin":
-        return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "deploymentStatus": "Succeeded", "domainValidationState": "Approved", "hostName": "llm-admin." + config["baseDomain"], "tlsSettings": {"certificateType": "ManagedCertificate", "minimumTlsVersion": "TLS12"}, "mtlsSettings": {"scenario": "ClientCertificateRequiredAndValidated", "certificateRevocationCheck": "Enabled", "allowedFqdns": mtls["allowedCertificateFqdns"], "secrets": [{"id": profile + f"/secrets/admin-client-ca-{index}"} for index in range(1, len(mtls["trustedClientCaSecrets"]) + 1)]}}}
+    for plane in ("api", "admin"):
+        if resource_id == profile + f"/customDomains/llm-{plane}":
+            return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "deploymentStatus": "Succeeded", "domainValidationState": "Approved", "hostName": f"llm-{plane}." + config["baseDomain"], "tlsSettings": {"certificateType": "ManagedCertificate", "minimumTlsVersion": "TLS12"}}}
+    if resource_id == edge["adminWafId"]:
+        return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "policySettings": {"enabledState": "Enabled", "mode": "Prevention", "requestBodyCheck": "Enabled", "logScrubbing": {"state": "Enabled"}}, "managedRules": {"managedRuleSets": [{"ruleSetType": "Microsoft_DefaultRuleSet", "ruleSetVersion": "2.1"}, {"ruleSetType": "Microsoft_BotManagerRuleSet", "ruleSetVersion": "1.1"}]}, "customRules": {"rules": [
+            {"name": "BlockUnapprovedAdminSources", "priority": 5, "enabledState": "Enabled", "ruleType": "MatchRule", "action": "Block", "matchConditions": [{"matchVariable": "SocketAddr", "operator": "IPMatch", "negateCondition": True, "matchValue": edge["adminAllowedCidrs"]}]},
+            {"name": "BlockUnsafeMethods", "priority": 10, "enabledState": "Enabled", "ruleType": "MatchRule", "action": "Block", "matchConditions": [{"matchVariable": "RequestMethod", "operator": "Equal", "negateCondition": False, "matchValue": ["TRACE", "TRACK"]}]},
+            {"name": "RateLimitAdmin", "priority": 20, "enabledState": "Enabled", "ruleType": "RateLimitRule", "rateLimitDurationInMinutes": 1, "rateLimitThreshold": edge["adminRateLimitPerMinute"], "action": "Block", "matchConditions": [{"matchVariable": "RequestUri", "operator": "BeginsWith", "negateCondition": False, "matchValue": ["/"]}]},
+        ]}}}
     raise AssertionError("Unexpected live edge resource: " + resource_id)
 
 
@@ -263,7 +266,7 @@ class ProxyManifestTests(unittest.TestCase):
         self.assertNotEqual(result["adminPrivateOrigin"]["privateLinkServiceId"], "auto")
         self.assertEqual(config["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"], "auto")
 
-    def test_deployed_edge_rejects_live_admin_mtls_drift(self):
+    def test_deployed_edge_rejects_live_admin_allowlist_drift(self):
         from scripts.edge_binding import deployed_edge
         config = proxy_customer()
         identifier = "11111111-1111-4111-8111-111111111111"
@@ -274,11 +277,11 @@ class ProxyManifestTests(unittest.TestCase):
             if arguments[:3] == ["deployment", "group", "show"]:
                 return {"state": "Succeeded", "edge": edge}
             resource = live_edge_resource(config, identifier, profile, arguments, edge_output=edge)
-            if resource["id"].endswith("/customDomains/llm-admin"):
-                resource["properties"]["mtlsSettings"]["certificateRevocationCheck"] = "Disabled"
+            if resource["id"] == edge["adminWafId"]:
+                resource["properties"]["customRules"]["rules"][0]["matchConditions"][0]["matchValue"] = ["21.31.41.51/32"]
             return resource
         azure.scoped.side_effect = cloud
-        with self.assertRaisesRegex(ValueError, "strict mTLS and revocation"):
+        with self.assertRaisesRegex(ValueError, "allowlist differs"):
             deployed_edge(config, azure)
 
     def test_preparation_requires_access_receipt_for_same_applications(self):

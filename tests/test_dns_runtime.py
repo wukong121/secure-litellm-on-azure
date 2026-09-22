@@ -40,7 +40,7 @@ class DnsTests(unittest.TestCase):
                 assert self.saved and self.records[plane] == previous
                 self.records[plane] = {"etag": "next-" + plane, "properties": copy.deepcopy(desired)} if desired else None
         client = Client()
-        edge = {"apiHost": "llm-api." + config["baseDomain"], "adminHost": "llm-admin." + config["baseDomain"], "apiTrafficEnabled": True, "adminTrafficEnabled": True, "endpointHost": "api.azurefd.net", "adminEndpointHost": "admin.azurefd.net", "adminMtlsMode": "ClientCertificateRequiredAndValidated"}
+        edge = {"apiHost": "llm-api." + config["baseDomain"], "adminHost": "llm-admin." + config["baseDomain"], "apiTrafficEnabled": True, "adminTrafficEnabled": True, "endpointHost": "api.azurefd.net", "adminEndpointHost": "admin.azurefd.net", "adminAccessMode": "SourceIpAllowlistAndNativeLogin"}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             plan = change_dns(config, "dns-publish", "plan", "a" * 40, path, "", client=client, edge=edge)
