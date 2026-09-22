@@ -771,6 +771,8 @@ class MigrationDeploymentTests(unittest.TestCase):
     def test_edge_resolves_both_successful_origin_outputs_only(self):
         self.config["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"] = "auto"
         self.config["parameters"]["edge"]["adminPrivateOrigin"]["privateLinkServiceId"] = "auto"
+        self.config["parameters"]["edge"]["privateOrigin"]["privateLinkLocation"] = "westus3"
+        self.config["parameters"]["edge"]["adminPrivateOrigin"]["privateLinkLocation"] = "westus3"
         from unittest.mock import Mock
         azure = Mock()
         expected_api = group_id(self.config) + "/providers/Microsoft.Network/privateLinkServices/api"
@@ -784,6 +786,8 @@ class MigrationDeploymentTests(unittest.TestCase):
         resolved = resolve_origin(self.config, "edge", azure)
         self.assertEqual(resolved["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"], expected_api)
         self.assertEqual(resolved["parameters"]["edge"]["adminPrivateOrigin"]["privateLinkServiceId"], expected_admin)
+        self.assertEqual(resolved["parameters"]["edge"]["privateOrigin"]["privateLinkLocation"], "westus3")
+        self.assertEqual(resolved["parameters"]["edge"]["adminPrivateOrigin"]["privateLinkLocation"], "westus3")
         self.assertEqual(self.config["parameters"]["edge"]["privateOrigin"]["privateLinkServiceId"], "auto")
         self.assertEqual(self.config["parameters"]["edge"]["adminPrivateOrigin"]["privateLinkServiceId"], "auto")
         azure.scoped.return_value = {**origin, "state": "Failed"}

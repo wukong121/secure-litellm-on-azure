@@ -16,6 +16,8 @@ def example_customer():
             return {key: replace(item) for key, item in value.items()}
         if isinstance(value, list):
             return [replace(item) for item in value]
+        if value == "REPLACE_FRONT_DOOR_PRIVATE_LINK_REGION":
+            return "westus3"
         if isinstance(value, str) and value.startswith("REPLACE_"):
             return "synthetic-value"
         return value

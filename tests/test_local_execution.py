@@ -620,6 +620,7 @@ class LocalExecutionTests(unittest.TestCase):
             "REPLACE_AUDIT_CMK_VAULT": "synthetic-audit-vault",
             "REPLACE_AUDIT_CMK_KEY": "audit-key",
             "REPLACE_ADMIN_ALLOWED_PUBLIC_CIDRS": ["20.30.40.50/32"],
+            "REPLACE_FRONT_DOOR_PRIVATE_LINK_REGION": "westus3",
             "REPLACE_AZURE_REGION": source["location"],
         }
 

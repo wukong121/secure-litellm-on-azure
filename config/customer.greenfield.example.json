@@ -73,8 +73,8 @@
       "adminLoadBalancer": {"resourceGroupName": "auto", "name": "auto", "frontendName": "auto"}
     },
     "edge": {
-      "privateOrigin": {"privateLinkServiceId": "auto", "privateLinkLocation": "REPLACE_AZURE_REGION"},
-      "adminPrivateOrigin": {"privateLinkServiceId": "auto", "privateLinkLocation": "REPLACE_AZURE_REGION"},
+      "privateOrigin": {"privateLinkServiceId": "auto", "privateLinkLocation": "REPLACE_FRONT_DOOR_PRIVATE_LINK_REGION"},
+      "adminPrivateOrigin": {"privateLinkServiceId": "auto", "privateLinkLocation": "REPLACE_FRONT_DOOR_PRIVATE_LINK_REGION"},
       "adminAllowedCidrs": ["REPLACE_ADMIN_ALLOWED_PUBLIC_CIDR"],
       "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
       "rateLimitPerMinute": 600,

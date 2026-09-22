@@ -13,10 +13,10 @@ import yaml
 
 try:
     from scripts.render_stage7_domain import ROOT, domain_hosts, render
-    from scripts.customer_migration import admin_source_cidrs
+    from scripts.customer_migration import admin_source_cidrs, front_door_private_link_location
 except ModuleNotFoundError:
     from render_stage7_domain import ROOT, domain_hosts, render
-    from customer_migration import admin_source_cidrs
+    from customer_migration import admin_source_cidrs, front_door_private_link_location
 
 PREPARE_CHECKS = {
     "private_origin_tls", "origin_bypass_denied", "admin_source_ip_allowlist",
@@ -73,8 +73,7 @@ def validate_release(config: dict, now: datetime | None = None, required_approve
     for plane, origin in origins.items():
         if not PLS_ID.fullmatch(origin.get("privateLinkServiceId", "")):
             raise ValueError(f"An explicit {plane} Private Link Service resource ID is required")
-        if not re.fullmatch(r"[a-z0-9]+", origin.get("privateLinkLocation", "")):
-            raise ValueError(f"An approved {plane} Private Link location is required")
+        front_door_private_link_location(origin.get("privateLinkLocation"))
     if origins["API"]["privateLinkServiceId"].lower() == origins["Admin"]["privateLinkServiceId"].lower():
         raise ValueError("API and Admin releases require separate Private Link Services")
     admin_source_cidrs(config.get("adminAllowedCidrs"))

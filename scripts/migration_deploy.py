@@ -143,7 +143,9 @@ def resolve_origin(config, component, azure):
             for plane, origin in origins.items():
                 if not configured(origin["privateLinkServiceId"]) or origin["privateLinkServiceId"] == "auto":
                     require(isinstance(output.get(plane), dict), f"Origin deployment lacks the {plane} Private Link Service output")
-                    origin.update(output[plane])
+                    deployed_origin = output[plane]
+                    require(deployed_origin.get("privateLinkLocation") == config["location"], f"Deployed {plane} Private Link Service location differs from the target region")
+                    origin["privateLinkServiceId"] = deployed_origin.get("privateLinkServiceId", "")
         prefix = group_id(config).lower() + "/providers/microsoft.network/privatelinkservices/"
         require(all(origin["privateLinkServiceId"].lower().startswith(prefix) for origin in origins.values()), "PLS resources must belong to the approved target resource group")
         require(origins["api"]["privateLinkServiceId"].lower() != origins["admin"]["privateLinkServiceId"].lower(), "API and Admin must use separate Private Link Services")
