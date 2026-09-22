@@ -52,7 +52,7 @@ def validate_component_sources() -> None:
     assert router["allowed_fails"] == 2
     assert router["cooldown_time"] == 30
     assert router["cache_kwargs"]["azure_redis_ad_token"] is True
-    assert router["cache_kwargs"]["ssl_cert_reqs"] == "CERT_REQUIRED"
+    assert router["cache_kwargs"]["ssl_cert_reqs"] == "required"
     assert router["cache_kwargs"]["ssl_check_hostname"] is True
 
     general = config["general_settings"]

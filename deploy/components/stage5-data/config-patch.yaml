@@ -14,7 +14,7 @@ data:
         username: os.environ/REDIS_USERNAME
         azure_redis_ad_token: true
         ssl: true
-        ssl_cert_reqs: CERT_REQUIRED
+        ssl_cert_reqs: required
         ssl_check_hostname: true
         max_connections: 100
     general_settings:
