@@ -69,12 +69,21 @@
     "origin": {
       "virtualNetworkName": "REPLACE_TARGET_VNET",
       "ingressSubnetName": "snet-private-ingress",
-      "apiLoadBalancer": {"resourceGroupName": "auto", "name": "auto", "frontendName": "auto"}
+      "apiLoadBalancer": {"resourceGroupName": "auto", "name": "auto", "frontendName": "auto"},
+      "adminLoadBalancer": {"resourceGroupName": "auto", "name": "auto", "frontendName": "auto"}
     },
     "edge": {
       "privateOrigin": {"privateLinkServiceId": "auto", "privateLinkLocation": "REPLACE_AZURE_REGION"},
+      "adminPrivateOrigin": {"privateLinkServiceId": "auto", "privateLinkLocation": "REPLACE_AZURE_REGION"},
+      "adminMtls": {
+        "keyVaultResourceGroupName": "REPLACE_EDGE_TRUST_VAULT_RESOURCE_GROUP",
+        "keyVaultName": "REPLACE_EDGE_TRUST_VAULT_NAME",
+        "allowedCertificateFqdns": ["REPLACE_CLIENT_CERTIFICATE_FQDN"],
+        "trustedClientCaSecrets": [{"secretName": "REPLACE_CLIENT_CA_CHAIN_SECRET_NAME", "secretVersion": "REPLACE_CLIENT_CA_CHAIN_SECRET_VERSION"}]
+      },
       "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",
-      "rateLimitPerMinute": 600
+      "rateLimitPerMinute": 600,
+      "adminRateLimitPerMinute": 120
     }
   }
 }

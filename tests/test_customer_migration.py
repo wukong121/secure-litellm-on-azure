@@ -13,13 +13,21 @@ from scripts.customer_migration import ROOT, STAGES, MigrationError, active_stag
 
 
 def customer_config():
+    subscription_id = "22222222-2222-4222-8222-222222222222"
+    target_group = "rg-secure"
+    target_id = f"/subscriptions/{subscription_id}/resourceGroups/{target_group}"
     return {
         "schemaVersion": 1, "environment": "test", "location": "westus",
-        "azure": {"tenantId": "11111111-1111-4111-8111-111111111111", "subscriptionId": "22222222-2222-4222-8222-222222222222"},
+        "azure": {"tenantId": "11111111-1111-4111-8111-111111111111", "subscriptionId": subscription_id},
         "baseDomain": "customer.invalid", "ownerEmail": "owner@customer.invalid",
         "legacy": {"resourceGroup": "rg-legacy", "aksClusterName": "old-aks", "namespace": "litellm", "postgresPvc": "pg-data"},
-        "target": {"resourceGroup": "rg-secure"},
-        "parameters": {"platform": {"containerRegistryName": "customerregistry", "logAnalyticsWorkspaceName": "customer-logs", "stage4Network": {"virtualNetworkName": "target-vnet"}, "stage4Aks": {"name": "new-aks"}}, "monitoring": {"logAnalyticsWorkspaceName": "legacy-logs"}, "edge": {"privateOrigin": {"privateLinkServiceId": "/synthetic/pls", "privateLinkLocation": "westus"}, "logAnalyticsWorkspaceName": "target-logs"}},
+        "target": {"resourceGroup": target_group},
+        "parameters": {"platform": {"containerRegistryName": "customerregistry", "logAnalyticsWorkspaceName": "customer-logs", "stage4Network": {"virtualNetworkName": "target-vnet"}, "stage4Aks": {"name": "new-aks"}}, "monitoring": {"logAnalyticsWorkspaceName": "legacy-logs"}, "edge": {
+            "privateOrigin": {"privateLinkServiceId": target_id + "/providers/Microsoft.Network/privateLinkServices/api", "privateLinkLocation": "westus"},
+            "adminPrivateOrigin": {"privateLinkServiceId": target_id + "/providers/Microsoft.Network/privateLinkServices/admin", "privateLinkLocation": "westus"},
+            "adminMtls": {"keyVaultResourceGroupName": "rg-edge-secrets", "keyVaultName": "kvedgesecrets", "allowedCertificateFqdns": ["admin-device.customer.invalid"], "trustedClientCaSecrets": [{"secretName": "admin-client-ca", "secretVersion": "a" * 32}]},
+            "logAnalyticsWorkspaceName": "target-logs",
+        }},
     }
 
 
@@ -170,6 +178,9 @@ class CustomerMigrationTests(unittest.TestCase):
         for stage in (0, 3, 5):
             with self.assertRaisesRegex(ValueError, "does not belong"):
                 parameters_for(self.config, stage, "certificate-vault")
+        self.config["parameters"]["edge"]["adminMtls"]["keyVaultName"] = self.config["parameters"]["certificate-vault"]["vaultName"]
+        with self.assertRaisesRegex(ValueError, "dedicated"):
+            validate_config(self.config, "test")
 
     def test_supply_chain_gates_separate_source_from_private_target(self):
         self.assertIn("source_image_sbom_scan", stage_checks(3, self.config))
@@ -208,9 +219,29 @@ class CustomerMigrationTests(unittest.TestCase):
     def test_edge_preview_never_enables_traffic(self):
         _template, document = parameters_for(self.config, 9, "edge")
         self.assertFalse(document["parameters"]["enableApiTraffic"]["value"])
+        self.assertFalse(document["parameters"]["enableAdminTraffic"]["value"])
         self.assertEqual(document["parameters"]["baseDomain"]["value"], self.config["baseDomain"])
         with self.assertRaises(ValueError):
             parameters_for(self.config, 8, "edge")
+
+    def test_edge_requires_version_pinned_admin_mtls_ca(self):
+        for mutate in (
+            lambda value: value.update(trustedClientCaSecrets=[]),
+            lambda value: value["trustedClientCaSecrets"][0].update(secretVersion="latest"),
+            lambda value: value.update(allowedCertificateFqdns=[]),
+        ):
+            invalid = copy.deepcopy(self.config)
+            mutate(invalid["parameters"]["edge"]["adminMtls"])
+            with self.subTest(config=invalid["parameters"]["edge"]["adminMtls"]), self.assertRaises(ValueError):
+                parameters_for(invalid, 9, "edge")
+
+    def test_future_admin_mtls_placeholders_do_not_block_earlier_stages(self):
+        mtls = self.config["parameters"]["edge"]["adminMtls"]
+        mtls.update(keyVaultResourceGroupName="REPLACE_EDGE_TRUST_VAULT_RESOURCE_GROUP", keyVaultName="REPLACE_EDGE_TRUST_VAULT_NAME", allowedCertificateFqdns=["REPLACE_CLIENT_CERTIFICATE_FQDN"], trustedClientCaSecrets=[{"secretName": "REPLACE_CA_SECRET", "secretVersion": "REPLACE_CA_VERSION"}])
+        validate_config(self.config, "test")
+        parameters_for(self.config, 4, "platform")
+        with self.assertRaises(ValueError):
+            parameters_for(self.config, 9, "edge")
 
     def test_evidence_cannot_skip_stages(self):
         validate_evidence([self.record], 1, self.config, self.revision, self.now)

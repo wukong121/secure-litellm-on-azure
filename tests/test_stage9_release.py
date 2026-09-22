@@ -17,8 +17,10 @@ def evidence_config(phase="canary"):
     return {
         "phase": phase, "baseDomain": "customer.test.invalid", "environmentName": "test",
         "privateOrigin": {"privateLinkServiceId": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/synthetic/providers/Microsoft.Network/privateLinkServices/api", "privateLinkLocation": "westus"},
+        "adminPrivateOrigin": {"privateLinkServiceId": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/synthetic/providers/Microsoft.Network/privateLinkServices/admin", "privateLinkLocation": "westus"},
+        "adminMtls": {"keyVaultResourceGroupName": "synthetic", "keyVaultName": "syntheticvault", "allowedCertificateFqdns": ["admin-device.customer.invalid"], "trustedClientCaSecrets": [{"secretName": "admin-client-ca", "secretVersion": "a" * 32}]},
         "logAnalyticsWorkspaceName": "synthetic-logs", "frontDoorId": "22222222-2222-4222-8222-222222222222",
-        "wafMode": "Prevention" if phase == "production" else "Detection", "rateLimitPerMinute": 600,
+        "wafMode": "Prevention" if phase == "production" else "Detection", "rateLimitPerMinute": 600, "adminRateLimitPerMinute": 120,
         "changeTicket": "SYNTHETIC-ONLY", "approvedBy": ["33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"],
         "checks": {name: {"passed": True, "observedAt": datetime.now(timezone.utc).isoformat(), "report": "synthetic://offline-test"} for name in PRODUCTION_CHECKS},
     }
@@ -105,6 +107,20 @@ class Stage9ReleaseTests(unittest.TestCase):
         load_balancer["properties"]["frontendIPConfigurations"][0]["properties"]["publicIPAddress"] = {"id": "/synthetic/public-ip"}
         with self.assertRaises(ValueError):
             validate_origin_snapshot(load_balancer, frontend_id, subnet)
+        with self.assertRaisesRegex(ValueError, "missing"):
+            validate_origin_snapshot({"sku": {"name": "Standard"}, "properties": {"frontendIPConfigurations": []}}, frontend_id, subnet)
+
+    def test_admin_release_requires_distinct_origin_and_version_pinned_ca(self):
+        config = evidence_config()
+        validate_release(config)
+        invalid = copy.deepcopy(config)
+        invalid["adminPrivateOrigin"] = invalid["privateOrigin"]
+        with self.assertRaisesRegex(ValueError, "separate"):
+            validate_release(invalid)
+        invalid = copy.deepcopy(config)
+        invalid["adminMtls"]["trustedClientCaSecrets"][0]["secretVersion"] = "latest"
+        with self.assertRaisesRegex(ValueError, "fixed Key Vault versions"):
+            validate_release(invalid)
 
     def test_render_has_no_dns_or_deployment_side_effect_and_prepare_disables_traffic(self):
         (ROOT / "temp").mkdir(exist_ok=True)
@@ -113,6 +129,7 @@ class Stage9ReleaseTests(unittest.TestCase):
                 generate(evidence_config(phase), Path(directory))
                 parameters = json.loads((Path(directory) / "edge.parameters.json").read_text())["parameters"]
                 self.assertEqual(parameters["enableApiTraffic"]["value"], phase != "prepare")
+                self.assertEqual(parameters["enableAdminTraffic"]["value"], phase != "prepare")
                 self.assertEqual(parameters["baseDomain"]["value"], "customer.test.invalid")
                 self.assertFalse(json.loads((Path(directory) / "release-summary.json").read_text())["deploymentPerformed"])
 
@@ -139,6 +156,6 @@ class Stage9ReleaseTests(unittest.TestCase):
             for plane in ("api", "admin"):
                 deployment = next(item for item in documents if item["kind"] == "Deployment" and item["metadata"]["name"] == f"llm-{plane}-proxy")
                 env = {item["name"]: item.get("value") for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
-                self.assertEqual(env.get("FRONT_DOOR_ID"), config["frontDoorId"] if plane == "api" else None)
+                self.assertEqual(env.get("FRONT_DOOR_ID"), config["frontDoorId"])
                 ingress = next(item for item in documents if item["kind"] == "Ingress" and item["metadata"]["name"] == f"llm-{plane}")
                 self.assertEqual(ingress["spec"]["rules"][0]["host"], f"llm-{plane}.{config['baseDomain']}")

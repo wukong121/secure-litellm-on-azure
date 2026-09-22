@@ -147,9 +147,10 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
         self.assertFalse((self.path / "ingress-receipt-template.json").exists())
         self.assertFalse(any("create" in call.args[0] for call in self.azure.scoped.call_args_list))
 
-    def test_stage9_resolves_only_the_verified_api_frontend(self):
-        self.config["parameters"]["origin"] = {"virtualNetworkName": "target-vnet", "ingressSubnetName": "snet-ingress", "apiLoadBalancer": {"resourceGroupName": "auto", "name": "auto", "frontendName": "auto"}}
-        ingress = {"configSha256": stage_fingerprint(self.config, 4), "api": {"resourceGroupName": "rg-nodes", "name": "kubernetes-internal", "frontendName": "api", "privateIpAddress": "10.30.4.10"}, "admin": {"privateIpAddress": "10.30.4.11"}}
+    def test_stage9_resolves_both_verified_private_frontends(self):
+        automatic = {"resourceGroupName": "auto", "name": "auto", "frontendName": "auto"}
+        self.config["parameters"]["origin"] = {"virtualNetworkName": "target-vnet", "ingressSubnetName": "snet-ingress", "apiLoadBalancer": automatic.copy(), "adminLoadBalancer": automatic.copy()}
+        ingress = {"configSha256": stage_fingerprint(self.config, 4), "api": {"resourceGroupName": "rg-nodes", "name": "kubernetes-internal", "frontendName": "api", "privateIpAddress": "10.30.4.10"}, "admin": {"resourceGroupName": "rg-nodes", "name": "kubernetes-internal", "frontendName": "admin", "privateIpAddress": "10.30.4.11"}}
 
         def resolve(arguments):
             if arguments[:2] == ["aks", "show"]:
@@ -161,6 +162,7 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
         self.azure.scoped.side_effect = resolve
         resolved = resolve_origin(self.config, "origin", self.azure)
         self.assertEqual(resolved["parameters"]["origin"]["apiLoadBalancer"]["frontendName"], "api")
+        self.assertEqual(resolved["parameters"]["origin"]["adminLoadBalancer"]["frontendName"], "admin")
         self.assertEqual(self.config["parameters"]["origin"]["apiLoadBalancer"]["name"], "auto")
         ingress["api"]["privateIpAddress"] = "10.30.4.12"
         with self.assertRaisesRegex(ValueError, "exactly one"):

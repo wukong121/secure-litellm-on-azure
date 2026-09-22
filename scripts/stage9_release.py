@@ -13,11 +13,14 @@ import yaml
 
 try:
     from scripts.render_stage7_domain import ROOT, domain_hosts, render
+    from scripts.customer_migration import admin_mtls_parameters
 except ModuleNotFoundError:
     from render_stage7_domain import ROOT, domain_hosts, render
+    from customer_migration import admin_mtls_parameters
 
 PREPARE_CHECKS = {
-    "private_origin_tls", "origin_bypass_denied", "admin_private_isolation",
+    "private_origin_tls", "origin_bypass_denied", "admin_mtls_enforcement",
+    "admin_private_origin_isolation", "admin_ca_revocation_rotation",
     "waf_diagnostics_privacy", "private_link_approval", "rollback_plan",
 }
 CANARY_CHECKS = PREPARE_CHECKS | {
@@ -66,14 +69,21 @@ def validate_release(config: dict, now: datetime | None = None, required_approve
         raise ValueError("Release authenticationMode must be entra or native")
     if config.get("environmentName") not in {"dev", "test", "prod"}:
         raise ValueError("Invalid environment")
-    if not PLS_ID.fullmatch(config.get("privateOrigin", {}).get("privateLinkServiceId", "")):
-        raise ValueError("An explicit API Private Link Service resource ID is required")
-    if not re.fullmatch(r"[a-z0-9]+", config["privateOrigin"].get("privateLinkLocation", "")):
-        raise ValueError("An approved Private Link location is required")
+    origins = {"API": config.get("privateOrigin", {}), "Admin": config.get("adminPrivateOrigin", {})}
+    for plane, origin in origins.items():
+        if not PLS_ID.fullmatch(origin.get("privateLinkServiceId", "")):
+            raise ValueError(f"An explicit {plane} Private Link Service resource ID is required")
+        if not re.fullmatch(r"[a-z0-9]+", origin.get("privateLinkLocation", "")):
+            raise ValueError(f"An approved {plane} Private Link location is required")
+    if origins["API"]["privateLinkServiceId"].lower() == origins["Admin"]["privateLinkServiceId"].lower():
+        raise ValueError("API and Admin releases require separate Private Link Services")
+    admin_mtls_parameters(config.get("adminMtls"))
     if not config.get("logAnalyticsWorkspaceName") or "REPLACE" in config["logAnalyticsWorkspaceName"]:
         raise ValueError("An explicit diagnostics workspace is required")
     if type(config.get("rateLimitPerMinute")) is not int or not 1 <= config["rateLimitPerMinute"] <= 100000:
         raise ValueError("Invalid rate limit")
+    if type(config.get("adminRateLimitPerMinute")) is not int or not 1 <= config["adminRateLimitPerMinute"] <= 10000:
+        raise ValueError("Invalid Admin rate limit")
     if config.get("wafMode") != ("Prevention" if phase == "production" else "Detection"):
         raise ValueError("Prepare/canary use Detection; production requires reviewed Prevention")
     if phase != "prepare" and not UUID.fullmatch(config.get("frontDoorId", "")):
@@ -100,10 +110,15 @@ def validate_origin_snapshot(load_balancer: dict, frontend_id: str, subnet: dict
         raise ValueError("Private Link requires a Standard load balancer")
     frontends = load_balancer.get("properties", {}).get("frontendIPConfigurations", [])
     selected = next((item for item in frontends if item.get("id", "").lower() == frontend_id.lower()), None)
-    properties = (selected or {}).get("properties", {})
-    address = ipaddress.ip_address(properties.get("privateIPAddress", ""))
+    if selected is None:
+        raise ValueError("Selected Private Link frontend is missing from the load balancer snapshot")
+    properties = selected.get("properties", {})
+    try:
+        address = ipaddress.ip_address(properties.get("privateIPAddress", ""))
+    except ValueError:
+        raise ValueError("Selected Private Link frontend must have a valid private IP address") from None
     if properties.get("publicIPAddress") or not address.is_private or address.is_loopback or address.is_link_local or not properties.get("subnet", {}).get("id"):
-        raise ValueError("API frontend must have a private address and subnet, with no public IP")
+        raise ValueError("Private Link frontend must have a private address and subnet, with no public IP")
     if subnet.get("properties", {}).get("privateLinkServiceNetworkPolicies") != "Disabled":
         raise ValueError("PLS NAT subnet requires privateLinkServiceNetworkPolicies=Disabled")
 
@@ -128,13 +143,14 @@ def generate(config: dict, output_dir: Path) -> None:
     overlay_path = output_dir / "kustomization.yaml"
     overlay = yaml.safe_load(overlay_path.read_text())
     if UUID.fullmatch(config.get("frontDoorId", "")):
-        overlay["patches"].append({"patch": yaml.safe_dump({
-            "apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "llm-api-proxy"},
-            "spec": {"template": {"spec": {"containers": [{"name": "auth-proxy", "env": [{"name": "FRONT_DOOR_ID", "value": config["frontDoorId"]}]}]}}},
-        })})
+        for plane in ("api", "admin"):
+            overlay["patches"].append({"patch": yaml.safe_dump({
+                "apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": f"llm-{plane}-proxy"},
+                "spec": {"template": {"spec": {"containers": [{"name": "auth-proxy", "env": [{"name": "FRONT_DOOR_ID", "value": config["frontDoorId"]}]}]}}},
+            })})
     overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False), encoding="utf-8")
-    parameters = {name: {"value": config[name]} for name in ("environmentName", "privateOrigin", "logAnalyticsWorkspaceName", "wafMode", "rateLimitPerMinute")}
-    parameters.update({"baseDomain": {"value": domain_hosts(config["baseDomain"])["api"].removeprefix("llm-api.")}, "deployEdge": {"value": True}, "enableApiTraffic": {"value": config["phase"] != "prepare"}})
+    parameters = {name: {"value": config[name]} for name in ("environmentName", "privateOrigin", "adminPrivateOrigin", "adminMtls", "logAnalyticsWorkspaceName", "wafMode", "rateLimitPerMinute", "adminRateLimitPerMinute")}
+    parameters.update({"baseDomain": {"value": domain_hosts(config["baseDomain"])["api"].removeprefix("llm-api.")}, "deployEdge": {"value": True}, "enableApiTraffic": {"value": config["phase"] != "prepare"}, "enableAdminTraffic": {"value": config["phase"] != "prepare"}})
     (output_dir / "edge.parameters.json").write_text(json.dumps({"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#", "contentVersion": "1.0.0.0", "parameters": parameters}, indent=2) + "\n", encoding="utf-8")
     fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
     (output_dir / "release-summary.json").write_text(json.dumps({"phase": config["phase"], "configurationSha256": fingerprint, "attestationsChecked": True, "deploymentPerformed": False}, indent=2) + "\n", encoding="utf-8")

@@ -181,7 +181,7 @@ az vm identity remove --ids "$RUNNER_VM_RESOURCE_ID" \
 
 1. `entraMode=enabled`：确认Free + Security Defaults满足本次范围，或先取得所需P1/P2能力，然后按Stage7执行。
 2. `entraMode=deferred`：先完成Stage2–6。执行器会阻止Stage7身份/代理、Stage8应用发布、Stage9 edge绑定、启流量和DNS变更；仍可创建Stage8观测基础设施，以及Stage9禁流量的origin/edge资源。
-3. Stage6选择`--option native-auth`：客户无法批准或验证Graph应用权限时，显式改用LiteLLM原生管理员登录和virtual key。该路径保留AKS、Workload Identity、Entra-only PG/Redis、Key Vault、私有API/admin LB、Front Door和原生Spend Logs，但删除用户侧Entra代理、MFA、Conditional Access、代理guardrail和增强L3。admin只允许从批准私网访问，API只允许固定推理路径；不能把它写成与Entra路径等价。原生管理员使用独立`litellm-ui-password`，不复用或分发Master Key。
+3. Stage6选择`--option native-auth`：客户无法批准或验证Graph应用权限时，显式改用LiteLLM原生管理员登录和virtual key。该路径保留AKS、Workload Identity、Entra-only PG/Redis、Key Vault、API/Admin双LB、Front Door和原生Spend Logs，但删除用户侧Entra代理、MFA、Conditional Access、代理guardrail和增强L3。Stage6先从批准私网验收Admin；Stage9后日常Admin入口改为独立Front Door严格mTLS，再输入原生用户名/密码。API只允许固定推理路径；不能把它写成与Entra路径等价。原生管理员使用独立`litellm-ui-password`，不复用或分发Master Key。
 
 配置示例默认使用保守值：
 
@@ -261,7 +261,7 @@ chmod 600 "local_execution/stage-REPLACE_STAGE-values.local.json"
 | 4 | `automatic-api-certificate` | 启用自动API证书；手工导入不选 |
 | 5 | `database-admin-identity` | 使用独立database UAMI作为PG管理员；无管理员组时选择 |
 | 5 | `legacy-master-key-salt` | 旧环境无显式Salt且已批准复用Master Key兼容路径时选择 |
-| 6 | `native-auth` | 不部署Stage7 Entra代理；使用私网原生admin登录和virtual key API |
+| 6 | `native-auth` | 不部署Stage7 Entra代理；Stage6私网验收原生Admin，Stage9切换到mTLS Admin边缘；API使用virtual key |
 | 8 | `observability` | 加入可选collector |
 | 8 | `enhanced-l3` | 删除原生`contentAudit`并切换增强L3；不能与observability在同一次合并 |
 | 9 | `azure-dns` | 使用仓库自动发布Azure DNS |
@@ -1428,9 +1428,9 @@ rm -f "$VERIFY_KUBECONFIG"
 
 ## 8. Stage9
 
-Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身份：deploy创建origin/edge，runtime核验API入口绑定和修改Azure DNS。** Entra路径的`stage9-edge-bind`绑定Stage7 API代理；native路径核验受管API Traefik的固定推理路由、健康改写、私有LB和后端目标。普通Entra延期且未选择native-auth时只能准备origin和禁流量edge。
+Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身份：deploy创建双PLS和双endpoint edge，runtime核验API/Admin绑定并修改Azure DNS。** Entra路径的`stage9-edge-bind`绑定Stage7两个代理；native路径核验受管API/Admin Traefik的业务路由、健康改写、私有LB和后端目标。普通Entra延期且未选择native-auth时只能准备origin和禁流量edge。
 
-禁流量准备只创建API入口的Private Link Service和默认Disabled的Front Door route，不会形成可访问的新网关。Front Door不承载admin域名；admin始终保留在私有入口。普通`entraMode=deferred`时API代理尚未部署，且Front Door endpoint/route保持Disabled，因此不能通过Front Door域名测试API；native路径可继续完成edge-bind，但在正式release前route同样不承载请求。
+禁流量准备创建API/Admin两条Private Link Service，以及默认Disabled的两个Front Door endpoint/route，不会形成可访问的新网关。Admin custom domain已配置严格mTLS，但正式release和两条DNS CNAME发布前不作为日常入口。普通`entraMode=deferred`时代理尚未部署；native路径可继续完成双平面edge-bind，但在正式release前route同样不承载请求。
 
 ### 8.1 禁流量准备
 
@@ -1445,8 +1445,8 @@ Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身
   --values local_execution/stage-9-values.local.json
 ```
 
-`privateLinkServiceId`和LB名称可保留模板中的`auto`。
-2. 创建Private Link Service源站：
+两个`privateLinkServiceId`和两组LB名称可保留模板中的`auto`。Stage9 values还必须填写`adminMtls`：边缘信任Vault RG/名称、客户端CA链Secret名称及固定版本、证书SAN中的允许FQDN，以及`adminRateLimitPerMinute`。客户端CA Secret只含公钥链，不含私钥；Admin Traefik源站证书必须已替换为Microsoft Trusted CA List信任的公有链。Front Door mTLS是Preview，客户不接受时停止本路径。
+2. 创建两条Private Link Service源站：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -1470,7 +1470,7 @@ Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身
   --approved-plan-sha256 "REPLACE_STAGE9_EDGE_PREPARE_PLAN_SHA256"
 ```
 
-4. Entra路径只有Stage7完成且`entraMode=enabled`时才把实际Front Door ID绑定到API代理。native路径必须执行同一步来核验并记录API Traefik合同；普通deferred路径跳过。本步仍不启流量：
+4. S9-04完成后，先由Owner分别审批API/Admin两条Front Door托管Private Endpoint请求，核对请求对应当前profile、正确origin、PLS和不同LB frontend；两条PLS均须恰有一个Approved连接且没有Pending连接。再执行edge-bind：Entra路径只有Stage7完成且`entraMode=enabled`时才绑定API/Admin代理；native路径核验并记录两个Traefik合同；普通deferred路径跳过。本步仍不启流量：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -1482,7 +1482,7 @@ Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身
   --approved-plan-sha256 "REPLACE_STAGE9_EDGE_BIND_PLAN_SHA256"
 ```
 
-5. 检查origin部署输出、Private Link请求/审批、禁用的route、WAF Detection、源站TLS、错误Host拒绝以及admin不进入Front Door。正式release前不运行Front Door实际客户端回归；Entra路径等待代理。native路径的业务router已经绑定实际Front Door ID，必须从批准私网同时执行带实际`X-Azure-FDID`的正例和无header的负例：
+5. 检查双PLS实时连接、两个禁用route、两个WAF Detection、Admin严格mTLS配置、CA固定版本、两份公有CA源站TLS及错误Host拒绝。正式release前不运行公网业务回归；Entra路径等待代理。native路径的两个业务router已经绑定实际Front Door ID，必须从批准私网分别执行带实际`X-Azure-FDID`的正例和无header的负例；下面保留API示例，Admin用同一方法解析Admin私网IP并请求`/ui/`：
 
 ```bash
 BASE_DOMAIN="$(jq -er '.baseDomain' local_execution/customer.json)"
@@ -1540,7 +1540,7 @@ native路径：
 "releaseReportPath": "temp/customer-private/stage9-release.json"
 ```
 
-报告必须符合当前Stage9 release校验器，绑定当前revision、Stage9配置哈希、Front Door ID、私有源站、phase、实际检查和批准人。native路径填写`"authenticationMode":"native"`，并提供`native_virtual_key_acl`、`native_admin_password_login`和原生Spend Logs证据；不得沿用`entra_backend_acl`。文件只放受控且Git忽略的位置。
+报告必须符合当前Stage9 release校验器，绑定当前revision、Stage9配置哈希、Front Door ID、两条PLS、`adminMtls`固定CA版本、两组限流、phase、实际检查和批准人。prepare证据必须包含`admin_mtls_enforcement`、`admin_private_origin_isolation`和`admin_ca_revocation_rotation`。native路径填写`"authenticationMode":"native"`，并提供`native_virtual_key_acl`、`native_admin_password_login`和原生Spend Logs证据；不得沿用`entra_backend_acl`。文件只放受控且Git忽略的位置。
 
 推荐使用合并器打开最终发布开关；若前面使用Azure DNS，此处同时保留`--option azure-dns`：
 
@@ -1577,7 +1577,7 @@ deploy身份正式启用获批phase：
   --approved-plan-sha256 "REPLACE_STAGE9_DNS_PUBLISH_PLAN_SHA256"
 ```
 
-其他DNS提供商由客户DNS管理员执行等效变更，不修改脚本猜测API。切流后立即验证错误率/延迟、PG连接、Redis、预算和Spend Logs。Entra路径使用企业Token+vkey；native路径只使用virtual key，并确认Front Door拒绝缺Key、管理路径和非批准推理路径。admin继续通过私网LB访问，不创建Front Door admin route或公网DNS。
+Azure DNS动作在同一检查点中发布`llm-api`和`llm-admin`两条CNAME，分别指向独立endpoint；中途失败可从已知状态继续，第三方漂移会阻止操作。其他DNS提供商由客户DNS管理员执行等效双记录变更。切流后立即验证错误率/延迟、PG连接、Redis、预算和Spend Logs。API需确认缺Key、管理路径和非批准推理路径均拒绝；Admin需验证无证书、错误FQDN、过期、吊销证书拒绝，持有效证书后仍需通过Entra或原生密码。私有Admin LB仅作Front Door回源，不再作为日常客户入口。
 
 ### 8.3 回退和旧环境逐步下线
 

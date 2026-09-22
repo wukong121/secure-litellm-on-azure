@@ -23,19 +23,28 @@ def private_address(address):
     return any(selected.version == network.version and selected in network for network in ranges)
 
 
+def client_certificate_required(error):
+    return str(getattr(error, "reason", "")).upper() == "TLSV13_ALERT_CERTIFICATE_REQUIRED"
+
+
 def probe(host, address, path, host_header, method="POST"):
     context = ssl.create_default_context()
-    with socket.create_connection((address, 443), timeout=10) as connection:
-        with context.wrap_socket(connection, server_hostname=host) as secured:
-            certificate = hashlib.sha256(secured.getpeercert(binary_form=True)).hexdigest()
-            body = b'{}' if method == "POST" else b''
-            request = f"{method} {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode("ascii") + body
-            secured.sendall(request)
-            response = http.client.HTTPResponse(secured)
-            response.begin()
-            headers = {key.lower(): value for key, value in response.getheaders()}
-            require("set-cookie" not in headers, "Unauthenticated probe unexpectedly received a cookie")
-            return {"status": response.status, "certificateSha256": certificate}
+    try:
+        with socket.create_connection((address, 443), timeout=10) as connection:
+            with context.wrap_socket(connection, server_hostname=host) as secured:
+                certificate = hashlib.sha256(secured.getpeercert(binary_form=True)).hexdigest()
+                body = b'{}' if method == "POST" else b''
+                request = f"{method} {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+                secured.sendall(request)
+                response = http.client.HTTPResponse(secured)
+                response.begin()
+                headers = {key.lower(): value for key, value in response.getheaders()}
+                require("set-cookie" not in headers, "Unauthenticated probe unexpectedly received a cookie")
+                return {"status": response.status, "certificateSha256": certificate}
+    except ssl.SSLError as error:
+        reason = str(getattr(error, "reason", "")).upper()
+        require(client_certificate_required(error), "TLS failed without an explicit client-certificate-required alert")
+        return {"status": "tls_client_certificate_required", "tlsReason": reason}
 
 
 def gateway_checks(config, revision, resolve=resolve_addresses, request=probe):
@@ -44,21 +53,21 @@ def gateway_checks(config, revision, resolve=resolve_addresses, request=probe):
     api = "llm-api." + config["baseDomain"]
     admin = "llm-admin." + config["baseDomain"]
     for name, check in (
-        ("api_unauthenticated_denied", (api, "/v1/responses", api, {401, 403}, False)),
-        ("api_wrong_host_denied", (api, "/v1/responses", "untrusted.synthetic.invalid", {400, 403, 404, 421}, False)),
-        ("admin_private_and_unauthenticated_denied", (admin, "/model/info", admin, {401, 403}, True)),
+        ("api_unauthenticated_denied", (api, "/v1/responses", api, {401, 403}, None)),
+        ("api_wrong_host_denied", (api, "/v1/responses", "untrusted.synthetic.invalid", {400, 403, 404, 421}, None)),
+        ("admin_mtls_without_client_certificate_denied", (admin, "/ui/", admin, {400, 403, "tls_client_certificate_required"}, "public")),
     ):
-        host, path, host_header, statuses, private = check
+        host, path, host_header, statuses, address_policy = check
         try:
             addresses = resolve(host)
             require(addresses and len(addresses) <= 16, "Missing or unbounded DNS address set")
-            require(not private or all(private_address(address) for address in addresses), "Admin DNS includes a non-private address")
-            observed = [request(host, address, path, host_header, "GET" if private else "POST") for address in addresses]
+            require(address_policy != "public" or all(not private_address(address) for address in addresses), "Admin DNS must resolve to the public mTLS edge, not a private origin")
+            observed = [request(host, address, path, host_header, "GET" if address_policy == "public" else "POST") for address in addresses]
             require(all(item["status"] in statuses for item in observed), "Request was not denied as expected")
             results[name] = {"status": "passed", "observations": observed, "addressCount": len(addresses)}
         except Exception as error:
             results[name] = {"status": "failed", "reason": "DNS, TLS or expected denial check failed; no response body retained", "diagnostic": exception_diagnostic(error, "gateway-checks")}
-    return {"revision": revision, "environment": config["environment"], "configSha256": stage_fingerprint(config, 7), "observedAt": datetime.now(timezone.utc).isoformat(), "checkGroup": "gateway-isolation", "checks": results, "stageAccepted": False,
+    return {"revision": revision, "environment": config["environment"], "configSha256": stage_fingerprint(config, 9), "observedAt": datetime.now(timezone.utc).isoformat(), "checkGroup": "gateway-isolation", "checks": results, "stageAccepted": False,
             "notCovered": ["authenticated_client_compatibility", "object_ownership", "database_and_redis", "audit_delivery", "load_and_recovery", "conditional_access"]}
 
 

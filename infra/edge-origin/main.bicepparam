@@ -6,3 +6,8 @@ param apiLoadBalancer = {
   name: 'REPLACE_STANDARD_INTERNAL_API_LOAD_BALANCER'
   frontendName: 'REPLACE_PRIVATE_API_FRONTEND'
 }
+param adminLoadBalancer = {
+  resourceGroupName: 'REPLACE_NEW_AKS_NODE_RESOURCE_GROUP'
+  name: 'REPLACE_STANDARD_INTERNAL_ADMIN_LOAD_BALANCER'
+  frontendName: 'REPLACE_PRIVATE_ADMIN_FRONTEND'
+}

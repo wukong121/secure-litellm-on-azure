@@ -273,8 +273,8 @@ def deploy_private_ingress(config, operation, revision, directory, approved):
         run_command(["openssl", "verify", "-purpose", "sslserver", "-verify_hostname", hosts[plane], "-untrusted", str(certificate_path), str(certificate_path)], directory, "certificate-trust-" + plane)
         documents = [document for document in render_ingress(config, plane, image, settings[plane]["allowedCidrs"]) if document["kind"] != "Namespace"]
         preserved_config_map = None
-        if authentication_mode == "native" and plane == "api":
-            preserved_config_map = json.loads(run_command([*scoped, "get", "ConfigMap", namespace, "--ignore-not-found", "-o", "json"], directory, "before-binding-api-configmap") or "null")
+        if authentication_mode == "native":
+            preserved_config_map = json.loads(run_command([*scoped, "get", "ConfigMap", namespace, "--ignore-not-found", "-o", "json"], directory, f"before-binding-{plane}-configmap") or "null")
             documents = preserve_native_front_door_binding(config, documents, preserved_config_map)
         current_service = None
         for document in documents:

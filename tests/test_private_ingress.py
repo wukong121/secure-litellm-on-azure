@@ -60,15 +60,16 @@ class PrivateIngressTests(unittest.TestCase):
                 self.assertEqual(dynamic["http"]["middlewares"]["api-health-path"]["replacePath"]["path"], "/health/readiness")
                 self.assertIn("Path(`/readyz`)", dynamic["http"]["routers"]["api-health"]["rule"])
             else:
-                self.assertEqual(set(dynamic["http"]["routers"]), {"admin"})
+                self.assertEqual(set(dynamic["http"]["routers"]), {"admin", "admin-health"})
+                self.assertEqual(dynamic["http"]["middlewares"]["admin-health-path"]["replacePath"]["path"], "/health/readiness")
 
-    def test_api_allows_private_link_nat_subnet_without_broadening_admin(self):
+    def test_each_plane_allows_only_configured_sources_and_private_link_nat_subnet(self):
         configured = ["10.60.0.0/16"]
         ingress_subnet = self.config["parameters"]["platform"]["stage4Network"]["ingressSubnetPrefix"]
         for plane in ("api", "admin"):
             documents = render_ingress(self.config, plane, self.image, configured)
             objects = {document["kind"]: document for document in documents}
-            expected = sorted([*configured, ingress_subnet]) if plane == "api" else configured
+            expected = sorted([*configured, ingress_subnet])
             self.assertEqual(objects["Service"]["spec"]["loadBalancerSourceRanges"], expected)
             policy_sources = [item["ipBlock"]["cidr"] for item in objects["NetworkPolicy"]["spec"]["ingress"][0]["from"]]
             self.assertEqual(policy_sources, expected)

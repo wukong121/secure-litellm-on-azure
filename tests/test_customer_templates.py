@@ -30,6 +30,8 @@ def example_customer():
     config["parameters"]["certificate-vault"] = certificate_config()["parameters"]["certificate-vault"]
     config["parameters"]["runner-connectivity"]["runnerVirtualNetworkId"] = config["parameters"]["certificate-vault"]["runnerVirtualNetworkId"]
     config["parameters"]["runner-target-connectivity"]["runnerVirtualNetworkId"] = config["parameters"]["certificate-vault"]["runnerVirtualNetworkId"]
+    config["parameters"]["edge"]["adminMtls"]["allowedCertificateFqdns"] = ["admin-device.customer.invalid"]
+    config["parameters"]["edge"]["adminMtls"]["trustedClientCaSecrets"][0]["secretVersion"] = "a" * 32
     return validate_config(config, "test")
 
 

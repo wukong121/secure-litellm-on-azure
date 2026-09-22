@@ -106,7 +106,7 @@
 
 配置中的`ownerEmail`用于资源标签、告警邮箱以及备份Owner描述，不用于推断RBAC。`backupOwnerPrincipalId`是客户明确批准的Entra用户Object ID；`backupAutomationPrincipalId`是`AZURE_RUNTIME_CLIENT_ID`对应服务主体的Object ID，两者不能替换。当前备份Owner模板的principalType为User，不能填workflow应用ID或用`az ad signed-in-user`推断。需组/服务主体作为人工保管人时先修改并测试该角色边界。两类ID的Portal/CLI获取、核验及回填步骤见[0-A1](#0-a1-备份身份的获取与核验)。
 
-`baseDomain`自动生成`llm-api.<客户域名>`和`llm-admin.<客户域名>`；只有API可进入Front Door，admin保持私网。`legacy`记录实际旧RG、AKS、namespace和PG PVC；`parameters`按组件填写客户资源值。可留待后续阶段填写其他组件，但使用当前组件前必须清除其占位符。Stage3/4不校验尚未启用的`stage5Data`，Stage3不校验尚未使用的模型连接。
+`baseDomain`自动生成`llm-api.<客户域名>`和`llm-admin.<客户域名>`；Stage9为两者创建不同Front Door endpoint、WAF、PLS和私有LB回源，Admin额外强制客户端证书。`legacy`记录实际旧RG、AKS、namespace和PG PVC；`parameters`按组件填写客户资源值。可留待后续阶段填写其他组件，但使用当前组件前必须清除其占位符。Stage3/4不校验尚未启用的`stage5Data`，Stage3不校验尚未使用的模型连接。
 
 原环境Bicep参数中的`OWNER_EMAIL`、`LOG_ANALYTICS_WORKSPACE_NAME`、`AZURE_LOCATION`只用于独立编译/直接参数文件使用；其示例回退是离线检查用途。客户迁移workflow使用`CUSTOMER_CONFIG_JSON`生成显式ARM参数，不使用这些回退，也不默默读取个人域名配置。
 
@@ -664,7 +664,7 @@ S1-04之后先验证真实Container Insights日志已到达，再预览依赖这
 
 **本阶段配置：** 先按4-A填写`parameters.certificate-vault`，由S4-03/04创建两套证书共用的**独立证书Vault**；不是合并Stage5/7业务Vault。此时可不启用顶层privateIngress，不要求Vault内已有证书。S4-04之后按4-C手动导入，入口发布前再补privateIngress的API/admin `tlsSecretId`和`allowedCidrs`，结构见[私有入口参考](customer-deployment-workflows-zh.md#stage4自动私有入口)。
 
-自动API签发可选：另配`AZURE_CERTIFICATE_CLIENT_ID`、已委派Azure DNS Zone以及顶层`certificates={zoneResourceId,termsAccepted:true,publicApiHostnameAccepted:true}`。API tlsSecretId必须无版本；admin证书由企业PKI准备。未选择自动签发则跳过S4-09/10，按4-C手动导入两套证书；本组件不为自动签发身份授予整库权限。来源CIDR覆盖实际Runner私网路径和未来PLS NAT地址，admin只覆盖批准管理网段。
+自动API签发可选：另配`AZURE_CERTIFICATE_CLIENT_ID`、已委派Azure DNS Zone以及顶层`certificates={zoneResourceId,termsAccepted:true,publicApiHostnameAccepted:true}`。API tlsSecretId必须无版本；当前自动流程不签Admin源站证书。选择Stage9 Admin Front Door后，Admin源站证书也必须由根在Microsoft Trusted CA List中的公有CA签发，并由客户在4-C手工导入；企业内部CA或自签名证书只能用于Stage9前的隔离演练，不能作为Front Door回源。未选择自动签发则跳过S4-09/10，按4-C手工导入两套证书。本组件不为自动签发身份授予整库权限。来源CIDR覆盖实际Runner私网路径；PLS NAT子网由workflow自动加入两个平面。
 
 #### 4-0. 模型账号的一次性授权
 
@@ -1061,9 +1061,9 @@ DNS连接完成后，新运行Customer private runner checks：main、test、che
 | 已有文件的用途 | 如何使用 | Vault中的目标 |
 | --- | --- | --- |
 | API域名的`.pem`和对应`.key` | 确认证书文件为叶证书在前、随后中间链，与叶私钥合并；只有叶证书时先向签发方取得中间链/fullchain | `api-tls` |
-| admin叶证书，例如`admin.crt`，及对应`admin.key` | 合并为admin材料包；根CA直接签发的叶证书没有中间链，不需为了凑链再加一个文件 | `admin-tls` |
-| admin根CA公钥证书，例如`admin-ca.crt` | 在实际Runner和管理浏览器中建立对admin证书的信任；与入口材料分开处理 | 不作为这两个Secret之一 |
-| CA私钥，例如`admin-ca.key`，或签发申请`admin.csr` | CA私钥独立保管；CSR仅是申请材料，不是已签发证书 | 均不上传 |
+| Admin域名的公有CA叶证书及对应私钥 | 叶证书在前并附完整中间链；根须位于Microsoft Trusted CA List，供Front Door验证私有origin | `admin-tls` |
+| Admin客户端CA公钥链 | Stage9上传到独立边缘信任Vault，供Front Door验证管理员客户端证书；不与源站材料混合 | 不是`api-tls`或`admin-tls` |
+| 任意CA私钥或签发申请CSR | CA私钥独立保管；CSR仅是申请材料，不是已签发证书 | 均不上传 |
 
 **简化操作路径：客户本机准备并验证 → 管理员临时开启Vault受限公网 → 客户本机上传 → 立即关闭公网 → Runner私网验证。** 上传不需要登录Runner，也不需要Bastion/SCP传输私钥。以下命令在客户持有证书的受控机器、仓库根目录的Bash终端执行，需OpenSSL 3、Azure CLI及仓库Python依赖；Windows可使用获批的WSL环境，Portal操作使用客户本机浏览器，不把私钥传给Cloud Shell或GitHub。
 
@@ -1085,7 +1085,7 @@ az deployment group show --subscription "$SUBSCRIPTION_ID" --resource-group "$TA
 **2. 没有证书时怎样创建。** 两个域名均由客户JSON的`baseDomain`派生，不使用Vault域名签发入口证书。
 
 - **API：公有CA签发。** 向客户批准且被Front Door信任的公有CA申请`llm-api.<baseDomain>`，获取PEM叶证书及中间链/fullchain，并保留匹配的叶私钥。下面仅在本机生成私钥和CSR，不是已签发证书；将CSR提交给CA，按签发方指引完成DNS TXT域名验证、下载fullchain。只提交CSR，不提交私钥。DNS验证不要求提前开放源站80/443、切换业务A/CNAME或打开Vault；公共证书透明度会披露域名。不能用自签名或仅CDN厂商信任的Origin证书替代公有CA证书。
-- **admin正式环境：企业PKI签发。** 向PKI管理员申请`llm-admin.<baseDomain>`的服务器证书，要求SAN包含该域名、用途为serverAuth，同时领取中间链及根CA公钥证书。需要CSR时可按下面命令改为admin域名及独立的admin文件名；CA私钥不由客户导入人取得。
+- **Admin：公有CA签发。** 向客户批准且根位于Microsoft Trusted CA List的公有CA申请`llm-admin.<baseDomain>`服务器证书，要求SAN包含该域名、用途为serverAuth，并取得完整中间链。需要CSR时可按下面命令改为Admin域名及独立文件名；只提交CSR，不提交叶私钥。客户内部CA用于签发Stage9客户端证书，不用于Front Door到Admin origin的服务器证书。
 
 ```bash
 set -euo pipefail
@@ -1101,39 +1101,11 @@ openssl req -in "$API_DIR/api.csr" -noout -verify
 printf 'API CSR directory: %s\n' "$API_DIR"
 ```
 
-**admin获批演练可选：** 没有企业PKI时，可在本机生成独立测试根CA并签发90天的admin叶证书。已有admin证书时不要再运行。CA私钥口令只在OpenSSL终端提示中输入并独立保管，不写到命令或聊天；叶私钥因入口加载需要不加密，依靠受控目录和文件权限保护。根CA直接签发时没有中间链，上传材料只需admin.crt加admin.key。
+自签名或企业内部CA的Admin服务器证书可用于Stage9前的私网功能演练，但必须在创建Admin Front Door origin前替换为上述公有链。不得通过`enforceCertificateNameCheck=false`规避：该开关只放宽名称检查，Front Door仍拒绝不受信任的证书链。
 
-```bash
-set -euo pipefail
-umask 077
-BASE_DOMAIN="REPLACE_BASE_DOMAIN_FROM_CUSTOMER_JSON"
-mkdir -p temp
-PKI_DIR=$(mktemp -d temp/admin-pki.XXXXXXXX)
-openssl req -x509 -newkey rsa:3072 -sha256 -days 365 \
-  -keyout "$PKI_DIR/admin-ca.key" -out "$PKI_DIR/admin-ca.crt" \
-  -subj "/CN=LLMGW Test Admin CA" \
-  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign"
-openssl req -new -newkey rsa:2048 -noenc -sha256 \
-  -keyout "$PKI_DIR/admin.key" -out "$PKI_DIR/admin.csr" \
-  -subj "/CN=llm-admin.${BASE_DOMAIN}"
-openssl x509 -req -in "$PKI_DIR/admin.csr" -CA "$PKI_DIR/admin-ca.crt" \
-  -CAkey "$PKI_DIR/admin-ca.key" -set_serial "0x$(openssl rand -hex 16)" \
-  -days 90 -sha256 -out "$PKI_DIR/admin.crt" \
-  -extfile <(printf '%s\n' 'basicConstraints=critical,CA:FALSE' \
-    'keyUsage=critical,digitalSignature,keyEncipherment' 'extendedKeyUsage=serverAuth' \
-    "subjectAltName=DNS:llm-admin.${BASE_DOMAIN}")
-openssl verify -CAfile "$PKI_DIR/admin-ca.crt" -purpose sslserver \
-  -verify_hostname "llm-admin.${BASE_DOMAIN}" "$PKI_DIR/admin.crt"
-openssl x509 -in "$PKI_DIR/admin-ca.crt" -noout -fingerprint -sha256
-printf 'Admin PKI directory: %s\n' "$PKI_DIR"
-```
+**3. 整理并验证文件。** 每个Secret都包含**该域名的叶证书在前、其后中间链、最后对应未加密叶私钥**，不是一个Secret只放证书、另一个只放私钥。API和Admin源站均须由未来Front Door信任的公有CA签发。签发CA私钥独立保管，绝不合入这两个文件。以下在仓库根目录的受控终端执行，只填写文件路径；已合并的合格PEM可直接使用，不必再次拼接：
 
-示例使用新的受限临时目录，不覆盖已有材料。记录输出目录，将其中admin.crt/admin.key填入第3步；admin-ca.crt仅供安装信任，admin-ca.key和admin.csr均不上传。证书至少还需有效7天，并在到期前按批准流程续期；新建测试CA不等于客户生产PKI。
-
-**3. 整理并验证文件。** 每个Secret都包含**该域名的叶证书在前、其后中间链、最后对应未加密叶私钥**，不是一个Secret只放证书、另一个只放私钥。API须由未来Front Door信任的公有CA签发；admin可以使用企业私有CA。签发CA的私钥独立保管，绝不合入这两个文件。以下在仓库根目录的受控终端执行，只填写文件路径；已合并的合格PEM可直接使用，不必再次拼接：
-
-四个输入路径就是上表的现有材料：`API_CHAIN_FILE`填API证书/fullchain的`.pem`，`API_LEAF_KEY_FILE`填其`.key`，`ADMIN_CHAIN_FILE`填admin叶证书及可选中间链，`ADMIN_LEAF_KEY_FILE`填admin叶私钥。不要把admin根CA证书或CA私钥填成后两项。所有路径均属于**运行该命令的机器**；另一台电脑上的文件先安全传来。输出目录已有同名材料时先核对并保留恢复副本，不盲目覆盖。
+四个输入路径就是上表的现有材料：`API_CHAIN_FILE`填API证书/fullchain的`.pem`，`API_LEAF_KEY_FILE`填其`.key`，`ADMIN_CHAIN_FILE`填Admin叶证书及完整中间链，`ADMIN_LEAF_KEY_FILE`填Admin叶私钥。不要把任何根证书、CA私钥或客户端证书填成后两项。所有路径均属于**运行该命令的机器**；另一台电脑上的文件先安全传来。输出目录已有同名材料时先核对并保留恢复副本，不盲目覆盖。
 
 ```bash
 set -euo pipefail
@@ -1228,13 +1200,13 @@ az keyvault show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG"
 
 | 检查 | 操作与通过标准 |
 | --- | --- |
-| CA信任和私网 | 管理员将核验过指纹的admin根CA**公钥证书**安装到实际Runner的OpenSSL/Python系统信任及管理浏览器；不是安装叶证书/CA私钥。Runner解析Vault正常域名须与PE的NIC私有IP一致，TLS/443可达。Vault HTTPS通过不代表admin CA已受信任 |
+| CA信任和私网 | Runner使用系统公有信任验证两份源站证书；Admin完整链的根须同时位于Microsoft Trusted CA List。Runner解析Vault正常域名须与PE的NIC私有IP一致，TLS/443可达。Stage9客户端CA另行配置，不安装进Admin源站材料 |
 | 上传后读取与内容校验 | 完成S4-05/06及所需前置后，新建S4-11：Customer private runtime operations，main、test、stage=4、action=private-ingress、operation=plan，所有approved/audit_continue/confirm字段留空。公网已关闭时真实runtime身份成功读取两份Secret、验证Enabled、域名/SAN、私钥匹配、剩余有效期及Runner信任链，并完成Kubernetes dry-run；私网失败不打开Vault公网兜底 |
 | 与本地材料一致且已发布 | 解密成功plan的runtime-review.json，逐项比对`certificates.api/admin.secretId`等于第5步版本地址、`sha256`等于第3步本地叶证书指纹、`expiresAt`一致。审核后S4-12引用该plan ID，成功结果应含`applied=true`、`verified=true`，实际两个私有入口的TLS指纹、域名校验及错误Host拒绝通过 |
 
 证书地址仍填写在客户JSON**顶层**privateIngress的api/admin.tlsSecretId，且allowedCidrs覆盖批准来源；同步完整GitHub Environment Secret `CUSTOMER_CONFIG_JSON`，不是把PEM填进去。手动路径可固定第5步版本；使用无版本地址时须确认选中的当前版本正确。变更配置/代码/证书版本后重新plan，不能沿用旧批准。PE/DNS、AKS、ACR或权限检查失败须分别定位，S4-11不是独立的证书专用按钮。
 
-**完成条件：** 公网窗口已关闭且临时规则已清理、两份Secret版本及证书指纹一致、实际Runner私网读取和CA信任通过、S4-12实际入口验证通过。Front Door源站TLS在Stage9继续验证，业务认证另行验收；上传成功不代表入口已发布，也不自动生成Stage4验收。按保管策略处理本机临时PEM并保留原始恢复材料，演练CA私钥独立保管，不删除唯一副本。
+**完成条件：** 公网窗口已关闭且临时规则已清理、两份Secret版本及证书指纹一致、实际Runner私网读取和公有链信任通过、S4-12实际入口验证通过。Front Door源站TLS在Stage9继续验证，业务认证另行验收；上传成功不代表入口已发布，也不自动生成Stage4验收。按保管策略处理本机临时PEM并保留原始恢复材料，不删除唯一副本。
 
 **Stage4验收前的镜像步骤：** 私有ACR可达后运行`Promote LiteLLM image`，environment=test、acr_name=客户ACR名称、source_image保持仓库固定源digest、target_tag=`litellm-azure:rehearsal-1`（示例，按发布版本命名）、build_azure_runtime=true、build_auth_proxy=false。没有stage/approved_run_id输入。deploy身份需批准的ACR推送权限；Runner需访问源registry、扫描库和Sigstore。记录成功输出的完整`ACR/repository@sha256:...`，并审核加密artifact中的SBOM、`target-image-verification.json`和`target-image-summary.json`；下一阶段应用配置使用该完整镜像引用。扫描、签名或同作业验证失败时，即使已推送也不能作为已批准镜像。
 
@@ -1565,7 +1537,11 @@ proxy-foundation创建身份及Vault，不等于已生成登录凭据；entra-ap
 
 **开始前：** Stage0–8均已验收；已完成必要客户端、管理操作和日志抽查；最终数据同步/停写/回退方案已批准。Stage9前半可准备禁用流量的边缘资源，但第5节未完成时不得启用业务流量。
 
-**客户JSON：** origin的VNet/ingress子网沿用目标网络。使用托管privateIngress时，`apiLoadBalancer.resourceGroupName/name/frontendName`可以填`auto`，代码从Stage4回执及实际LB解析API前端，不选择admin。edge.privateOrigin.privateLinkServiceId可填`auto`，privateLinkLocation填批准区域，后续从origin部署输出核对。不要手写猜测的节点RG/LB名称或把ARM资源ID填到FDID字段。
+**客户JSON：** origin的VNet/ingress子网沿用目标网络。使用托管privateIngress时，`apiLoadBalancer`和`adminLoadBalancer`的`resourceGroupName/name/frontendName`均可填`auto`；代码从Stage4回执及实际LB分别解析两个前端并拒绝复用。edge的`privateOrigin`和`adminPrivateOrigin`可分别把PLS ID填`auto`，location填批准区域。
+
+`adminMtls`必须填写同订阅边缘信任Vault的资源组/名称、1–2个CA链Secret名称及固定32位版本、客户端叶证书SAN中获准的FQDN；`adminRateLimitPerMinute`按真实企业NAT/UI基线设置。CA Secret只含根/中间CA公钥链，不含客户端或CA私钥。用`az keyvault show`核对Vault，用`az keyvault secret show --query id -o tsv`取得Secret ID并从最后一段读取版本，用`openssl x509 -in <client-cert> -noout -ext subjectAltName,extendedKeyUsage`核对SAN和Client Authentication EKU。Vault必须启用RBAC和`networkAcls.bypass=AzureServices`；可保持`publicNetworkAccess=Disabled`，但当前不支持由Network Security Perimeter覆盖Trusted Services bypass。Front Door profile托管身份会获得该Vault的`Key Vault Secrets User`，部署身份须有创建该角色分配的权限；客户端证书吊销服务仍需客户单独允许并实测。
+
+Admin mTLS使用`Microsoft.Cdn@2026-08-01-preview`。客户须明确接受Preview；不接受时停止并改用Application Gateway WAF v2严格mTLS，不得改成公网用户名/密码加WAF。两份Traefik源站证书均须链到Microsoft Trusted CA List中的根，Admin客户端CA可以是客户私有CA，两者不要混淆。
 
 | 步骤 | workflow显示名称 | stage | component或action | operation | approved_run_id | confirm_environment |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -1576,15 +1552,16 @@ proxy-foundation创建身份及Vault，不等于已生成登录凭据；entra-ap
 | S9-05 | Customer private runtime operations | 9 | action=edge-bind | plan | 留空 | 留空 |
 | S9-06 | Customer private runtime operations | 9 | action=edge-bind | execute | S9-05的plan ID | test |
 
-origin创建API Private Link Service；edge默认流量禁用、WAF Detection，不改DNS。随后由Owner确认Private Link连接审批、API自定义域验证/边缘证书，以及源站TLS与来源限制。edge-bind只给API代理写实际FRONT_DOOR_ID并rollout，不绑定admin、不启流量；后续托管application发布保留该绑定。
+origin为API和Admin各创建一条Private Link Service并绑定不同内部LB frontend；edge创建一个Premium profile下的两个独立endpoint/domain/origin/route/WAF，默认两边流量均禁用、WAF Detection，不改DNS。**S9-04成功后、S9-05之前**，Owner须分别审批两条托管Private Endpoint请求并核对profile/origin/PLS/frontend归属，同时确认两个自定义域/边缘证书、两份公有CA源站TLS、Admin CA链导入及吊销服务。edge-bind会实时要求每条PLS恰有一个Approved且没有Pending连接，再把同一实际Front Door ID绑定到两个受管代理或两个原生Traefik业务router，分别rollout并保存双平面回执；健康router不绑定FDID，本步仍不启流量。
 
 **独立发布报告：** 实际启用流量前，将获批报告填入Environment Secret `MIGRATION_RELEASE_JSON`。它不是验收账本，也不能直接把acceptance JSON复制进去。字段与检查集由[发布校验器](../scripts/stage9_release.py)定义，主要字段如下：
 
 | 字段 | 来源与含义 |
 | --- | --- |
-| environmentName、baseDomain、logAnalyticsWorkspaceName、rateLimitPerMinute | 与客户配置保持一致 |
+| environmentName、baseDomain、logAnalyticsWorkspaceName、rateLimitPerMinute、adminRateLimitPerMinute | 与客户配置保持一致 |
 | phase、wafMode | prepare/Detection保持禁用；canary/Detection启流量；production/Prevention正式发布 |
-| privateOrigin | origin实际PLS ID和区域，不保留auto或REPLACE |
+| privateOrigin、adminPrivateOrigin | origin实际两条PLS ID和区域，不保留auto或REPLACE，且ID不得相同 |
+| adminMtls | 与edge配置完全一致的Vault、客户端证书FQDN、CA Secret名称及固定版本；不含Secret值 |
 | frontDoorId | edge输出中的profileId，是Front Door GUID，不是CDN profile的ARM Resource ID |
 | revision、configSha256 | 当前同版本Stage9 plan-summary中的revision和configSha256，不手算也不用镜像digest代替 |
 | auditMode、telemetryEnabled | 本文auditMode=native；telemetryEnabled与是否配置observability一致 |
@@ -1595,8 +1572,8 @@ native canary要求prepare检查加企业认证、实际协议、数据库恢复
 
 | 发布phase | 必须具备的checks名称，沿用前一行集合再增加 |
 | --- | --- |
-| prepare | private_origin_tls、origin_bypass_denied、admin_private_isolation、waf_diagnostics_privacy、private_link_approval、rollback_plan |
-| native canary | entra_backend_acl、required_protocol_matrix、database_restore、waf_detection_review、approved_pilot_clients、native_spend_logs、native_audit_access、native_retention_recovery；启用collector用telemetry_alerts，否则telemetry_disabled |
+| prepare | private_origin_tls、origin_bypass_denied、admin_mtls_enforcement、admin_private_origin_isolation、admin_ca_revocation_rotation、waf_diagnostics_privacy、private_link_approval、rollback_plan |
+| native canary | native_virtual_key_acl、native_admin_password_login、required_protocol_matrix、database_restore、waf_detection_review、approved_pilot_clients、native_spend_logs、native_audit_access、native_retention_recovery；启用collector用telemetry_alerts，否则telemetry_disabled |
 | native production | canary_slo、waf_prevention_review、dns_cutover_and_rollback |
 
 只有第5节的最终数据及发布条件满足后才执行下列行。每次phase变化先更新已审核MIGRATION_RELEASE_JSON并重新plan；普通S9-03的禁用计划不能批准启流量。
@@ -1608,11 +1585,11 @@ native canary要求prepare检查加企业认证、实际协议、数据库恢复
 | S9-09 | Customer private runtime operations | 9 | action=dns-publish | plan | 留空；仅已批准Azure DNS路径 | 留空 |
 | S9-10 | Customer private runtime operations | 9 | action=dns-publish | execute | S9-09的plan ID | test |
 
-启流量并不自动限制canary用户，试点名单/网络/Key必须实际受控。DNS动作只支持同订阅已委派Azure DNS中的`llm-api.<baseDomain>` CNAME，需提前配置顶层`dns={zoneResourceId,ttl}`和runtime DNS写权限；ttl范围60–3600秒。已有正式API记录不能为了通过检查提前指向新边缘；应在批准窗口操作。其他DNS提供方走明确的人工变更，不临时修改脚本猜API；admin记录绝不公开。
+启流量并不自动限制canary用户，试点名单、客户端证书和Key必须实际受控。DNS动作支持同订阅已委派Azure DNS中的`llm-api.<baseDomain>`与`llm-admin.<baseDomain>`两条CNAME，分别指向对应endpoint；需提前配置顶层`dns={zoneResourceId,ttl}`和runtime DNS写权限，TTL范围60–3600秒。两条记录共享一个带ETag的检查点；中途失败可从已知前态/目标态继续，但任何第三方值都会阻止自动继续或回退。已有正式记录不能为了通过检查提前切换。其他DNS提供方走同等双记录、同窗口的人工变更，不临时修改脚本猜API。
 
-DNS回退为同runtime、stage=9、action=dns-rollback，另跑plan/execute并引用恢复plan ID；这是DNS恢复，不是数据库回退。canary验收通过后，生产报告使用phase=production/wafMode=Prevention，重复S9-07/08；若DNS已指向同一获准目标，不为重复操作而重做DNS切换。
+DNS回退为同runtime、stage=9、action=dns-rollback，另跑plan/execute并引用恢复plan ID；它按检查点恢复API/Admin两条记录，不是数据库回退。canary验收通过后，生产报告使用phase=production/wafMode=Prevention，重复S9-07/08；若DNS已指向同一获准目标，不为重复操作而重做DNS切换。
 
-候选入口实际就绪后运行`Customer gateway isolation checks`，environment=test，结合正向客户端测试；匿名拒绝探针不证明业务成功。**阶段验收：** stage=9 draft/confirm；`enabled_what_if`、`origin_tls_private_link`、`pilot_regression`、`rollback_rehearsal`，加single_operator_release或dual_owner_release。stage acceptance不能替代MIGRATION_RELEASE_JSON及最终停写/数据核验。
+候选入口实际就绪后运行`Customer gateway isolation checks`，environment=test：API匿名/错误Host须拒绝；Admin公网DNS无客户端证书须得到明确TLS证书要求或HTTP拒绝。另用获批测试证书完成有效证书正例，并逐项验证缺失、错误FQDN、过期、已吊销证书均拒绝；通过mTLS后还要验证错误UI密码拒绝和正确登录。负向探针不证明业务成功。**阶段验收：** stage=9 draft/confirm；`enabled_what_if`、`origin_tls_private_link`、`pilot_regression`、`rollback_rehearsal`，加single_operator_release或dual_owner_release。stage acceptance不能替代MIGRATION_RELEASE_JSON及最终停写/数据核验。
 
 ## 5. 最终停写、切流、观察和停旧
 

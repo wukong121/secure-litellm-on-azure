@@ -41,9 +41,9 @@
 
 ## 阶段9回源补充检查
 
-Stage9 API Deployment显式注入`FRONT_DOOR_ID`，启动时必须是有效GUID；业务请求的`X-Azure-FDID`须匹配，重复/缺失/错误值拒绝，之后仍执行Entra认证和路由授权。admin代理不允许配置该参数。此前Stage7/8未设置时行为保持不变。内部健康探针仍可用，但Front Door公网路由不包含探针路径。
+Stage9 API和Admin Deployment都显式注入同一`FRONT_DOOR_ID`，启动时必须是有效GUID；业务请求的`X-Azure-FDID`须匹配，重复、缺失或错误值拒绝，之后仍执行各平面的认证和路由授权。此前Stage7/8未设置时行为保持不变。Admin外层还必须先通过Front Door严格mTLS；FDID不能替代客户端证书。内部健康探针仍可用。
 
-FDID不是Secret，不能替代PLS连接审批、API-only私有LB和NSG源站防绕过。部署流程必须保留这一环境变量，不能通过删除它绕过检查。详见[阶段9准备记录](../docs/litellm-stage9-edge-cutover-preparation-2026-09-07.md)。
+FDID不是Secret，不能替代PLS连接审批、双平面私有LB、mTLS或NSG源站防绕过。部署流程必须保留这一环境变量，不能通过删除它绕过检查。详见[当前迁移指南](../docs/customer-migration-guide-zh.md)。
 
 ## 阶段8可选增强L3能力
 

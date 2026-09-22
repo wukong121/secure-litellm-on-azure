@@ -3,3 +3,4 @@ kind: Component
 patches:
   - path: ingress-patch.yaml
   - path: proxy-patch.yaml
+  - path: admin-proxy-patch.yaml

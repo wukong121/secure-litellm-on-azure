@@ -4,7 +4,7 @@
 
 ## Stage 9边缘入口准备
 
-`components/stage9-edge`在API ingress中只保留6个推理Exact路径及私有`/readyz`，API代理增加`FRONT_DOOR_ID`补充检查；admin保持独立私有ingress。`validation/stage9`组合前序组件，未加入环境overlay。运行`make validate-stage9`和域名生成器`--stage 9`验证；占位ID、镜像与IngressClass必须经批准替换。
+`components/stage9-edge`在API ingress中只保留6个推理Exact路径及`/readyz`，API和Admin代理都增加`FRONT_DOOR_ID`补充检查；Admin仍使用独立ingress，并由独立Front Door endpoint严格mTLS保护。`validation/stage9`组合前序组件，未加入环境overlay。运行`make validate-stage9`和域名生成器`--stage 9`验证；占位ID、镜像与IngressClass必须经批准替换。
 
 Front Door/PLS模板位于`infra/edge`和`infra/edge-origin`；默认关闭且不创建DNS。此组件不会安装controller、创建内部LB或解禁阶段7关闭协议。发布/回退和未完成Gate见[阶段9记录](../docs/litellm-stage9-edge-cutover-preparation-2026-09-07.md)。
 
