@@ -14,7 +14,7 @@
 - 本地操作者负责在命令前取得变更批准，命令输出不等于Stage验收通过。
 - 镜像使用客户自管Cosign密钥签名；Actions仍使用GitHub OIDC keyless签名，两种信任路径不混用。
 
-Stage9仍没有自动完成最终停写、最终备份、干净目标库选择、最终对账或停旧的按钮。未完成人工最终迁移方案时，只能执行`stage9-origin`和`stage9-edge-prepare`，不得启流量或切DNS。
+Stage9支持在旧系统保持运行时发布独立新域名做并行canary：新系统以已验收备份的恢复结果为数据基线，完成发布报告后可启用新Front Door route并新增DNS CNAME，不要求旧系统停写或替换旧域名。新旧数据库只在备份时点一致，之后不会持续同步，试点须使用新环境单独签发的virtual key。最终停写、最终增量同步和旧环境退役仍没有自动按钮；只有客户以后要求无损承接备份后的旧系统新增数据时，才进入可选最终迁移流程。
 
 ## 2. Azure登录方式
 
@@ -405,7 +405,7 @@ execute会重新生成实时plan；代码、配置、云状态或发布报告变
 
 - `stage2-decisions`、`stage3-source-check`和`stage4-target-check`是直接检查。
 - 三个`promote-*-image`会直接构建/导入、扫描、签名和推送镜像，须显式使用`--operation execute`。
-- 最终停写、最终数据同步及旧环境下线仍是人工批准操作，不伪装成已有自动化步骤。
+- 可选的最终停写、最终数据同步及旧环境下线仍是人工批准操作，不伪装成已有自动化步骤，也不作为独立新域名canary的前置条件。
 
 ## 5. Stage2–6顺序
 
@@ -1428,9 +1428,9 @@ rm -f "$VERIFY_KUBECONFIG"
 
 ## 8. Stage9
 
-Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身份：deploy创建双PLS和双endpoint edge，runtime核验API/Admin绑定并修改Azure DNS。** Entra路径的`stage9-edge-bind`绑定Stage7两个代理；native路径核验受管API/Admin Traefik的业务路由、健康改写、私有LB和后端目标。普通Entra延期且未选择native-auth时只能准备origin和禁流量edge。
+Stage9分为“禁流量准备”“独立新域名并行canary”和“可选最终迁移/退役”三个阶段。**执行身份：deploy创建双PLS和双endpoint edge，runtime核验API/Admin绑定；只有Azure DNS自动路径才由runtime修改DNS。** Entra路径的`stage9-edge-bind`绑定Stage7两个代理；native路径核验受管API/Admin Traefik的业务路由、健康改写、私有LB和后端目标。普通Entra延期且未选择native-auth时只能准备origin和禁流量edge。
 
-禁流量准备创建API/Admin两条Private Link Service，以及默认Disabled的两个Front Door endpoint/route，不会形成可访问的新网关。Admin custom domain关联固定Prevention的独立WAF，白名单外来源由`SocketAddr`规则阻断；正式release和两条DNS CNAME发布前仍不作为日常入口。普通`entraMode=deferred`时代理尚未部署；native路径可继续完成双平面edge-bind，但在正式release前route同样不承载请求。
+禁流量准备创建API/Admin两条Private Link Service，以及默认Disabled的两个Front Door endpoint/route，不会形成可访问的新网关。Admin custom domain关联固定Prevention的独立WAF，白名单外来源由`SocketAddr`规则阻断；canary release和两条新域名DNS CNAME发布前仍不作为日常入口。普通`entraMode=deferred`时代理尚未部署；native路径可继续完成双平面edge-bind，但在canary release前route同样不承载请求。
 
 ### 8.1 禁流量准备
 
@@ -1482,7 +1482,7 @@ Stage9分为“禁流量准备”和“正式切流”两个窗口。**执行身
   --approved-plan-sha256 "REPLACE_STAGE9_EDGE_BIND_PLAN_SHA256"
 ```
 
-5. 检查双PLS实时连接、两个禁用route、API WAF Detection、Admin WAF Prevention及准确的`adminAllowedCidrs`、两份公有CA源站TLS和错误Host拒绝。正式release前不运行公网业务回归；Entra路径等待代理。native路径的两个业务router已经绑定实际Front Door ID，必须从批准私网分别执行带实际`X-Azure-FDID`的正例和无header的负例；下面保留API示例，Admin用同一方法解析Admin私网IP并请求`/ui/`：
+5. 检查双PLS实时连接、两个禁用route、API WAF Detection、Admin WAF Prevention及准确的`adminAllowedCidrs`、两份公有CA源站TLS和错误Host拒绝。canary release前不运行公网业务回归；Entra路径等待代理。native路径的两个业务router已经绑定实际Front Door ID，必须从批准私网分别执行带实际`X-Azure-FDID`的正例和无header的负例；下面保留API示例，Admin用同一方法解析Admin私网IP并请求`/ui/`：
 
 ```bash
 BASE_DOMAIN="$(jq -er '.baseDomain' local_execution/customer.json)"
@@ -1512,13 +1512,15 @@ test "$NO_FDID_STATUS" = 404
 unset LITELLM_VIRTUAL_KEY FRONT_DOOR_ID
 ```
 
-正例必须成功且实际调用批准模型；无header请求必须为404。此时生产DNS仍指向旧环境，edge route不能承载业务流量。
+正例必须成功且实际调用批准模型；无header请求必须为404。此时新域名CNAME尚未发布且edge route仍为Disabled，旧系统域名和流量不受影响。
 
-### 8.2 最终数据和发布批准
+### 8.2 独立新域名并行canary
 
-当前没有自动化“最终停写并覆盖演练库”的动作。客户必须在批准维护窗口手工完成：旧入口停止新写入、排空请求、取得最终备份、选择干净最终目标库、恢复/迁移、用户/Team/Key/预算/模型配置对账以及新环境协议测试。未完成这些动作时不得继续。
+本节默认客户接受“已验收备份的恢复结果”作为新环境起点。发布前须重新核对用户、Team、Key、预算、模型配置和Schema迁移与该备份基线一致，并记录备份时间点。旧系统继续服务旧域名，新系统使用独立数据库和新域名；两边在备份后产生的Spend Logs、预算计数、Key和管理配置会各自变化，不得宣称实时一致，也不得让两个网关共用同一个数据库。
 
-完成主手册第5节的最终停写、最终恢复、对账和回退批准后，在customer.json设置。Entra路径保持`entraMode=enabled`；native路径保留现有`entraMode=deferred`，执行器依据`application.authentication.mode=native`允许发布：
+并行canary不要求旧系统停写、取得最终备份、覆盖当前新库或替换旧域名。只给获批研发配置新API域名，并在新环境单独签发限定模型、预算和有效期的virtual key；不要让同一个key跨两个不同步的预算库使用。若客户以后要求把备份时点之后的旧系统新增数据无损带入新环境，再按第8.3节另行批准最终迁移。
+
+完成canary发布报告和回退方案后，在customer.json设置。Entra路径保持`entraMode=enabled`；native路径保留现有`entraMode=deferred`，执行器依据`application.authentication.mode=native`允许发布：
 
 Entra路径：
 
@@ -1542,7 +1544,7 @@ native路径：
 
 报告必须符合当前Stage9 release校验器，绑定当前revision、启用发布开关后的Stage9配置哈希、Front Door ID、两条PLS、`adminAllowedCidrs`、两组限流、phase、实际检查和批准人。prepare证据包含`admin_source_ip_allowlist`、`admin_private_origin_isolation`、`private_origin_tls`、`origin_bypass_denied`、`waf_diagnostics_privacy`、`private_link_approval`和`rollback_plan`。native canary另需`native_virtual_key_acl`、`native_admin_password_login`、原生Spend Logs/读取/留存恢复、真实协议、数据库恢复、WAF评审及获批试点客户端；未启用collector时使用`telemetry_disabled`。文件只放受控且Git忽略的位置，检查项必须引用近7天真实证据，不把模板批量改成passed。
 
-推荐使用合并器打开最终发布开关；若前面使用Azure DNS，此处同时保留`--option azure-dns`：
+推荐使用合并器打开canary发布开关；若前面使用Azure DNS，此处同时保留`--option azure-dns`：
 
 ```bash
 .venv/bin/python -m local_execution.merge_config \
@@ -1553,9 +1555,9 @@ native路径：
   --values local_execution/stage-9-values.local.json --option approved-release
 ```
 
-`approved-release`会改变Stage9配置哈希，因此须对最终配置重新执行一次`stage9-edge-bind`的plan/execute。已绑定的router通常无需再次修改，但execute必须保存与最终配置哈希一致的新回执；不得沿用禁流量prepare阶段的旧bind哈希。
+`approved-release`打开本地高风险动作门禁并指定报告路径。发布报告及现有edge-bind回执必须匹配当前revision和Stage9配置哈希；代码、客户配置或绑定对象有变化时，须重新执行`stage9-edge-bind`的plan/execute并使用新哈希，不能沿用失效回执。
 
-deploy身份正式启用获批phase：
+deploy身份启用获批的canary phase：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -1579,11 +1581,11 @@ deploy身份正式启用获批phase：
   --approved-plan-sha256 "REPLACE_STAGE9_DNS_PUBLISH_PLAN_SHA256"
 ```
 
-Azure DNS动作在同一检查点中发布`llm-api`和`llm-admin`两条CNAME，分别指向独立endpoint；中途失败可从已知状态继续，第三方漂移会阻止操作。其他DNS提供商由客户DNS管理员执行等效双记录变更。切流后立即验证错误率/延迟、PG连接、Redis、预算和Spend Logs。API需确认缺Key、管理路径和非批准推理路径均拒绝；Admin需从白名单外公网出口验证403，并从白名单内出口验证错误密码拒绝、正确Entra或原生登录成功。私有Admin LB仅作Front Door回源，不再作为日常客户入口。
+Azure DNS动作在同一检查点中新增或更新`llm-api`和`llm-admin`两条CNAME，分别指向独立endpoint；中途失败可从已知状态继续，第三方漂移会阻止操作。第三方DNS由客户DNS管理员人工新增等效双记录，不选择`--option azure-dns`，也不运行`stage9-dns-publish`。新记录与旧系统域名并存，不是替换旧入口。新域名可解析后立即验证错误率/延迟、PG连接、Redis、预算和Spend Logs。API需确认缺Key、管理路径和非批准推理路径均拒绝；Admin需从白名单外公网出口验证403，并从白名单内出口验证错误密码拒绝、正确Entra或原生登录成功。私有Admin LB仅作Front Door回源，不再作为日常客户入口。
 
-### 8.3 回退和旧环境逐步下线
+### 8.3 停止试点、可选最终迁移和旧环境退役
 
-观察期内若新环境不达标，先暂停新写入。仅DNS需要回退且新库没有独有写入时，执行独立的DNS rollback：
+观察期内若新环境不达标，先撤销试点virtual key并让试点客户端恢复旧API域名；按批准变更禁用新route或删除新CNAME。旧系统原本就保持运行，不需要通过数据库回退才能继续服务。只有Azure DNS路径存在自动DNS checkpoint时，才执行独立的DNS rollback：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -1595,12 +1597,14 @@ Azure DNS动作在同一检查点中发布`llm-api`和`llm-admin`两条CNAME，�
   --approved-plan-sha256 "REPLACE_STAGE9_DNS_ROLLBACK_PLAN_SHA256"
 ```
 
-DNS rollback不要求重新打开`allowTrafficRelease`，但只恢复已有checkpoint；它不回迁新库独有数据。新库已有Key、预算或日志写入时，由DBA先对账再决定恢复旧写入或修复新系统。
+DNS rollback不要求重新打开`allowTrafficRelease`，但只恢复已有checkpoint；它不回迁新库独有数据。第三方DNS由管理员按原变更记录撤销新CNAME。新库已有Key、预算或日志写入时，这些数据不会自动合并回旧库，须按留存政策保存或由DBA另行对账。
+
+若客户后来要求无损承接备份时点之后的旧系统新增数据，须另设维护窗口，手工完成旧入口停写、请求排空、最终备份、干净目标库选择、恢复/迁移和最终对账；当前本地包不自动覆盖正在试点且已有独有写入的新库。若客户明确接受两边数据在备份后分叉，则可跳过最终迁移，但删除旧资源前仍须确认旧库中的Key、预算、配置和日志哪些需要归档或保留。
 
 客户批准的稳定观察期结束后再软下线旧环境：
 
-1. 确认生产DNS只指向新edge，旧入口连续无请求/写入，新系统不依赖旧AKS、旧PG或旧Key Vault。
-2. 保留旧PG/PVC、Stage0及最终备份、原Master/Salt和旧部署快照。
+1. 确认所有计划迁移的客户端已显式改用新域名，旧入口在批准观察期内无请求/写入，新系统不依赖旧AKS、旧PG或旧Key Vault。
+2. 完成新旧数据分叉对账，保留旧PG/PVC、Stage0备份、退役前快照、原Master/Salt和旧部署快照；没有最终迁移时不得把Stage0备份描述为停机时最终状态。
 3. 旧AKS为本项目专用且无其他工作负载时，由客户管理员执行可逆停止；共享集群不得运行此命令：
 
 ```bash
