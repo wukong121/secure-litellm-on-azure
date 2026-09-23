@@ -1482,6 +1482,8 @@ Stage9分为“禁流量准备”“独立新域名并行canary”和“可选�
   --approved-plan-sha256 "REPLACE_STAGE9_EDGE_BIND_PLAN_SHA256"
 ```
 
+Front Door控制面在已启用route实际返回业务响应时仍可能长期报告`deploymentStatus=NotStarted`。edge-bind不会仅凭该值放行：当route为`Enabled + NotStarted`时，会解析对应endpoint并以自定义域SNI执行公网HTTPS探测，API必须到达认证拒绝层，Admin必须到达WAF或登录页；兜底404、TLS错误和5xx仍会阻断。`Disabled + NotStarted`仍按禁流量状态处理。
+
 5. 检查双PLS实时连接、两个禁用route、API WAF Detection、Admin WAF Prevention及准确的`adminAllowedCidrs`、两份公有CA源站TLS和错误Host拒绝。canary release前不运行公网业务回归；Entra路径等待代理。native路径的两个业务router已经绑定实际Front Door ID，必须从批准私网分别执行带实际`X-Azure-FDID`的正例和无header的负例；下面保留API示例，Admin用同一方法解析Admin私网IP并请求`/ui/`：
 
 ```bash

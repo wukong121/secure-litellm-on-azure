@@ -1,10 +1,15 @@
 """Bind managed API and Admin planes to their deployed Front Door before release."""
 
 import copy
+import http.client
+import ipaddress
 import json
 import re
+import socket
+import ssl
 from uuid import UUID
 
+import certifi
 import yaml
 
 from scripts.customer_migration import fingerprint, private_write, require, stage_fingerprint
@@ -58,7 +63,24 @@ def deployed_resource(azure, resource_id, api_version):
     return value
 
 
-def validate_private_edge_resources(config, azure, profile_resource_id, deployed_origins, edge_output):
+def probe_enabled_route(host, endpoint_host, plane):
+    require(plane in {"api", "admin"}, "Unknown Front Door plane")
+    addresses = sorted({item[4][0] for item in socket.getaddrinfo(endpoint_host, 443, type=socket.SOCK_STREAM) if ipaddress.ip_address(item[4][0]).version == 4})
+    require(addresses and len(addresses) <= 16, f"Front Door {plane} endpoint has no bounded public IPv4 address set")
+    method, path, body, statuses = ("POST", "/v1/responses", b"{}", {400, 401, 403}) if plane == "api" else ("GET", "/fallback/login", b"", {200, 302, 303, 307, 308, 401, 403})
+    context = ssl.create_default_context(cafile=certifi.where())
+    for address in addresses:
+        with socket.create_connection((address, 443), timeout=15) as connection:
+            with context.wrap_socket(connection, server_hostname=host) as secured:
+                request = f"{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+                secured.sendall(request)
+                response = http.client.HTTPResponse(secured)
+                response.begin()
+                headers = {key.lower(): value for key, value in response.getheaders()}
+                require(response.status in statuses and bool(headers.get("x-azure-ref")), f"Front Door {plane} route did not reach its reviewed public data plane")
+
+
+def validate_private_edge_resources(config, azure, profile_resource_id, deployed_origins, edge_output, route_probe=probe_enabled_route):
     edge = config["parameters"]["edge"]
     hosts = {"api": "llm-api." + config["baseDomain"], "admin": "llm-admin." + config["baseDomain"]}
     api_endpoint_id = edge_output["routeId"].rsplit("/routes/", 1)[0]
@@ -73,8 +95,13 @@ def validate_private_edge_resources(config, azure, profile_resource_id, deployed
         expected_patterns = sorted(NATIVE_API_PATHS) if plane == "api" else ["/*"]
         expected_domain = profile_resource_id + f"/customDomains/llm-{plane}"
         expected_group = profile_resource_id + f"/originGroups/private-{plane}"
-        expected_deployment = "Succeeded" if expected_state == "Enabled" else "NotStarted"
-        require(route.get("provisioningState") == "Succeeded" and route.get("deploymentStatus") == expected_deployment and route.get("enabledState") == expected_state, f"Front Door {plane} route is not deployed in the reviewed traffic state")
+        deployment_status = route.get("deploymentStatus")
+        require(route.get("provisioningState") == "Succeeded" and route.get("enabledState") == expected_state, f"Front Door {plane} route is not deployed in the reviewed traffic state")
+        if expected_state == "Enabled" and deployment_status == "NotStarted":
+            route_probe(hosts[plane], edge_output["endpointHost" if plane == "api" else "adminEndpointHost"], plane)
+        else:
+            expected_deployment = "Succeeded" if expected_state == "Enabled" else "NotStarted"
+            require(deployment_status == expected_deployment, f"Front Door {plane} route is not deployed in the reviewed traffic state")
         require(route.get("supportedProtocols") == ["Https"] and route.get("forwardingProtocol") == "HttpsOnly" and route.get("httpsRedirect") == "Enabled" and route.get("linkToDefaultDomain") == "Disabled", f"Front Door {plane} route exposes an unreviewed protocol or default endpoint")
         require(sorted(route.get("patternsToMatch", [])) == expected_patterns and route.get("ruleSets", []) == [] and route.get("cacheConfiguration") in (None, {}), f"Front Door {plane} route patterns, rules or caching differ from the reviewed contract")
         domains = route.get("customDomains", [])
