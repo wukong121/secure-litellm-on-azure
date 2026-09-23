@@ -279,7 +279,7 @@ def deploy_component(config, stage, component, revision, operation, previous, di
         if release["phase"] != "prepare" and "application" in config:
             if expected_authentication == "native":
                 from scripts.private_ingress_runtime import require_private_ingress_backends
-                require_private_ingress_backends(config, revision, azure)
+                require_private_ingress_backends(config, azure)
             from scripts.edge_binding import require_edge_binding
             binding_client = None
             from scripts.audit_runtime import AuditCluster

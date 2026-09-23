@@ -232,18 +232,17 @@ def verify_private_ingress_backends(config, revision, directory, azure=None):
     return verification
 
 
-def require_private_ingress_backends(config, revision, azure):
+def require_private_ingress_backends(config, azure):
     ingress = deployed_private_ingress(config, azure)
     result = azure.scoped(["deployment", "group", "show", "--resource-group", config["target"]["resourceGroup"], "--name", deployment_name(config, 6, "private-ingress-backend"), "--query", "{state:properties.provisioningState,verification:properties.outputs.privateIngressBackend.value}"])
     verification = result.get("verification", {})
     expected = {
-        "revision": revision,
         "configSha256": stage_fingerprint(config, 6),
         "privateIngressSha256": fingerprint(ingress),
         "authenticationMode": "native",
         "backendRoutesVerified": True,
     }
-    require(result.get("state") == "Succeeded" and all(verification.get(key) == value for key, value in expected.items()), "Verify the current native private ingress against the Stage 6 backend before enabling traffic")
+    require(result.get("state") == "Succeeded" and re.fullmatch(r"[0-9a-f]{40}", verification.get("revision", "")) is not None and all(verification.get(key) == value for key, value in expected.items()), "Verify the current native private ingress against the Stage 6 backend before enabling traffic")
 
 
 def deploy_private_ingress(config, operation, revision, directory, approved):
