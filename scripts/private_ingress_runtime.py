@@ -12,6 +12,7 @@ import subprocess
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
+import certifi
 import yaml
 
 from scripts.customer_migration import MigrationError, fingerprint, private_write, require, stage_fingerprint
@@ -269,7 +270,7 @@ def deploy_private_ingress(config, operation, revision, directory, approved):
         materials[plane] = material
         certificate_path = directory / f"{plane}-chain.pem"
         private_write(certificate_path, material["certificate"])
-        run_command(["openssl", "verify", "-purpose", "sslserver", "-verify_hostname", hosts[plane], "-untrusted", str(certificate_path), str(certificate_path)], directory, "certificate-trust-" + plane)
+        run_command(["openssl", "verify", "-CAfile", certifi.where(), "-purpose", "sslserver", "-verify_hostname", hosts[plane], "-untrusted", str(certificate_path), str(certificate_path)], directory, "certificate-trust-" + plane)
         documents = [document for document in render_ingress(config, plane, image, settings[plane]["allowedCidrs"]) if document["kind"] != "Namespace"]
         preserved_config_map = None
         if authentication_mode == "native":

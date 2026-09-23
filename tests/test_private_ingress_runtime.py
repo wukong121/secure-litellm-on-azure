@@ -76,6 +76,11 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
         self.assertNotIn("synthetic-public-chain", review)
         self.promote.assert_not_called()
         self.verify.assert_not_called()
+        trust_commands = [call.args[0] for call in self.command.call_args_list if call.args[2].startswith("certificate-trust-")]
+        self.assertEqual(len(trust_commands), 2)
+        for arguments in trust_commands:
+            self.assertEqual(arguments[:3], ["openssl", "verify", "-CAfile"])
+            self.assertEqual(Path(arguments[3]).name, "cacert.pem")
         for call in self.command.call_args_list:
             if "apply" in call.args[0]:
                 self.assertIn("--dry-run=server", call.args[0])

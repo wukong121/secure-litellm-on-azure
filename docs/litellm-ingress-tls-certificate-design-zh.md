@@ -117,7 +117,7 @@ DNS-01 用公共 DNS TXT 证明域名控制权，不要求私有源站开放公�
 
 `private-ingress` 对 API 和 admin 两个入口统一生成计划并校验：
 
-1. 从批准的 Key Vault Secret 读取 PEM 证书链与未加密私钥，校验主机名、用途、私钥匹配及有效期；加载时要求至少剩余 7 天，并通过 runner 上的 OpenSSL 信任链检查。
+1. 从批准的 Key Vault Secret 读取 PEM 证书链与未加密私钥，校验主机名、用途、私钥匹配及有效期；加载时要求至少剩余 7 天，并使用固定版本`certifi`公有根证书包执行OpenSSL信任链检查，不继承Runner额外安装的企业或测试CA。该预检用于拒绝私有/自签链，Front Door的Microsoft信任列表仍是最终回源判据。
 2. 将具体 Secret 版本、证书指纹、代码版本、配置与现有受管对象状态绑定到计划，执行前重新核对，拒绝未经批准的状态变化及接管非本流程管理的资源。
 3. 创建不可变 Kubernetes TLS Secret，名称为 `llm-<plane>-ingress-tls-<证书指纹前16位>`，挂载为 `/certs/tls.crt` 和 `/certs/tls.key`。
 4. 发布文件路由配置和 Deployment。证书 Secret 名称及 Pod 模板指纹变化触发滚动更新，而不是依赖 Traefik 自行从 Key Vault 拉取新版本。
