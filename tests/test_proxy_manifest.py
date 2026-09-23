@@ -3,7 +3,7 @@ import json
 import unittest
 import tempfile
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import yaml
 
@@ -252,8 +252,8 @@ class ProxyManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one approved"):
             deployed_edge(config, azure)
 
-    def test_deployed_edge_rejects_enabled_route_not_deployed(self):
-        from scripts.edge_binding import deployed_edge
+    def test_deployed_edge_live_checks_enabled_route_with_stale_status(self):
+        from scripts.edge_binding import validate_private_edge_resources
         config = proxy_customer()
         identifier = "11111111-1111-4111-8111-111111111111"
         profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
@@ -261,15 +261,42 @@ class ProxyManifestTests(unittest.TestCase):
         edge.update(apiTrafficEnabled=True, adminTrafficEnabled=True)
         azure = Mock()
         def cloud(arguments):
-            if arguments[:3] == ["deployment", "group", "show"]:
-                return {"state": "Succeeded", "edge": edge}
             resource = live_edge_resource(config, identifier, profile, arguments, edge_output=edge)
-            if resource["id"] == edge["routeId"]:
+            if resource["id"] in {edge["routeId"], edge["adminRouteId"]}:
                 resource["properties"]["deploymentStatus"] = "NotStarted"
             return resource
         azure.scoped.side_effect = cloud
-        with self.assertRaisesRegex(ValueError, "route is not deployed"):
-            deployed_edge(config, azure)
+        probe = Mock()
+        validate_private_edge_resources(config, azure, profile, {"api": edge["privateOrigin"], "admin": edge["adminPrivateOrigin"]}, edge, route_probe=probe)
+        self.assertEqual(probe.call_args_list, [
+            unittest.mock.call("llm-api." + config["baseDomain"], edge["endpointHost"], "api"),
+            unittest.mock.call("llm-admin." + config["baseDomain"], edge["adminEndpointHost"], "admin"),
+        ])
+        probe.side_effect = ValueError("public route probe failed")
+        with self.assertRaisesRegex(ValueError, "public route probe failed"):
+            validate_private_edge_resources(config, azure, profile, {"api": edge["privateOrigin"], "admin": edge["adminPrivateOrigin"]}, edge, route_probe=probe)
+
+    def test_live_route_probe_rejects_front_door_fallback(self):
+        from scripts.edge_binding import probe_enabled_route
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        secured = MagicMock()
+        secured.__enter__.return_value = secured
+        context = Mock()
+        context.wrap_socket.return_value = secured
+        response = Mock(status=401)
+        response.getheaders.return_value = [("x-azure-ref", "synthetic")]
+        address = [(2, 1, 6, "", ("192.0.2.10", 443))]
+        with patch("scripts.edge_binding.socket.getaddrinfo", return_value=address), patch("scripts.edge_binding.socket.create_connection", return_value=connection), patch("scripts.edge_binding.ssl.create_default_context", return_value=context), patch("scripts.edge_binding.http.client.HTTPResponse", return_value=response):
+            probe_enabled_route("llm-api.customer.invalid", "api.azurefd.net", "api")
+            secured.sendall.assert_called_once()
+            response.status = 404
+            with self.assertRaisesRegex(ValueError, "did not reach"):
+                probe_enabled_route("llm-api.customer.invalid", "api.azurefd.net", "api")
+            response.status = 401
+            response.getheaders.return_value = []
+            with self.assertRaisesRegex(ValueError, "did not reach"):
+                probe_enabled_route("llm-api.customer.invalid", "api.azurefd.net", "api")
 
     def test_deployed_edge_resolves_auto_private_origins_from_outputs(self):
         from scripts.edge_binding import deployed_edge
