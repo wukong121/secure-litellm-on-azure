@@ -1559,7 +1559,7 @@ native路径：
   --values local_execution/stage-9-values.local.json --option approved-release
 ```
 
-`approved-release`打开本地高风险动作门禁并指定报告路径。发布报告及现有edge-bind回执必须匹配当前revision和Stage9配置哈希；代码、客户配置或绑定对象有变化时，须重新执行`stage9-edge-bind`的plan/execute并使用新哈希，不能沿用失效回执。Stage6后端入口回执按Stage6配置哈希和完整Stage4入口指纹判断是否过期；仅Git revision因后续Stage9代码或文档更新而变化时无需重跑`stage6-application`，但Stage6配置、证书、私有IP或入口回执变化仍会阻止release。
+`approved-release`打开本地高风险动作门禁并指定报告路径。发布报告及现有edge-bind回执必须匹配当前revision和Stage9配置哈希；代码、客户配置或绑定对象有变化时，须重新执行`stage9-edge-bind`的plan/execute并使用新哈希，不能沿用失效回执。Stage6后端入口回执按Stage6配置哈希判断是否仍属于当前应用；release同时使用独立公有根包对当前Stage4证书、私有IP和native路由做实时探测。因此仅Git revision变化或合规源站证书轮换不要求回滚重跑`stage6-application`，但Stage6配置变化或实时入口探测失败仍会阻止release。
 
 deploy身份启用获批的canary phase：
 

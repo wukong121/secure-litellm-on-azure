@@ -142,14 +142,16 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
         result["revision"] = "b" * 40
         self.azure.scoped.side_effect = [stage4, {"state": "Succeeded", "verification": result}]
         require_private_ingress_backends(self.config, self.azure)
+        self.assertEqual(self.verify.call_count, 6)
         result["revision"] = "invalid"
         self.azure.scoped.side_effect = [stage4, {"state": "Succeeded", "verification": result}]
         with self.assertRaisesRegex(ValueError, "Verify the current native private ingress"):
             require_private_ingress_backends(self.config, self.azure)
         result["revision"] = "b" * 40
         stale = {**ingress, "api": {"privateIpAddress": "10.30.4.12"}}
+        self.verify.side_effect = ValueError("current ingress route verification failed")
         self.azure.scoped.side_effect = [{"state": "Succeeded", "ingress": stale}, {"state": "Succeeded", "verification": result}]
-        with self.assertRaisesRegex(ValueError, "Verify the current native private ingress"):
+        with self.assertRaisesRegex(ValueError, "current ingress route verification failed"):
             require_private_ingress_backends(self.config, self.azure)
 
     def test_failed_tls_verification_never_records_success(self):
