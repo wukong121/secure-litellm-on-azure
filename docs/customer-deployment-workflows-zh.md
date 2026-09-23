@@ -71,7 +71,7 @@
 
 Stage8/application按原有plan、批准、execute流程生成原生配置，不创建L3维护任务。可选`observability`复用独立collector，不需要audit Blob/HSM。原生决策从Stage2开始绑定证据；新增或变更决策需重新核验相关阶段，不自动迁移旧账本。
 
-Stage8要求`native_spend_logs`、`native_audit_access`、`native_retention_recovery`、`guardrail_scope`，以及按遥测选择要求`telemetry_received`或`telemetry_disabled`。Stage9发布声明须含`auditMode: native`及与配置一致的`telemetryEnabled`布尔值，要求对应原生证据。旧`stage9_release render`静态overlay入口不支持原生模式，须使用托管应用发布。
+Stage8要求`native_spend_logs`、`native_audit_access`、`native_retention_recovery`、`guardrail_scope`，以及按遥测选择要求`telemetry_received`或`telemetry_disabled`。Stage9发布声明须含`auditMode: native`及与配置一致的`telemetryEnabled`布尔值；dev/test native canary由release plan复用当前回执和实时edge状态，不重复要求这些checks，其他canary/production仍要求对应证据。旧`stage9_release render`静态overlay入口不支持原生模式，须使用托管应用发布。
 
 固定镜像的隔离PostgreSQL测试已验证Chat JSON/SSE的请求正文位于`proxy_server_request`、响应位于`response`，`end_user`保存请求主体哈希、`api_key`保存vkey哈希。测试调用了日志队列刷新入口，因此**不证明生产写入时延、进程故障无丢失、所有协议或真实Azure身份**。原生UI/API受控查询核心已实测；一期高用量用户抽查采用原生Logs优先、获批私网PG只读查询补充，不要求完整UI或独立L3平台。客户实际需要的管理操作、正常正文落库、授权查询、留存/备份及真实客户端仍须验收，PG审计授权不会自动具备。
 
@@ -517,7 +517,7 @@ Azure失败只打印有限错误码；原始诊断留运行器作业目录并在
 
 运行应用发布使用显式目标AKS临时kubeconfig、server-side dry-run和无force-conflicts的apply；不prune、不删除PVC、不部署任意集群RBAC。阶段6~8提供的是客户成品清单发布机制，当前示例中的身份/CSI/数据库令牌/协议/L3接收器仍需完成接线，缺少内容会失败，不会自动将模板占位符替换成猜测值。
 
-Stage9 `release=true` 只控制Front Door流量与WAF，不自动改任意DNS，也不证明“canary”已限制真实客户端；发布报告必须证明确有限定访问。当前源码的非POST规则及协议边界不满足所有Coding客户端，先补齐并回归再切流。回退依客户已审查镜像/数据策略执行，不自动回滚数据库或删除新环境。旧入口在回退窗口结束前保留。
+Stage9 `release=true`只控制Front Door流量与WAF，不自动改任意DNS，也不自动限制真实试点客户端。dev/test native canary报告可省略人工checks，但仍要求change ticket、批准人、revision/config及全部实时edge门禁；试点范围由独立virtual key和客户端配置实际控制。其他canary/production继续要求完整证据。当前源码的非POST规则及协议边界不满足所有Coding客户端，所选客户端仍须实测。回退依客户已审查镜像/数据策略执行，不自动回滚数据库或删除新环境。旧入口在回退窗口结束前保留。
 
 ## 7. 本轮交付与仍阻塞项
 

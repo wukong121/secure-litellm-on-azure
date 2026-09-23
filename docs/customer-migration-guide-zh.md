@@ -1565,17 +1565,20 @@ origin为API和Admin各创建一条Private Link Service并绑定不同内部LB f
 | revision、configSha256 | 当前同版本Stage9 plan-summary中的revision和configSha256，不手算也不用镜像digest代替 |
 | auditMode、telemetryEnabled | 本文auditMode=native；telemetryEnabled与是否配置observability一致 |
 | changeTicket、approvedBy | 获准变更引用及governance对应Entra批准人Object ID；单人1位、双人2位 |
-| checks | 当前phase必需的实际结果；每项含passed=true、report安全引用、带时区observedAt，须7天内有效；未通过不填写true |
+| checks | dev/test native canary可省略；其他canary和production为当前phase必需的实际结果，每项含passed=true、report安全引用、带时区observedAt，须7天内有效 |
 
-native canary要求prepare检查加企业认证、实际协议、数据库恢复、WAF/试点和原生日志/受控查询/留存恢复证据；未选collector时用telemetry_disabled，不伪造telemetry_alerts。生产另需canary SLO、WAF Prevention评估、DNS切流/回退证据。当前没有自动采集所有这些证据并生成完整发布报告的按钮，实施负责人需整理真实结果；不得用空报告推进。
+`environmentName=dev/test`、`phase=canary`、`authenticationMode=native`且`auditMode=native`时，报告可省略整个`checks`对象；已有空值或`passed=false`条目也会被忽略。S9-07仍实时核对当前revision/config、后端入口回执、双PLS、源站TLS、Admin WAF/CIDR、Private Link批准及双平面edge-bind，因此简化的是重复的人工证据索引，不是绕过实时安全状态。前序Stage验收及canary期间的真实客户端、virtual key、Admin登录和Spend Logs验证仍须执行。Entra或增强L3路径不使用这个简化分支。
+
+`environmentName=prod`的native canary仍要求prepare检查加企业认证、实际协议、数据库恢复、WAF/试点和原生日志/受控查询/留存恢复证据；未选collector时用telemetry_disabled，不伪造telemetry_alerts。production另需canary SLO、WAF Prevention评估、DNS切流/回退证据。严格路径没有自动采集全部证据并生成报告的按钮，实施负责人需整理真实结果。
 
 | 发布phase | 必须具备的checks名称，沿用前一行集合再增加 |
 | --- | --- |
 | prepare | private_origin_tls、origin_bypass_denied、admin_source_ip_allowlist、admin_private_origin_isolation、waf_diagnostics_privacy、private_link_approval、rollback_plan |
-| native canary | native_virtual_key_acl、native_admin_password_login、required_protocol_matrix、database_restore、waf_detection_review、approved_pilot_clients、native_spend_logs、native_audit_access、native_retention_recovery；启用collector用telemetry_alerts，否则telemetry_disabled |
+| dev/test native canary | 无必填checks；使用报告元数据、批准信息及S9-07实时门禁 |
+| prod native canary | native_virtual_key_acl、native_admin_password_login、required_protocol_matrix、database_restore、waf_detection_review、approved_pilot_clients、native_spend_logs、native_audit_access、native_retention_recovery；启用collector用telemetry_alerts，否则telemetry_disabled |
 | native production | canary_slo、waf_prevention_review、dns_cutover_and_rollback |
 
-canary报告及其实际证据满足后即可执行下列S9-07/08，不需要先完成第5节。每次phase变化先更新已审核MIGRATION_RELEASE_JSON并重新plan；普通S9-03的禁用计划不能批准启流量。若以后进入无损production迁移，再先完成第5节并使用production报告。
+dev/test canary报告元数据和批准信息完成后即可执行下列S9-07/08，不需要先完成第5节；prod canary/production须再满足对应严格证据。每次phase变化先更新已审核MIGRATION_RELEASE_JSON并重新plan；普通S9-03的禁用计划不能批准启流量。若以后进入无损production迁移，再先完成第5节并使用production报告。
 
 | 步骤 | workflow显示名称 | stage | component或action | operation | approved_run_id | confirm_environment |
 | --- | --- | --- | --- | --- | --- | --- |

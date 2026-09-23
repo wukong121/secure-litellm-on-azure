@@ -265,7 +265,7 @@ chmod 600 "local_execution/stage-REPLACE_STAGE-values.local.json"
 | 8 | `observability` | 加入可选collector |
 | 8 | `enhanced-l3` | 删除原生`contentAudit`并切换增强L3；不能与observability在同一次合并 |
 | 9 | `azure-dns` | 使用仓库自动发布Azure DNS |
-| 9 | `approved-release` | 打开最终流量开关并加入release报告路径；默认只合并禁流量prepare |
+| 9 | `approved-release` | 打开canary/production流量开关并加入release报告路径；默认只合并禁流量prepare |
 
 例如验证环境Stage2：
 
@@ -1542,7 +1542,11 @@ native路径：
 "releaseReportPath": "temp/customer-private/stage9-release.json"
 ```
 
-报告必须符合当前Stage9 release校验器，绑定当前revision、启用发布开关后的Stage9配置哈希、Front Door ID、两条PLS、`adminAllowedCidrs`、两组限流、phase、实际检查和批准人。prepare证据包含`admin_source_ip_allowlist`、`admin_private_origin_isolation`、`private_origin_tls`、`origin_bypass_denied`、`waf_diagnostics_privacy`、`private_link_approval`和`rollback_plan`。native canary另需`native_virtual_key_acl`、`native_admin_password_login`、原生Spend Logs/读取/留存恢复、真实协议、数据库恢复、WAF评审及获批试点客户端；未启用collector时使用`telemetry_disabled`。文件只放受控且Git忽略的位置，检查项必须引用近7天真实证据，不把模板批量改成passed。
+报告必须符合当前Stage9 release校验器，绑定当前revision、启用发布开关后的Stage9配置哈希、Front Door ID、两条PLS、`adminAllowedCidrs`、两组限流、phase、change ticket和批准人。
+
+`environmentName=dev/test`、`phase=canary`、`authenticationMode=native`且`auditMode=native`时，`checks`可以整个省略；已有草稿中的空值或`passed=false`也不会阻止发布。此路径由release plan实时核对当前revision/config、native后端入口回执、双PLS、源站TLS、Admin WAF/CIDR、Private Link批准及双平面edge-bind，不要求把前序步骤的结果再次人工抄进报告。前序Stage验收和真实试点测试仍要执行，只是不重复作为canary plan输入。
+
+`environmentName=prod`的canary及所有`phase=production`继续使用严格证据索引：`native_virtual_key_acl`、Admin登录、真实协议、数据库恢复、原生Spend Logs/读取/留存恢复、WAF/试点和遥测决策均须引用近7天真实证据；production另需canary SLO、WAF Prevention及DNS切换/回退证据。不能把test canary的简化报告改成production报告复用。
 
 推荐使用合并器打开canary发布开关；若前面使用Azure DNS，此处同时保留`--option azure-dns`：
 

@@ -29,6 +29,7 @@ CANARY_CHECKS = PREPARE_CHECKS | {
     "waf_detection_review", "approved_pilot_clients",
 }
 PRODUCTION_CHECKS = CANARY_CHECKS | {"canary_slo", "waf_prevention_review", "dns_cutover_and_rollback"}
+LIVE_GATED_CANARY_ENVIRONMENTS = {"dev", "test"}
 PLS_ID = re.compile(r"^/subscriptions/[a-fA-F0-9-]{36}/resourceGroups/[A-Za-z0-9_.()-]+/providers/Microsoft.Network/privateLinkServices/[A-Za-z0-9_.-]+$")
 UUID = re.compile(r"^[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$")
 
@@ -40,16 +41,18 @@ def release_checks(config):
     mode = config.get("auditMode", "l3")
     if mode not in {"l3", "native"}:
         raise ValueError("Release auditMode must be native or l3")
-    required = set({"prepare": PREPARE_CHECKS, "canary": CANARY_CHECKS, "production": PRODUCTION_CHECKS}[phase])
     authentication = config.get("authenticationMode", "entra")
     if authentication not in {"entra", "native"}:
         raise ValueError("Release authenticationMode must be entra or native")
+    if mode == "native" and type(config.get("telemetryEnabled")) is not bool:
+        raise ValueError("Native release requires an explicit telemetry decision")
+    if phase == "canary" and config.get("environmentName") in LIVE_GATED_CANARY_ENVIRONMENTS and authentication == "native" and mode == "native":
+        return set()
+    required = set({"prepare": PREPARE_CHECKS, "canary": CANARY_CHECKS, "production": PRODUCTION_CHECKS}[phase])
     if phase != "prepare" and authentication == "native":
         required.remove("entra_backend_acl")
         required.update({"native_virtual_key_acl", "native_admin_password_login"})
     if mode == "native":
-        if type(config.get("telemetryEnabled")) is not bool:
-            raise ValueError("Native release requires an explicit telemetry decision")
         if phase != "prepare":
             required.difference_update({"stage8_capture_architecture", "l3_governance_and_recovery"})
             required.update({"native_spend_logs", "native_audit_access", "native_retention_recovery"})

@@ -13,9 +13,9 @@ from scripts.stage9_release import ROOT, PRODUCTION_CHECKS, generate, release_ch
 from scripts.preview_stage9 import preview
 
 
-def evidence_config(phase="canary"):
+def evidence_config(phase="canary", environment="test"):
     return {
-        "phase": phase, "baseDomain": "customer.test.invalid", "environmentName": "test",
+        "phase": phase, "baseDomain": "customer.test.invalid", "environmentName": environment,
         "privateOrigin": {"privateLinkServiceId": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/synthetic/providers/Microsoft.Network/privateLinkServices/api", "privateLinkLocation": "westus3"},
         "adminPrivateOrigin": {"privateLinkServiceId": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/synthetic/providers/Microsoft.Network/privateLinkServices/admin", "privateLinkLocation": "westus3"},
         "adminAllowedCidrs": ["20.30.40.50/32"],
@@ -27,8 +27,29 @@ def evidence_config(phase="canary"):
 
 
 class Stage9ReleaseTests(unittest.TestCase):
-    def test_native_authentication_release_requires_virtual_key_and_private_admin_login(self):
+    def test_test_canary_uses_live_gates_without_manual_check_index(self):
         config = evidence_config()
+        config.update(authenticationMode="native", auditMode="native", telemetryEnabled=False)
+        config.pop("checks")
+        self.assertEqual(release_checks(config), set())
+        validate_release(config)
+        config["checks"] = {name: {"passed": False, "observedAt": "", "report": ""} for name in PRODUCTION_CHECKS}
+        validate_release(config)
+        for patch in ({"wafMode": "Prevention"}, {"frontDoorId": "REPLACE_ID"}, {"approvedBy": []}):
+            with self.assertRaises(ValueError):
+                validate_release({**config, **patch})
+        for patch in ({"authenticationMode": "unsupported"}, {"telemetryEnabled": None}):
+            with self.assertRaises(ValueError):
+                validate_release({**config, **patch})
+
+        entra = evidence_config()
+        self.assertNotEqual(release_checks(entra), set())
+        entra.pop("checks")
+        with self.assertRaisesRegex(ValueError, "Missing passing evidence"):
+            validate_release(entra)
+
+    def test_native_authentication_release_requires_virtual_key_and_private_admin_login(self):
+        config = evidence_config(environment="prod")
         config["authenticationMode"] = "native"
         with self.assertRaisesRegex(ValueError, "native_admin_password_login|native_virtual_key_acl"):
             validate_release(config)
@@ -46,7 +67,7 @@ class Stage9ReleaseTests(unittest.TestCase):
             validate_release(invalid)
 
     def test_native_release_requires_real_native_checks_not_l3_placeholders(self):
-        config = evidence_config()
+        config = evidence_config(environment="prod")
         config.update(auditMode="native", telemetryEnabled=False)
         with self.assertRaisesRegex(ValueError, "native_"):
             validate_release(config)
@@ -72,8 +93,8 @@ class Stage9ReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_release(config)
 
-    def test_canary_requires_stage8_and_protocol_evidence(self):
-        config = evidence_config()
+    def test_prod_canary_requires_stage8_and_protocol_evidence(self):
+        config = evidence_config(environment="prod")
         validate_release(config)
         for key in ("stage8_capture_architecture", "l3_governance_and_recovery", "required_protocol_matrix"):
             invalid = copy.deepcopy(config)

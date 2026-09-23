@@ -868,10 +868,15 @@ class ProjectDocumentationTests(unittest.TestCase):
                 for required in (
                     "并行canary", "不要求旧系统停写", "只在备份时点一致", "不会持续同步",
                     "独立数据库", "virtual key", "可选最终迁移", "旧环境退役", "第三方DNS",
+                    "dev/test", "checks", "实时", "prod",
                 ):
                     self.assertIn(required, text)
                 self.assertNotIn("第5节未完成时不得启用业务流量", text)
                 self.assertNotIn("未完成人工最终迁移方案时，只能执行", text)
+
+        delivery = (ROOT / "docs/customer-deployment-workflows-zh.md").read_text()
+        for required in ("dev/test native canary", "可省略人工checks", "其他canary/production继续要求完整证据"):
+            self.assertIn(required, delivery)
 
     def test_audit_costs_describe_native_storage_and_optional_enhancement(self):
         text = (ROOT / "docs/litellm-bom-cost-comparison-zh.md").read_text()
