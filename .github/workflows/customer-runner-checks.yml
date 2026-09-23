@@ -76,7 +76,7 @@ jobs:
         run: python -m scripts.workflow_security seal --directory temp/runner-readiness --name "$ARTIFACT_NAME" runner-readiness.json operation-status.json
       - name: Save encrypted readiness results
         if: success() || failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: runner-checks-${{ inputs.environment }}-${{ github.run_id }}
           path: temp/runner-readiness/sealed-artifact.json
