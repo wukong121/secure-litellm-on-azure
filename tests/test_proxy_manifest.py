@@ -40,7 +40,7 @@ def live_edge_resource(config, identifier, profile, arguments, connection_status
     for plane, route_key, traffic_key in (("api", "routeId", "apiTrafficEnabled"), ("admin", "adminRouteId", "adminTrafficEnabled")):
         if resource_id == edge[route_key]:
             patterns = list(NATIVE_API_PATHS) if plane == "api" else ["/*"]
-            return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "deploymentStatus": "Succeeded", "enabledState": "Enabled" if edge[traffic_key] else "Disabled", "supportedProtocols": ["Https"], "forwardingProtocol": "HttpsOnly", "httpsRedirect": "Enabled", "linkToDefaultDomain": "Disabled", "patternsToMatch": patterns, "ruleSets": [], "customDomains": [{"id": profile + f"/customDomains/llm-{plane}"}], "originGroup": {"id": profile + f"/originGroups/private-{plane}"}}}
+            return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "deploymentStatus": "Succeeded" if edge[traffic_key] else "NotStarted", "enabledState": "Enabled" if edge[traffic_key] else "Disabled", "supportedProtocols": ["Https"], "forwardingProtocol": "HttpsOnly", "httpsRedirect": "Enabled", "linkToDefaultDomain": "Disabled", "patternsToMatch": patterns, "ruleSets": [], "customDomains": [{"id": profile + f"/customDomains/llm-{plane}"}], "originGroup": {"id": profile + f"/originGroups/private-{plane}"}}}
     if resource_id == edge["routeId"].rsplit("/routes/", 1)[0]:
         return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "enabledState": "Disabled"}}
     if resource_id == edge["adminRouteId"].rsplit("/routes/", 1)[0]:
@@ -50,7 +50,7 @@ def live_edge_resource(config, identifier, profile, arguments, connection_status
         if resource_id == origin_id:
             host = f"llm-{plane}." + config["baseDomain"]
             origin = edge[parameter]
-            return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "enabledState": "Enabled", "hostName": host, "originHostHeader": host, "enforceCertificateNameCheck": True, "sharedPrivateLinkResource": {"privateLink": {"id": origin["privateLinkServiceId"]}, "privateLinkLocation": origin["privateLinkLocation"], "status": "Approved"}}}
+            return {"id": resource_id, "properties": {"provisioningState": "Succeeded", "enabledState": "Enabled", "hostName": host, "originHostHeader": host, "enforceCertificateNameCheck": True, "sharedPrivateLinkResource": {"privateLink": {"id": origin["privateLinkServiceId"]}, "privateLinkLocation": origin["privateLinkLocation"], "status": "Approved" if edge[f"{plane}TrafficEnabled"] else None}}}
         if resource_id == edge[parameter]["privateLinkServiceId"]:
             return {"id": resource_id, "properties": {"autoApproval": {"subscriptions": []}, "privateEndpointConnections": [{"properties": {"privateEndpoint": {"id": "/synthetic/front-door-private-endpoint/" + plane}, "privateLinkServiceConnectionState": {"status": connection_status}}}]}}
     for plane in ("api", "admin"):
@@ -245,6 +245,25 @@ class ProxyManifestTests(unittest.TestCase):
             return live_edge_resource(config, identifier, profile, arguments, connection_status="Pending", edge_output=edge)
         azure.scoped.side_effect = cloud
         with self.assertRaisesRegex(ValueError, "exactly one approved"):
+            deployed_edge(config, azure)
+
+    def test_deployed_edge_rejects_enabled_route_not_deployed(self):
+        from scripts.edge_binding import deployed_edge
+        config = proxy_customer()
+        identifier = "11111111-1111-4111-8111-111111111111"
+        profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
+        edge = edge_deployment_output(config, identifier, profile)
+        edge.update(apiTrafficEnabled=True, adminTrafficEnabled=True)
+        azure = Mock()
+        def cloud(arguments):
+            if arguments[:3] == ["deployment", "group", "show"]:
+                return {"state": "Succeeded", "edge": edge}
+            resource = live_edge_resource(config, identifier, profile, arguments, edge_output=edge)
+            if resource["id"] == edge["routeId"]:
+                resource["properties"]["deploymentStatus"] = "NotStarted"
+            return resource
+        azure.scoped.side_effect = cloud
+        with self.assertRaisesRegex(ValueError, "route is not deployed"):
             deployed_edge(config, azure)
 
     def test_deployed_edge_resolves_auto_private_origins_from_outputs(self):
