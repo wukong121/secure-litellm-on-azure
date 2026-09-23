@@ -76,6 +76,11 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
         self.assertNotIn("synthetic-public-chain", review)
         self.promote.assert_not_called()
         self.verify.assert_not_called()
+        trust_commands = [call.args[0] for call in self.command.call_args_list if call.args[2].startswith("certificate-trust-")]
+        self.assertEqual(len(trust_commands), 2)
+        for arguments in trust_commands:
+            self.assertEqual(arguments[:3], ["openssl", "verify", "-CAfile"])
+            self.assertEqual(Path(arguments[3]).name, "cacert.pem")
         for call in self.command.call_args_list:
             if "apply" in call.args[0]:
                 self.assertIn("--dry-run=server", call.args[0])
@@ -137,14 +142,16 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
         result["revision"] = "b" * 40
         self.azure.scoped.side_effect = [stage4, {"state": "Succeeded", "verification": result}]
         require_private_ingress_backends(self.config, self.azure)
+        self.assertEqual(self.verify.call_count, 6)
         result["revision"] = "invalid"
         self.azure.scoped.side_effect = [stage4, {"state": "Succeeded", "verification": result}]
         with self.assertRaisesRegex(ValueError, "Verify the current native private ingress"):
             require_private_ingress_backends(self.config, self.azure)
         result["revision"] = "b" * 40
         stale = {**ingress, "api": {"privateIpAddress": "10.30.4.12"}}
+        self.verify.side_effect = ValueError("current ingress route verification failed")
         self.azure.scoped.side_effect = [{"state": "Succeeded", "ingress": stale}, {"state": "Succeeded", "verification": result}]
-        with self.assertRaisesRegex(ValueError, "Verify the current native private ingress"):
+        with self.assertRaisesRegex(ValueError, "current ingress route verification failed"):
             require_private_ingress_backends(self.config, self.azure)
 
     def test_failed_tls_verification_never_records_success(self):

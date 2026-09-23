@@ -12,6 +12,7 @@ import subprocess
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
+import certifi
 import yaml
 
 from scripts.customer_migration import MigrationError, fingerprint, private_write, require, stage_fingerprint
@@ -118,7 +119,7 @@ def promote_image(config, directory, azure, lock):
 
 
 def verify_endpoint(address, host, other_host, expected_sha256, *, native=False, plane=None):
-    context = ssl.create_default_context()
+    context = ssl.create_default_context(cafile=certifi.where())
     with socket.create_connection((address, 443), timeout=15) as connection:
         with context.wrap_socket(connection, server_hostname=host) as secured:
             require(hashlib.sha256(secured.getpeercert(binary_form=True)).hexdigest() == expected_sha256, "Ingress served an unexpected TLS certificate")
@@ -202,9 +203,7 @@ def deployed_private_ingress(config, azure):
     return ingress
 
 
-def verify_private_ingress_backends(config, revision, directory, azure=None):
-    azure = azure or AzureCommands(config, directory)
-    ingress = deployed_private_ingress(config, azure)
+def verify_native_ingress_routes(config, ingress):
     require(ingress.get("authenticationMode") == "native" and ingress.get("backendRoutesVerified") is False, "Backend route verification applies only to the initial native private ingress")
     hosts = domain_hosts(config["baseDomain"])
     network = ipaddress.ip_network(config["parameters"]["platform"]["stage4Network"]["ingressSubnetPrefix"])
@@ -216,6 +215,12 @@ def verify_private_ingress_backends(config, revision, directory, azure=None):
         addresses[plane] = address
         verify_endpoint(address, hosts[plane], hosts["admin" if plane == "api" else "api"], certificate_sha256, native=True, plane=plane)
     require(addresses["api"] != addresses["admin"], "API/admin must not share an ingress frontend")
+    return ingress
+
+
+def verify_private_ingress_backends(config, revision, directory, azure=None):
+    azure = azure or AzureCommands(config, directory)
+    ingress = verify_native_ingress_routes(config, deployed_private_ingress(config, azure))
     verification = {
         "revision": revision,
         "configSha256": stage_fingerprint(config, 6),
@@ -238,11 +243,11 @@ def require_private_ingress_backends(config, azure):
     verification = result.get("verification", {})
     expected = {
         "configSha256": stage_fingerprint(config, 6),
-        "privateIngressSha256": fingerprint(ingress),
         "authenticationMode": "native",
         "backendRoutesVerified": True,
     }
     require(result.get("state") == "Succeeded" and re.fullmatch(r"[0-9a-f]{40}", verification.get("revision", "")) is not None and all(verification.get(key) == value for key, value in expected.items()), "Verify the current native private ingress against the Stage 6 backend before enabling traffic")
+    verify_native_ingress_routes(config, ingress)
 
 
 def deploy_private_ingress(config, operation, revision, directory, approved):
@@ -269,7 +274,7 @@ def deploy_private_ingress(config, operation, revision, directory, approved):
         materials[plane] = material
         certificate_path = directory / f"{plane}-chain.pem"
         private_write(certificate_path, material["certificate"])
-        run_command(["openssl", "verify", "-purpose", "sslserver", "-verify_hostname", hosts[plane], "-untrusted", str(certificate_path), str(certificate_path)], directory, "certificate-trust-" + plane)
+        run_command(["openssl", "verify", "-CAfile", certifi.where(), "-purpose", "sslserver", "-verify_hostname", hosts[plane], "-untrusted", str(certificate_path), str(certificate_path)], directory, "certificate-trust-" + plane)
         documents = [document for document in render_ingress(config, plane, image, settings[plane]["allowedCidrs"]) if document["kind"] != "Namespace"]
         preserved_config_map = None
         if authentication_mode == "native":

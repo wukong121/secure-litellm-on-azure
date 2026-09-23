@@ -676,7 +676,7 @@ fi
 
 `Backend image`是完整不可变引用；`Stage6 digest value`输出的纯64位十六进制值才填写`REPLACE_BUILT_64_HEX_DIGEST`，不包含`sha256:`。镜像推送成功但扫描、签名或上述revision/environment核对失败时不得使用。
 
-8. 准备入口证书。手工导入按[Stage4证书导入步骤](../docs/customer-migration-guide-zh.md#4-c-部署后手动导入两个secret)上传`api-tls`和`admin-tls`。选择自动API证书时，先给当前客户账号或operator UAMI授予公共DNS zone的DNS Zone Contributor和证书Vault的Key Vault Secrets Officer，再执行：
+8. 准备入口证书。手工导入按[Stage4证书导入步骤](../docs/customer-migration-guide-zh.md#4-c-部署后手动导入两个secret)上传`api-tls`和`admin-tls`。Stage9的Admin源站不得继续使用私网演练期间的自签名/企业CA证书，也不能靠给Runner或Laptop安装该CA放行；须先轮换为根位于Microsoft Trusted CA List中的公有链。入口计划使用独立`certifi`公有根包预检，不继承Runner本地附加CA。选择自动API证书时，先给当前客户账号或operator UAMI授予公共DNS zone的DNS Zone Contributor和证书Vault的Key Vault Secrets Officer，再执行：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -1559,7 +1559,7 @@ native路径：
   --values local_execution/stage-9-values.local.json --option approved-release
 ```
 
-`approved-release`打开本地高风险动作门禁并指定报告路径。发布报告及现有edge-bind回执必须匹配当前revision和Stage9配置哈希；代码、客户配置或绑定对象有变化时，须重新执行`stage9-edge-bind`的plan/execute并使用新哈希，不能沿用失效回执。Stage6后端入口回执按Stage6配置哈希和完整Stage4入口指纹判断是否过期；仅Git revision因后续Stage9代码或文档更新而变化时无需重跑`stage6-application`，但Stage6配置、证书、私有IP或入口回执变化仍会阻止release。
+`approved-release`打开本地高风险动作门禁并指定报告路径。发布报告及现有edge-bind回执必须匹配当前revision和Stage9配置哈希；代码、客户配置或绑定对象有变化时，须重新执行`stage9-edge-bind`的plan/execute并使用新哈希，不能沿用失效回执。Stage6后端入口回执按Stage6配置哈希判断是否仍属于当前应用；release同时使用独立公有根包对当前Stage4证书、私有IP和native路由做实时探测。因此仅Git revision变化或合规源站证书轮换不要求回滚重跑`stage6-application`，但Stage6配置变化或实时入口探测失败仍会阻止release。
 
 deploy身份启用获批的canary phase：
 
