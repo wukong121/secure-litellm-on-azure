@@ -1,6 +1,6 @@
 # 客户私网 Runner 准备说明
 
-> 核对日期：2026-09-13
+> 核对日期：2026-09-23
 >
 > 用途：为现有 LiteLLM 安全增强及并行迁移准备 GitHub Actions 执行机。
 >
@@ -171,7 +171,7 @@ Docker默认数据目录通常在系统盘。即使挂载了数据盘，也要�
 | 批准的Key Vault、ACR及其数据端点、备份Blob | TCP 443 | 通过各自私有端点访问；ACR登录成功不等于其镜像层下载端点可达 |
 | 新PostgreSQL Flexible Server | TCP 5432 | TLS/Entra连接、恢复、角色和schema操作 |
 | 所选Redis服务 | 以部署输出为准，当前托管配置为TCP 10000/TLS | 数据连接验证；不要按普通Redis默认6379直接放行 |
-| API/Admin入口域名 | TCP 443 | Stage4/6通过显式私网地址与SNI验证两个origin；Stage9后正常DNS均指向各自Front Door endpoint，Admin无客户端证书必须拒绝 |
+| API/Admin入口域名 | TCP 443 | Stage4/6通过显式私网地址与SNI验证两个origin；Stage9后正常DNS均指向各自Front Door endpoint，Admin白名单外公网来源必须由WAF拒绝，白名单内仍须通过内层登录 |
 | 模型服务端点 | TCP 443，按验证需要 | 走批准私网路径；runner成功不能替代Pod Workload Identity验证 |
 | 企业DNS、时间同步服务 | DNS UDP/TCP 53；NTP通常UDP 123 | 仅访问批准的解析器和时间源 |
 

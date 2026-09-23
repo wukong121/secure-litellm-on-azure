@@ -1,6 +1,6 @@
 # LiteLLM 入口与 TLS 证书设计说明
 
-> 核对日期：2026-09-13
+> 核对日期：2026-09-23
 >
 > 适用范围：安全增强版新目标环境的托管部署路径，适用于新建环境及从旧环境迁移。
 >
@@ -37,7 +37,7 @@
 
 Traefik 的版本和 digest 以[入口镜像锁定文件](../deploy/private-ingress-image.json)为准，发布路径将固定镜像引入批准的 ACR，不使用浮动 `latest`。
 
-## 3. 四条独立的证书路径
+## 3. 三类TLS服务端证书与Admin来源门禁
 
 ```mermaid
 flowchart TB
@@ -46,25 +46,24 @@ flowchart TB
     ApiLB -->|TCP 443 转发至 8443| ApiIngress[API Traefik：API 源站证书]
     ApiIngress -->|HTTP 8080| ApiProxy[API 认证代理]
     ApiProxy -->|HTTP 4000| Backend[LiteLLM]
-    Admin[持客户证书的管理终端] -->|HTTPS + 客户端证书| AdminFD[Admin Front Door：严格 mTLS]
+    Admin[批准公网出口的管理终端] -->|HTTPS：WAF来源IP白名单 + 内层登录| AdminFD[Admin Front Door：WAF Prevention]
     AdminFD -->|HTTPS 经独立 Private Link / PLS| AdminLB[Admin 内部 LoadBalancer]
     AdminLB -->|TCP 443 转发至 8443| AdminIngress[Admin Traefik]
     AdminIngress -->|HTTP 8080| AdminProxy[Admin 认证代理]
     AdminProxy -->|HTTP 4000| Backend
 ```
 
-上图描述启用 Front Door 后的目标流量路径。API、Admin分别使用`llm-api.<baseDomain>`和`llm-admin.<baseDomain>`，但绑定不同endpoint、WAF、route、PLS和内部LB。Admin域公网可解析，只有通过严格客户端证书验证后才进入私有回源。
+上图描述启用 Front Door 后的目标流量路径。API、Admin分别使用`llm-api.<baseDomain>`和`llm-admin.<baseDomain>`，但绑定不同endpoint、WAF、route、PLS和内部LB。Admin域公网可解析，Admin WAF固定在Prevention模式，仅允许`adminAllowedCidrs`声明的实际公网出口，随后仍须通过Entra或LiteLLM原生登录。
 
 | TLS 连接 | 服务端出示的证书 | 信任与生命周期责任 |
 | --- | --- | --- |
 | API/Admin客户端到各自Front Door endpoint | Azure Front Door托管服务端证书 | Azure管理边缘服务端证书；客户仍须完成两个域名验证和DNS配置 |
-| Admin客户端到Front Door | 客户PKI签发的客户端叶证书；边缘信任1–2条客户CA公钥链 | 客户负责Client Authentication EKU、SAN FQDN、发放、到期和吊销；CA/客户端私钥不得进入仓库或Front Door Secret |
 | Front Door 到 API Traefik 源站 | API 域名证书，自动路径由 Let's Encrypt 签发 | workflow 签发、存储、发布；证书须满足 Front Door 源站验证要求，保持主机名、SNI、证书链一致 |
 | Front Door到Admin Traefik源站 | Admin域名的公有CA证书 | 根必须在Microsoft Trusted CA List中，完整链和SAN匹配；内部CA/自签名不受支持。当前由客户手工提供，workflow仅发布和验证 |
 
-Admin客户端证书与Admin源站证书方向、EKU和信任根完全不同。**边缘服务端证书有效，不代表客户端mTLS或源站证书有效；任一证书续期也不会自动更新另外两条链。**
+Admin来源IP白名单不是TLS客户端身份认证。共享NAT后的主体都会通过同一个外层门禁，必须继续依赖内层登录、强凭据、限流与审计；出口不稳定时应先使用可控企业代理/VPN出口或重新选择身份感知边缘方案。
 
-入口发布器可以读取外部准备好的API/Admin源站证书。当前自动ACME只覆盖API；选择Admin Front Door mTLS后，Admin源站也必须由Microsoft信任列表中的公有CA签发，不能继续使用仅安装到Runner或管理浏览器的企业私有CA来回源。
+入口发布器可以读取外部准备好的API/Admin源站证书。当前自动ACME只覆盖API；Admin源站也必须由Microsoft信任列表中的公有CA签发，不能继续使用仅安装到Runner或管理浏览器的企业私有CA来回源。
 
 ## 4. 设计理由与取舍
 
@@ -134,7 +133,7 @@ DNS-01 用公共 DNS TXT 证明域名控制权，不要求私有源站开放公�
 | --- | --- | --- |
 | TLS 服务端验证 | 客户端或 Front Door 验证其连接对端的服务端证书 | 没有因此实现客户端证书认证或 mTLS |
 | API 身份与授权 | 认证代理要求企业 Entra Token 和客户端提供的 LiteLLM vkey；模型权限、预算由 LiteLLM 决定 | 服务端 TLS 证书不代表员工身份，也不能取代 Token 或 vkey |
-| 管理入口认证 | 私网入口后仍需管理代理的 OIDC、会话及角色控制 | 处于私网或持有 CA 根证书不等于具有管理员权限 |
+| 管理入口认证 | Front Door WAF先限制批准公网出口，私网回源后仍需OIDC或LiteLLM原生登录 | 来源IP不是用户身份，共享NAT内的任意主体不会因此自动获得管理员权限 |
 | 私钥存储 | Key Vault 持久保存，发布时产生 Kubernetes TLS Secret 副本并挂载到入口 Pod | 不是私钥从不离开 Key Vault，也不是 HSM 内不可导出的 TLS 私钥方案 |
 | 集群内传输 | Traefik 到认证代理使用 HTTP 8080，认证代理到 LiteLLM 使用 HTTP 4000 | 不是客户端到 LiteLLM 的全链路 TLS 或 Pod 间 mTLS |
 
@@ -174,7 +173,7 @@ NetworkPolicy 提供网络访问隔离，不为 HTTP 内容加密。若客户要
 - DNS-01 签发和重复执行行为正确，不覆盖其他 TXT 值；受限网络中的 runner 能完成所需调用。
 - API 与管理证书主机名、用途、信任链和有效期正确；不受信任证书、错误主机名及错误入口 Host 被拒绝。
 - 更新后，实际提供服务的证书指纹与批准版本一致，入口 rollout 和长连接、SSE 等客户必需协议满足要求。
-- 两个Front Door边缘证书、Admin客户端mTLS及两份私有源站TLS分别通过验证；两条PLS连接经过批准，Admin无证书、错误FQDN、过期和吊销证书均被拒绝。
+- 两个Front Door边缘证书及两份私有源站TLS分别通过验证；两条PLS连接经过批准，Admin白名单外来源被WAF拒绝，白名单内来源仍须通过内层登录，错误密码不得放行。
 - 真实 API Token 与 vkey 认证、管理登录和来源隔离通过验证，不能仅靠匿名拒绝测试宣布业务可用。
 - 证书即将到期、签发失败、Key Vault 写入失败、发布失败、CA 信任链变化及可行回退都有明确处理责任和验证结果。
 

@@ -21,6 +21,7 @@ READMES = (
     "docs/litellm-stage7-entra-proxy-domains-2026-09-07.md",
     "docs/customer-migration-guide-zh.md",
     "local_execution/README_ZH.md",
+    "local_execution/stage2-9-guide-zh.md",
     "docs/customer-stage0-acceptance-checklist-zh.md",
     "docs/customer-stage1-acceptance-checklist-zh.md",
     "docs/customer-stage2-acceptance-checklist-zh.md",
@@ -216,7 +217,7 @@ class ProjectDocumentationTests(unittest.TestCase):
         for source in snippets:
             result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
-        for value in ("两个Secret，不是两张新证书", "Microsoft Trusted CA List", "Admin客户端CA公钥链", "上传不需要登录Runner", "客户本机上传", "公有CA签发", "不是已签发证书", "不返回值", "Secret Identifier"):
+        for value in ("两个Secret，不是两张新证书", "Microsoft Trusted CA List", "Stage9来源准入由Front Door WAF", "上传不需要登录Runner", "客户本机上传", "公有CA签发", "不是已签发证书", "不返回值", "Secret Identifier"):
             self.assertIn(value, section)
         for value in ("specific virtual networks and IP addresses", "实际公网出口IPv4", "/32", "Microsoft.KeyVault/vaults/write", "无论上传成功、失败或中断", "Disable public access", "ipRules=[]", "bypass=None", "网络策略拒绝", "certificates.api/admin.secretId", "applied=true", "verified=true"):
             self.assertIn(value, section)
@@ -830,6 +831,31 @@ class ProjectDocumentationTests(unittest.TestCase):
         self.assertIn("原生模式的observability不再依赖auditRuntime", guide)
         self.assertIn("readyForCustomerMigration", guide)
         self.assertIn("原生UI/API受控查询", guide)
+
+    def test_active_admin_edge_docs_use_source_ip_allowlist_not_mtls(self):
+        active = (
+            "README.md", "README_ZH.md", "auth-proxy/README_ZH.md", "deploy/README_ZH.md",
+            "infra/README_ZH.md", "infra/edge/README_ZH.md", "tests/README.md", "tests/README_ZH.md",
+            "docs/customer-deployment-workflows-zh.md", "docs/customer-migration-guide-zh.md",
+            "docs/customer-private-runner-preparation-zh.md", "docs/customer-stage2-acceptance-checklist-zh.md",
+            "docs/litellm-ingress-tls-certificate-design-zh.md", "local_execution/stage2-9-guide-zh.md",
+        )
+        forbidden = (
+            "adminMtls", "admin_mtls_enforcement", "admin_ca_revocation_rotation",
+            "ClientCertificateRequiredAndValidated", "strict-mTLS", "严格mTLS", "Admin客户端CA",
+            "trustedClientCaSecrets", "allowedCertificateFqdns", "2026-08-01-preview",
+        )
+        for name in active:
+            text = (ROOT / name).read_text()
+            with self.subTest(document=name):
+                for value in forbidden:
+                    self.assertNotIn(value, text)
+        for name in ("infra/edge/README_ZH.md", "docs/customer-migration-guide-zh.md", "local_execution/stage2-9-guide-zh.md"):
+            text = (ROOT / name).read_text()
+            with self.subTest(current_contract=name):
+                self.assertIn("adminAllowedCidrs", text)
+                self.assertIn("Prevention", text)
+                self.assertIn("公网出口", text)
 
     def test_audit_costs_describe_native_storage_and_optional_enhancement(self):
         text = (ROOT / "docs/litellm-bom-cost-comparison-zh.md").read_text()

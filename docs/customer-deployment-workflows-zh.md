@@ -245,9 +245,9 @@ Runner到备份的连接可由同一infrastructure workflow的`runner-connectivi
 
 #### Front Door与托管双平面绑定
 
-先部署Stage9禁用流量的edge，再执行runtime的`edge-bind`（Stage9、plan → execute）。动作核对实际Front Door profile、API/Admin route及Admin严格mTLS输出，对两个受管代理或两个原生Traefik业务router设置同一实际`FRONT_DOOR_ID`并分别等待rollout；健康router不要求FDID。回执同时绑定两个namespace的UID与配置哈希，任一平面漂移都会阻止release。动作本身不改DNS。
+先部署Stage9禁用流量的edge，再执行runtime的`edge-bind`（Stage9、plan → execute）。动作核对实际Front Door profile、API/Admin route、Admin WAF Prevention及来源CIDR输出，对两个受管代理或两个原生Traefik业务router设置同一实际`FRONT_DOOR_ID`并分别等待rollout；健康router不要求FDID。回执同时绑定两个namespace的UID与配置哈希，任一平面漂移都会阻止release。动作本身不改DNS。
 
-托管应用后续Stage7/8发布会分别保留已有ID，不会静默移除；不同Front Door ID拒绝覆盖。正式启流量前要求同版本/配置的双平面绑定回执，回执不是独立的持续现场证明，仍须确认实际Pod、FDID拒绝、Admin mTLS、TLS、两条Private Link审批及业务路径。直接访问私有源站时需按批准测试携带正确FDID；它不是秘密，也不能替代客户端证书、企业Token/vkey或网络隔离。
+托管应用后续Stage7/8发布会分别保留已有ID，不会静默移除；不同Front Door ID拒绝覆盖。正式启流量前要求同版本/配置的双平面绑定回执，回执不是独立的持续现场证明，仍须确认实际Pod、FDID拒绝、Admin来源IP门禁、TLS、两条Private Link审批及业务路径。直接访问私有源站时需按批准测试携带正确FDID；它不是秘密，也不能替代WAF来源限制、企业Token/vkey、原生UI密码或网络隔离。
 
 ### Stage4自动私有入口
 
@@ -255,7 +255,7 @@ Runner到新AKS API和ACR的DNS链接由同一基础设施workflow的`stage=4, c
 
 证书存储现在由现有`Customer infrastructure deployment`的`stage=4, component=certificate-vault`提供，先plan再deploy；创建两套证书共用的独立私有Vault、PE/DNS和批准的读写授权，不创建Secret内容，不复用后台业务Vault。客户字段获取、DNS归属、输出地址和部署后人工导入的完整步骤见[迁移手册4-A至4-C](customer-migration-guide-zh.md#4-a-共用证书vault的配置与取值)。配置该组件后Stage5不重复管理Vault DNS；原有独立证书Vault客户可不配置该组件，继续自行负责授权与私网。
 
-手动导入采用[4-C简化路径](customer-migration-guide-zh.md#4-c-部署后手动导入两个secret)：客户本机创建或复用证书并验证，管理员在批准窗口仅允许上传机实际公网出口IPv4访问证书Vault，客户在本机Portal/CLI上传两个PEM Secret，然后立即关闭公网并清除临时IP规则，最后由Runner私网验证。成功、失败或中断都须关闭窗口；无需经Bastion传输私钥或在Runner手工登录上传。此例外不改变IaC默认禁用公网，不开放API/Admin源站或其他Vault，客户策略不允许时继续使用获批私网路径。API自动申请、Admin公有CA源站证书及版本/指纹核验步骤均在4-C；客户端mTLS CA链是Stage9另一个不含私钥的Secret，不能混入此Vault。
+手动导入采用[4-C简化路径](customer-migration-guide-zh.md#4-c-部署后手动导入两个secret)：客户本机创建或复用证书并验证，管理员在批准窗口仅允许上传机实际公网出口IPv4访问证书Vault，客户在本机Portal/CLI上传两个PEM Secret，然后立即关闭公网并清除临时IP规则，最后由Runner私网验证。成功、失败或中断都须关闭窗口；无需经Bastion传输私钥或在Runner手工登录上传。此例外不改变IaC默认禁用公网，不开放API/Admin源站或其他Vault，客户策略不允许时继续使用获批私网路径。API自动申请、Admin公有CA源站证书及版本/指纹核验步骤均在4-C；Stage9的Admin来源门禁配置在Front Door WAF，不进入证书Vault。
 
 在客户配置顶层添加以下结构，替换示例Vault及来源CIDR；CIDR应覆盖实际私网runner和获准维护来源。workflow会把PLS NAT所在的ingress subnet自动加入API和Admin Service/NetworkPolicy，不要求客户手工重复填写，也不允许公网CIDR：
 
@@ -272,7 +272,7 @@ Secret值必须是对应llm-api/llm-admin域名的PEM证书链加未加密私钥
 
 workflow扫描并晋级[固定Traefik镜像](../deploy/private-ingress-image.json)，生成两套2副本、只读非root、无Kubernetes API凭据的文件路由网关。仅暴露私有443，分别转发到API/admin代理；不监听应用namespace、不启用访问正文日志。TLS Secret使用不可变的证书指纹名称，旧证书不自动清理。与之配套的应用发布不要额外创建未受管Ingress。
 
-自动检查源站证书指纹、域名/信任链、错误Host拒绝、独立私有IP及真实Standard LB前端，然后把非秘密输出保存为Stage4部署回执。配置privateIngress后，Stage9的origin从回执分别选择API和Admin前端、核对实际LB状态并拒绝复用；随后创建两条独立PLS。该测试不证明Entra认证、Admin mTLS、全部协议或审计已通过。
+自动检查源站证书指纹、域名/信任链、错误Host拒绝、独立私有IP及真实Standard LB前端，然后把非秘密输出保存为Stage4部署回执。配置privateIngress后，Stage9的origin从回执分别选择API和Admin前端、核对实际LB状态并拒绝复用；随后创建两条独立PLS。该测试不证明Entra/原生登录、Admin WAF来源门禁、全部协议或审计已通过。
 
 ### Stage5数据库身份初始化
 
@@ -339,7 +339,7 @@ AZURE_DATABASE_URL_TEMPLATE是后续应用清单生成器应从部署输出生�
 
 新增application仅改变Stage6及之后指纹，不使Stage5回执失效；proxy/entra仅影响Stage7及之后，auditRuntime仅影响Stage8及之后。配置后不得同时提供MIGRATION_MANIFEST_YAML。Stage7代理按下一节自动生成；Stage8审计专用清单按下文显式配置生成，不可删除配置绕过尚未完成的集成验收。真实Redis续期/CSI/模型权限和负载仍需客户隔离环境测试。
 
-客户无法批准Microsoft Graph应用权限、且实施方也不能在同等租户条件下验证时，可在Stage6显式选择`application.authentication.mode=native`。该路径不部署Stage7：后台Vault新增独立随机`litellm-ui-password`，API通过Front Door且只接受LiteLLM virtual key；Stage9后Admin通过独立Front Door严格mTLS，再使用用户名/密码登录。Master Key不向人工用户分发。Stage9前可从批准私网验证原生UI，edge-bind后私有LB只作为回源，不是日常用户入口。现有AKS Workload Identity、Entra-only PostgreSQL/Redis、Key Vault、API/Admin双LB和原生Spend Logs保留。该路径不包含Entra MFA/Conditional Access、代理guardrail、增强L3或代理collector，必须使用其专属入口、virtual-key、mTLS Admin和Stage9证据，不能把本节Stage7验收结果套用过去。完整命令见[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md#stage6发布新litellm后端)。
+客户无法批准Microsoft Graph应用权限、且实施方也不能在同等租户条件下验证时，可在Stage6显式选择`application.authentication.mode=native`。该路径不部署Stage7：后台Vault新增独立随机`litellm-ui-password`，API通过Front Door且只接受LiteLLM virtual key；Stage9后Admin通过独立Front Door的WAF来源IP白名单，再使用用户名/密码登录。Master Key不向人工用户分发。Stage9前可从批准私网验证原生UI，edge-bind后私有LB只作为回源，不是日常用户入口。现有AKS Workload Identity、Entra-only PostgreSQL/Redis、Key Vault、API/Admin双LB和原生Spend Logs保留。该路径不包含Entra MFA/Conditional Access、代理guardrail、增强L3或代理collector，必须使用其专属入口、virtual-key、Admin公网出口白名单、UI密码和Stage9证据，不能把本节Stage7验收结果套用过去。完整命令见[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md#stage6发布新litellm后端)。
 
 ### Stage7代理身份基础设施
 
@@ -486,11 +486,11 @@ restore-target 从成功的 Stage5平台部署获取新服务器名称，读取�
 | 新AKS节点RG | 自动读取实际AKS nodeResourceGroup | origin支持auto；自定义短名放stage4Aks.nodeResourceGroupName，创建后不可更改 |
 | LB/frontend | private-ingress创建并验证，或客户自管入口提供 | 托管路径从Stage4回执分别读取API/Admin前端并核对真实LB；两者不得复用 |
 | API/Admin PLS Resource ID | origin成功部署的两个输出 | `privateOrigin`和`adminPrivateOrigin`的ID设`auto`可自动读取；两者不得相同 |
-| Admin客户端CA Vault/Secret版本 | 客户PKI与Vault管理员 | 同订阅RBAC Vault的RG/名称从Portal或`az keyvault show`取得；设置`bypass=AzureServices`且可保持公网禁用；CA Secret名称及固定版本从`az keyvault secret show`取得；不提供CA私钥 |
+| Admin批准公网出口CIDR | 客户网络与安全负责人 | 在管理员实际公司网络/VPN/代理路径查询稳定公网出口；按显式CIDR填入`adminAllowedCidrs`并核对WAF live规则，不使用Laptop私网地址 |
 | 审计Vault/Key | audit配置中预定名称，由audit-foundation创建 | purge保护、HSM RSA key、PE及受信Azure Storage访问；重用企业CMK时跳过foundation并独立审查 |
 | 审计writer/reader/retention/recovery | audit-foundation自动创建四个不同UAMI | 对应PrincipalId设auto；recovery权限需显式配置后部署audit；不能合并身份或用同一用户替代 |
 | Entra API/admin应用、角色与策略 | 租户管理员批准创建 | 客户认证策略，不自动赋予全租户权限 |
-| TLS证书、业务域名/DNS | 客户DNS/PKI负责人 | API/Admin边缘证书、两份私有源站证书、Admin客户端证书链与两条CNAME；不是AKS dnsPrefix |
+| TLS证书、业务域名/DNS | 客户DNS/PKI负责人 | API/Admin边缘证书、两份私有源站证书与两条CNAME；不是AKS dnsPrefix。Admin来源CIDR由网络/安全负责人另行批准 |
 
 审计Vault默认deny、启用可信Azure服务例外供Storage CMK，启用purge protection；该例外不是任意公网客户端放行。需网络合规Owner批准和实际负向验证。该Vault不同于应用凭据Vault。不要因只有一位运维就合并应用身份或审计职责权限。
 
@@ -671,6 +671,6 @@ DNS-01只向准确挑战TXT添加自身值并以ETag条件写入，清理时只�
 
 ### 入口隔离检查
 
-Customer gateway isolation checks不使用客户Token、客户端证书私钥或真实模型输入。它逐DNS地址验证API未认证请求和错误Host被拒绝；Admin域必须解析到公网边缘地址，且无客户端证书时出现明确TLS证书要求或HTTP拒绝。普通DNS、超时或不明TLS错误不能冒充mTLS成功。报告不保留响应正文/Token，失败使workflow失败，但`stageAccepted`始终为false：这只是负向入口检查，不覆盖持证管理员登录、Codex、对象归属、审计完整性或数据恢复。
+Customer gateway isolation checks不使用客户Token、UI密码或真实模型输入。它逐DNS地址验证API未认证请求和错误Host被拒绝；Admin域必须解析到公网边缘地址，从未批准来源访问时应返回HTTP 403。普通DNS错误、超时或不明TLS错误不能冒充来源IP门禁成功。报告不保留响应正文/Token，失败使workflow失败，但`stageAccepted`始终为false：这只是负向入口检查，不覆盖白名单内管理员登录、Codex、对象归属、审计完整性或数据恢复。
 
 两种部署模式另有离线跨阶段合同测试，实际执行生成pending、拒绝未通过检查、记录合成结果、打包artifact和下一阶段读取。合成测试中的passed只用于测试fixture，绝不写入客户账本。全套真实场景执行器与各阶段技术检查的实现仍是未完成代码项。

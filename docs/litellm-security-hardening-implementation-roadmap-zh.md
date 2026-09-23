@@ -103,7 +103,7 @@ flowchart LR
 - 先验证 Private Endpoint 和私网 DNS，再禁用模型服务公网访问；
 - 先建立日志质量和统一 Trace ID，再建设 Sentinel 检测；
 - 先证明协议级 Guardrail 覆盖，再启用强制阻断；
-- 先完成内部应用和长连接回归，再将 WAF 切换到 Prevention；
+- API WAF先完成内部应用和长连接回归，再按发布phase从Detection切换到Prevention；Admin WAF从创建起固定Prevention，以确保来源IP白名单实际阻断；
 - 先完成目标版本兼容性验证，再执行数据库 schema migration 和生产升级。
 
 ## 4. 阶段 0：现状冻结、备份与回退基线
