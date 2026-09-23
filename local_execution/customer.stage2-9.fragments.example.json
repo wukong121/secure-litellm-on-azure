@@ -350,11 +350,11 @@
           "edge": {
             "privateOrigin": {
               "privateLinkServiceId": "auto",
-              "privateLinkLocation": "REPLACE_AZURE_REGION"
+              "privateLinkLocation": "REPLACE_FRONT_DOOR_PRIVATE_LINK_REGION"
             },
             "adminPrivateOrigin": {
               "privateLinkServiceId": "auto",
-              "privateLinkLocation": "REPLACE_AZURE_REGION"
+              "privateLinkLocation": "REPLACE_FRONT_DOOR_PRIVATE_LINK_REGION"
             },
             "adminAllowedCidrs": "REPLACE_ADMIN_ALLOWED_PUBLIC_CIDRS",
             "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",

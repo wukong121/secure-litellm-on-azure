@@ -23,8 +23,8 @@ def customer_config():
         "legacy": {"resourceGroup": "rg-legacy", "aksClusterName": "old-aks", "namespace": "litellm", "postgresPvc": "pg-data"},
         "target": {"resourceGroup": target_group},
         "parameters": {"platform": {"containerRegistryName": "customerregistry", "logAnalyticsWorkspaceName": "customer-logs", "stage4Network": {"virtualNetworkName": "target-vnet"}, "stage4Aks": {"name": "new-aks"}}, "monitoring": {"logAnalyticsWorkspaceName": "legacy-logs"}, "edge": {
-            "privateOrigin": {"privateLinkServiceId": target_id + "/providers/Microsoft.Network/privateLinkServices/api", "privateLinkLocation": "westus"},
-            "adminPrivateOrigin": {"privateLinkServiceId": target_id + "/providers/Microsoft.Network/privateLinkServices/admin", "privateLinkLocation": "westus"},
+            "privateOrigin": {"privateLinkServiceId": target_id + "/providers/Microsoft.Network/privateLinkServices/api", "privateLinkLocation": "westus3"},
+            "adminPrivateOrigin": {"privateLinkServiceId": target_id + "/providers/Microsoft.Network/privateLinkServices/admin", "privateLinkLocation": "westus3"},
             "adminAllowedCidrs": ["20.30.40.50/32"],
             "logAnalyticsWorkspaceName": "target-logs",
         }},
@@ -227,6 +227,11 @@ class CustomerMigrationTests(unittest.TestCase):
             invalid["parameters"]["edge"]["adminAllowedCidrs"] = value
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parameters_for(invalid, 9, "edge")
+
+    def test_edge_rejects_origin_region_not_supported_by_front_door_private_link(self):
+        self.config["parameters"]["edge"]["privateOrigin"]["privateLinkLocation"] = "westus"
+        with self.assertRaisesRegex(ValueError, "Front Door Private Link location is unsupported"):
+            parameters_for(self.config, 9, "edge")
 
     def test_future_admin_allowlist_placeholder_does_not_block_earlier_stages(self):
         self.config["parameters"]["edge"]["adminAllowedCidrs"] = ["REPLACE_ADMIN_ALLOWED_PUBLIC_CIDR"]

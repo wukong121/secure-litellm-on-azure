@@ -17,6 +17,14 @@ from scripts.render_stage7_domain import domain_hosts, render
 from scripts.workflow_diagnostics import command_failure_summary, diagnostic_exit
 
 ROOT = Path(__file__).resolve().parents[1]
+FRONT_DOOR_PRIVATE_LINK_LOCATIONS = frozenset({
+    "australiaeast", "brazilsouth", "canadacentral", "centralindia", "centralus",
+    "chinaeast3", "chinanorth3", "eastasia", "eastus", "eastus2", "francecentral",
+    "germanywestcentral", "japaneast", "koreacentral", "northeurope", "norwayeast",
+    "southafricanorth", "southcentralus", "southeastasia", "swedencentral", "uaenorth",
+    "uksouth", "usgovarizona", "usgovtexas", "usgovvirginia", "usnateast", "usnatwest",
+    "usseceast", "ussecwest", "westeurope", "westus2", "westus3",
+})
 STAGES = (
     ("Baseline and recoverable backup", ("inventory", "backup_restore", "key_salt_recovery", "protocol_baseline")),
     ("Legacy minimum hardening", ("legacy_health", "alerts_received", "rollback_snapshot")),
@@ -207,6 +215,14 @@ def admin_source_cidrs(value):
     return sorted(networks)
 
 
+def front_door_private_link_location(value):
+    require(
+        isinstance(value, str) and value in FRONT_DOOR_PRIVATE_LINK_LOCATIONS,
+        "Azure Front Door Private Link location is unsupported; select a supported managed Private Link region independently from the origin region",
+    )
+    return value
+
+
 def validate_config(config, environment):
     require(isinstance(config, dict) and config.get("schemaVersion") == 1, "Unsupported customer configuration")
     mode = deployment_mode(config)
@@ -281,6 +297,11 @@ def validate_config(config, environment):
     edge = config["parameters"].get("edge")
     if edge is not None and "adminAllowedCidrs" in edge and configured(edge["adminAllowedCidrs"]):
         admin_source_cidrs(edge["adminAllowedCidrs"])
+    if edge is not None:
+        for origin_name in ("privateOrigin", "adminPrivateOrigin"):
+            origin = edge.get(origin_name)
+            if isinstance(origin, dict) and configured(origin.get("privateLinkLocation")):
+                front_door_private_link_location(origin["privateLinkLocation"])
     certificate_vault = config["parameters"].get("certificate-vault")
     if certificate_vault is not None and (configured(certificate_vault) or "privateIngress" in config):
         from scripts.certificate_vault import certificate_vault_parameters
@@ -422,6 +443,8 @@ def parameters_for(config, stage, component):
         parameters["deployPrivateOrigin"] = True
     elif component == "edge":
         parameters["adminAllowedCidrs"] = admin_source_cidrs(parameters["adminAllowedCidrs"])
+        for origin_name in ("privateOrigin", "adminPrivateOrigin"):
+            parameters[origin_name]["privateLinkLocation"] = front_door_private_link_location(parameters[origin_name]["privateLinkLocation"])
         parameters.update(deployEdge=True, enableApiTraffic=False, enableAdminTraffic=False, environmentName=config["environment"], baseDomain=config["baseDomain"], wafMode="Detection")
     if component not in {"edge", "aks-ingress-role"}:
         parameters["location"] = config["location"]

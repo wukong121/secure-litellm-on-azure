@@ -110,11 +110,11 @@
     "edge": {
       "privateOrigin": {
         "privateLinkServiceId": "REPLACE_API_PLS_RESOURCE_ID",
-        "privateLinkLocation": "REPLACE_AZURE_REGION"
+        "privateLinkLocation": "REPLACE_FRONT_DOOR_PRIVATE_LINK_REGION"
       },
       "adminPrivateOrigin": {
         "privateLinkServiceId": "REPLACE_ADMIN_PLS_RESOURCE_ID",
-        "privateLinkLocation": "REPLACE_AZURE_REGION"
+        "privateLinkLocation": "REPLACE_FRONT_DOOR_PRIVATE_LINK_REGION"
       },
       "adminAllowedCidrs": ["REPLACE_ADMIN_ALLOWED_PUBLIC_CIDR"],
       "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE",

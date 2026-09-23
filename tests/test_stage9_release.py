@@ -16,8 +16,8 @@ from scripts.preview_stage9 import preview
 def evidence_config(phase="canary"):
     return {
         "phase": phase, "baseDomain": "customer.test.invalid", "environmentName": "test",
-        "privateOrigin": {"privateLinkServiceId": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/synthetic/providers/Microsoft.Network/privateLinkServices/api", "privateLinkLocation": "westus"},
-        "adminPrivateOrigin": {"privateLinkServiceId": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/synthetic/providers/Microsoft.Network/privateLinkServices/admin", "privateLinkLocation": "westus"},
+        "privateOrigin": {"privateLinkServiceId": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/synthetic/providers/Microsoft.Network/privateLinkServices/api", "privateLinkLocation": "westus3"},
+        "adminPrivateOrigin": {"privateLinkServiceId": "/subscriptions/11111111-1111-4111-8111-111111111111/resourceGroups/synthetic/providers/Microsoft.Network/privateLinkServices/admin", "privateLinkLocation": "westus3"},
         "adminAllowedCidrs": ["20.30.40.50/32"],
         "logAnalyticsWorkspaceName": "synthetic-logs", "frontDoorId": "22222222-2222-4222-8222-222222222222",
         "wafMode": "Prevention" if phase == "production" else "Detection", "rateLimitPerMinute": 600, "adminRateLimitPerMinute": 120,
