@@ -857,6 +857,22 @@ class ProjectDocumentationTests(unittest.TestCase):
                 self.assertIn("Prevention", text)
                 self.assertIn("公网出口", text)
 
+    def test_stage9_guides_separate_parallel_canary_from_optional_final_migration(self):
+        guides = (
+            "docs/customer-migration-guide-zh.md",
+            "local_execution/stage2-9-guide-zh.md",
+        )
+        for name in guides:
+            text = (ROOT / name).read_text()
+            with self.subTest(document=name):
+                for required in (
+                    "并行canary", "不要求旧系统停写", "只在备份时点一致", "不会持续同步",
+                    "独立数据库", "virtual key", "可选最终迁移", "旧环境退役", "第三方DNS",
+                ):
+                    self.assertIn(required, text)
+                self.assertNotIn("第5节未完成时不得启用业务流量", text)
+                self.assertNotIn("未完成人工最终迁移方案时，只能执行", text)
+
     def test_audit_costs_describe_native_storage_and_optional_enhancement(self):
         text = (ROOT / "docs/litellm-bom-cost-comparison-zh.md").read_text()
         section = text.split("## 6. 员工与 Agent 上下文审计成本影响", 1)[1].split("## 7.", 1)[0]

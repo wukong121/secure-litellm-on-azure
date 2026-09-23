@@ -2,19 +2,19 @@
 
 > 核对日期：2026-09-23。本文是按当前workflow输入及控制代码核对的主操作手册，不是客户云上全流程已经验收的证明。
 >
-> 适用：已有LiteLLM on AKS，先加固旧环境，再并行新建、迁移、验证、切流和停旧。示例统一使用GitHub Environment `test`；客户实际用`prod`时须整套一致替换，不混用环境。
+> 适用：已有LiteLLM on AKS，先加固旧环境，再并行新建、迁移、验证并通过独立新域名试点；最终迁移和停旧按客户目标另行批准。示例统一使用GitHub Environment `test`；客户实际用`prod`时须整套一致替换，不混用环境。
 >
 > 一期审计沿用2026-09-10的原生Spend Logs选择：针对高用量用户进行获批的工作用途抽查，原生Logs为主、私网PG只读查询补充。不是所有UI页面、所有Codex协议或独立L3平台都必须首发；必要管理操作和实际首发客户端仍须通过验证。
 >
-> 最终停写、最终目标库选择及切流后数据回退尚未形成完整workflow编排，见第5节。不能把未完成部分写成可以直接点击的按钮，不能用假passed跨过门禁。
+> 并行canary可以把已验收备份的恢复结果作为新环境基线，不要求旧系统停写；新旧数据库只在备份时点一致，之后不会持续同步。最终停写、最终目标库选择及跨库数据回退尚未形成完整workflow编排，仅在客户要求无损承接后续数据时按第5节执行。不能把未完成部分写成可以直接点击的按钮，不能用假passed跨过门禁。
 
-阅读顺序：第1节辨认workflow → 第2节准备配置/身份/Runner → 第3节学会plan批准与附件审核 → 第4节逐Stage执行 → 第5节最终迁移 → 第6节排错。资源实现细节和可选增强流程见[部署参考](customer-deployment-workflows-zh.md)，机器准备见[Runner指南](customer-private-runner-preparation-zh.md)。客户资源值、日志正文和现场记录只保存在受控位置，不填进本文或公共Git。
+阅读顺序：第1节辨认workflow → 第2节准备配置/身份/Runner → 第3节学会plan批准与附件审核 → 第4节逐Stage执行并发布并行canary → 第5节按需最终迁移/退役 → 第6节排错。资源实现细节和可选增强流程见[部署参考](customer-deployment-workflows-zh.md)，机器准备见[Runner指南](customer-private-runner-preparation-zh.md)。客户资源值、日志正文和现场记录只保存在受控位置，不填进本文或公共Git。
 
 客户无法运行GitHub Actions时，不混用本手册的run ID、Environment和artifact步骤；既有网关迁移可改走独立的[Stage0–9本地手工执行包](../local_execution/README_ZH.md)。本地路径使用自己的plan哈希、UAMI/现有Azure会话及客户Cosign密钥，当前不支持greenfield；Stage7可延期，但延期期间不能发布Stage8应用或启用Stage9流量。
 
 ## 1. 迁移原则与入口
 
-采用并行新建、隔离验证、批准客户端试点、最终切流。旧网关、数据库、密钥/Salt和VMSS业务身份在回退窗口结束前保留。不得让1.98新版本自动迁移旧生产数据库；新旧网关不能无计划地同时写一个数据库。
+采用并行新建、隔离验证和批准客户端试点。旧域名继续指向旧系统，新域名只交给少量获批客户端；旧网关、数据库、密钥/Salt和VMSS业务身份保留到单独批准的退役阶段。不得让1.98新版本自动迁移旧生产数据库；新旧网关各自使用独立数据库，不得共用同一个数据库。若以后要求无损承接备份后的新增数据，再进入可选最终迁移，而不是把它作为canary前置条件。
 
 **两种“阶段”不要混淆：** 架构阶段0=本手册Stage0–1（可恢复基线和旧环境加固）；架构阶段1=Stage2–9（决策、隔离新建、迁移与发布）。GitHub表单的`stage`填写仓库编号，不是架构阶段号。每个Stage完成验收后才能执行下一Stage的变更。
 
@@ -1532,9 +1532,9 @@ proxy-foundation创建身份及Vault，不等于已生成登录凭据；entra-ap
 
 **阶段验收：** stage=8 draft/confirm；原生模式为`native_spend_logs`、`native_audit_access`、`native_retention_recovery`、`guardrail_scope`，加`telemetry_received`或`telemetry_disabled`（取决于是否配置observability）。不是要求全部UI页面兼容；授权查询及客户实际使用的必要能力未通过仍不能切流。
 
-### 阶段9：试点、切流与回退窗口
+### 阶段9：并行试点、可选最终迁移与退役
 
-**开始前：** Stage0–8均已验收；已完成必要客户端、管理操作和日志抽查；最终数据同步/停写/回退方案已批准。Stage9前半可准备禁用流量的边缘资源，但第5节未完成时不得启用业务流量。
+**开始前：** Stage0–8均已验收；已完成必要客户端、管理操作和日志抽查；客户已验收目标库来自哪个备份时间点，并接受新旧数据库在此后独立写入。并行canary不要求旧系统停写或完成第5节，但须有停止试点方案、独立试点virtual key和获批客户端名单。只有客户要求无损承接备份后的旧系统新增数据时，才把第5节作为后续production/退役前置条件。
 
 **客户JSON：** origin的VNet/ingress子网沿用目标网络。使用托管privateIngress时，`apiLoadBalancer`和`adminLoadBalancer`的`resourceGroupName/name/frontendName`均可填`auto`；代码从Stage4回执及实际LB分别解析两个前端并拒绝复用。edge的`privateOrigin`和`adminPrivateOrigin`可分别把PLS ID填`auto`，location填批准区域。
 
@@ -1575,7 +1575,7 @@ native canary要求prepare检查加企业认证、实际协议、数据库恢复
 | native canary | native_virtual_key_acl、native_admin_password_login、required_protocol_matrix、database_restore、waf_detection_review、approved_pilot_clients、native_spend_logs、native_audit_access、native_retention_recovery；启用collector用telemetry_alerts，否则telemetry_disabled |
 | native production | canary_slo、waf_prevention_review、dns_cutover_and_rollback |
 
-只有第5节的最终数据及发布条件满足后才执行下列行。每次phase变化先更新已审核MIGRATION_RELEASE_JSON并重新plan；普通S9-03的禁用计划不能批准启流量。
+canary报告及其实际证据满足后即可执行下列S9-07/08，不需要先完成第5节。每次phase变化先更新已审核MIGRATION_RELEASE_JSON并重新plan；普通S9-03的禁用计划不能批准启流量。若以后进入无损production迁移，再先完成第5节并使用production报告。
 
 | 步骤 | workflow显示名称 | stage | component或action | operation | approved_run_id | confirm_environment |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -1584,15 +1584,17 @@ native canary要求prepare检查加企业认证、实际协议、数据库恢复
 | S9-09 | Customer private runtime operations | 9 | action=dns-publish | plan | 留空；仅已批准Azure DNS路径 | 留空 |
 | S9-10 | Customer private runtime operations | 9 | action=dns-publish | execute | S9-09的plan ID | test |
 
-启流量并不自动限制canary用户，试点名单、Admin公网出口、virtual key和UI凭据必须实际受控。DNS动作支持同订阅已委派Azure DNS中的`llm-api.<baseDomain>`与`llm-admin.<baseDomain>`两条CNAME，分别指向对应endpoint；需提前配置顶层`dns={zoneResourceId,ttl}`和runtime DNS写权限，TTL范围60–3600秒。两条记录共享一个带ETag的检查点；中途失败可从已知前态/目标态继续，但任何第三方值都会阻止自动继续或回退。已有正式记录不能为了通过检查提前切换。其他DNS提供方走同等双记录、同窗口的人工变更，不临时修改脚本猜API。
+启流量并不自动限制canary用户，试点名单、Admin公网出口、virtual key和UI凭据必须实际受控。DNS动作支持同订阅已委派Azure DNS中的`llm-api.<baseDomain>`与`llm-admin.<baseDomain>`两条CNAME，分别指向对应endpoint；需提前配置顶层`dns={zoneResourceId,ttl}`和runtime DNS写权限，TTL范围60–3600秒。两条记录共享一个带ETag的检查点；中途失败可从已知前态/目标态继续，但任何第三方值都会阻止自动继续或回退。并行canary新增这两个域名，不替换旧系统域名。其他DNS提供方由客户DNS管理员人工新增等效双记录，不运行Azure DNS动作，也不临时修改脚本猜API。
 
-DNS回退为同runtime、stage=9、action=dns-rollback，另跑plan/execute并引用恢复plan ID；它按检查点恢复API/Admin两条记录，不是数据库回退。canary验收通过后，生产报告使用phase=production/wafMode=Prevention，重复S9-07/08；若DNS已指向同一获准目标，不为重复操作而重做DNS切换。
+DNS回退为同runtime、stage=9、action=dns-rollback，另跑plan/execute并引用恢复plan ID；它按检查点恢复API/Admin两条记录，不是数据库回退。第三方DNS按客户变更记录撤销新CNAME。停止试点时先撤销试点key并让客户端恢复旧API域名；新库独有数据不会自动并回旧库。canary验收通过后，可继续维持并行运行；只有客户决定正式迁移时，生产报告才使用phase=production/wafMode=Prevention并重复S9-07/08。若DNS已指向同一获准目标，不为重复操作而重做DNS变更。
 
-候选入口实际就绪后运行`Customer gateway isolation checks`，environment=test：API匿名/错误Host须拒绝；Admin从不在白名单中的公网出口须得到HTTP 403。从白名单内出口继续验证错误UI密码拒绝和正确Entra或原生登录，并确认共享NAT内的来源准入不被误写成用户身份认证。负向探针不证明业务成功。**阶段验收：** stage=9 draft/confirm；`enabled_what_if`、`origin_tls_private_link`、`pilot_regression`、`rollback_rehearsal`，加single_operator_release或dual_owner_release。stage acceptance不能替代MIGRATION_RELEASE_JSON及最终停写/数据核验。
+候选入口实际就绪后运行`Customer gateway isolation checks`，environment=test：API匿名/错误Host须拒绝；Admin从不在白名单中的公网出口须得到HTTP 403。从白名单内出口继续验证错误UI密码拒绝和正确Entra或原生登录，并确认共享NAT内的来源准入不被误写成用户身份认证。负向探针不证明业务成功。**阶段验收：** stage=9 draft/confirm；`enabled_what_if`、`origin_tls_private_link`、`pilot_regression`、`rollback_rehearsal`，加single_operator_release或dual_owner_release。stage acceptance不能替代MIGRATION_RELEASE_JSON、备份基线核验或后续可选最终迁移的数据对账。
 
-## 5. 最终停写、切流、观察和停旧
+## 5. 可选最终迁移、观察和旧环境退役
 
-**本节是批准后必须完成的迁移检查点，不是现有workflow已覆盖的按钮清单。** 目前最终写入冻结、最终空目标库选择/切换及数据回退编排尚未完整实现。不能拿Stage0旧时间点备份加一次DNS更新当作无损迁移；未补齐并演练下面步骤时，停在Stage9禁用流量准备，不执行S9-07及之后的启流量操作。
+本节不阻止独立新域名canary。客户可以明确接受已验收备份作为新环境起点，让新旧系统使用不同域名和独立数据库并行运行；这种选择必须记录备份时间点和数据分叉边界，不能声称两边持续一致。试点不达标时撤销新key、恢复客户端旧API配置并停用新入口，不需要覆盖旧库。
+
+只有客户要求新环境无损承接备份时点之后的旧系统新增数据时，才执行下面的最终迁移检查点。目前最终写入冻结、最终空目标库选择/切换及数据回退编排尚未完整实现，不能拿Stage0旧时间点备份加一次DNS更新当作无损迁移，也不能直接覆盖已有试点写入的目标库。
 
 | 顺序 | 责任/执行方式 | 继续条件 |
 | --- | --- | --- |
@@ -1600,11 +1602,13 @@ DNS回退为同runtime、stage=9、action=dns-rollback，另跑plan/execute并�
 | F-02 最终写入冻结 | **尚无完整workflow动作**；实施人员须提供并批准实际入口停写、排空及后台写入停止步骤 | 旧推理、管理、预算和后台写入均已停止，保留原恢复状态 |
 | F-03 最终备份和目标恢复 | **最终目标选择/接线待补齐**；DBA明确干净最终库，用批准备份恢复/迁移流程核验 | 不能对非空演练库直接重复restore-target，不自动DROP；保留原Master/Salt |
 | F-04 数据/功能核对 | 对账用户/Team/Key/预算/模型配置和必要历史密文；用真实Codex/SDK和管理路径测试 | 新库包含最终数据；认证、权限、正常请求及正文查询符合一期范围 |
-| F-05 批准切流 | 完成本节前置后，按S9-07/08发布edge，再按S9-09/10或批准人工DNS变更 | 新系统独占业务写入，不随机将用户分到两个不同步的预算库 |
+| F-05 批准正式迁移 | 完成本节前置后，以production报告重复S9-07/08；新CNAME已指向同一edge时不重复发布DNS | 新系统独占后续业务写入，不随机将用户分到两个不同步的预算库 |
 | F-06 稳定观察 | 人工确定观察期及频率，检查真实业务错误/延迟/预算、PG连接、正文写入、用户反馈 | 覆盖实际业务使用，未达到通过标准不宣布迁移完成 |
 | F-07 停旧 | **当前无stop-legacy workflow按钮**；Owner按单独批准的停用方案执行并验证 | 新系统不依赖旧资源；保留旧PG/PVC、备份及密钥恢复材料，停用不是删除 |
 
-切流前失败继续使用旧系统；窗口内新库未产生独有业务写入时，可按已演练步骤恢复旧入口/旧写入。新库已产生独有Key、预算或日志等写入后，先暂停并对账，再决定修复新系统或数据回退；**只改DNS不保证无损回退**。不混用新旧schema，不自动跨schema回迁。
+若客户不要求最终数据合并，可跳过F-01至F-05，在足够长的并行观察后单独进入F-07；退役前仍须确认所有计划迁移的客户端已改用新域名、旧入口无请求/写入，并决定旧库中的Key、预算、配置和日志如何归档。停止旧AKS应先于资源删除，删除须另立变更。
+
+正式迁移窗口前失败继续使用旧系统；窗口内新库未产生独有业务写入时，可按已演练步骤恢复旧入口/旧写入。新库已产生独有Key、预算或日志等写入后，先暂停并对账，再决定修复新系统或数据回退；**只改DNS不保证无损回退**。不混用新旧schema，不自动跨schema回迁。
 
 不把本次演练中的手工旧监控清理推广成客户前置步骤。现有工作区、App Insights、DCR、告警、网络/共享模型必须先查依赖；没有逐项授权不删除。删除旧RG、清理日志正文或移除共享身份是另一项变更，不是workflow成功后的自动收尾。
 
