@@ -13,8 +13,8 @@
 **第一阶段审计决策（2026-09-10）**：采用原生 Spend Logs 将获批的Prompt/Response保存在私有PostgreSQL。自建L3采集、正文Blob/HSM及恢复治理服务是可选增强项，不再作为所有客户的首发前提。当前配置仍关闭正文，发布、受控查询和阶段证据门禁尚待适配；详见[基础版方案](docs/litellm-content-audit-phase1-customer-brief-zh.md)及[部署指南](docs/customer-deployment-workflows-zh.md)，不得通过跳过现有门禁启用。
 
 ```text
-API客户端 --------> llm-api.<客户域名>   -> API Front Door endpoint / WAF ------> API PLS -> 私有API入口
-持客户证书的管理员 -> llm-admin.<客户域名> -> Admin Front Door endpoint / mTLS/WAF -> Admin PLS -> 私有Admin入口
+API客户端 --------> llm-api.<客户域名>   -> API Front Door endpoint / WAF ------------> API PLS -> 私有API入口
+批准公网出口的管理员 -> llm-admin.<客户域名> -> Admin Front Door / WAF来源IP白名单 -> Admin PLS -> 私有Admin入口
                                                                                                   |
                                                                                      Private AKS上的LiteLLM
                                                                                                   |
@@ -28,7 +28,7 @@ API客户端 --------> llm-api.<客户域名>   -> API Front Door endpoint / WAF
 | 领域 | 设计与实现范围 |
 | --- | --- |
 | 网络隔离 | Private AKS、Private Endpoint/DNS、受控出口和默认拒绝网络策略 |
-| 身份授权 | API/admin独立边缘与私有回源；Admin强制客户端证书，内层使用Entra或原生管理员登录；Workload Identity及客户自有授权逻辑 |
+| 身份授权 | API/admin独立边缘与私有回源；Admin由WAF Prevention限制批准公网出口，内层使用Entra或原生管理员登录；Workload Identity及客户自有授权逻辑 |
 | 数据与秘密 | Key Vault/CSI、托管PostgreSQL和Redis模板、备份与恢复控制 |
 | 运行基线 | 固定镜像digest、非Root/只读容器、高可用及路由组件 |
 | 审计与观测 | 第一阶段原生Spend Logs留痕（接线待适配）、元数据监控；L3、Trace及Guardrail组件按需选用 |

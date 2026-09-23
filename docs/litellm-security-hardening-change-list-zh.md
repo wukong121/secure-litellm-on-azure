@@ -151,7 +151,7 @@ scripts/
 - 创建 Private Link Service，并将 Front Door origin 通过 Private Link 接入；
 - 删除或封禁现有 ingress 公网 IP，验证源站不可绕过；
 - 单独配置 WebSocket、SSE、长请求和文件上传路由参数；
-- WAF 先 Detection 观测，再逐规则切换 Prevention；
+- API WAF先Detection观测，再逐规则切换Prevention；Admin WAF固定Prevention并按批准公网出口CIDR阻断未批准来源；
 - Front Door、WAF 和源站访问日志发送到 Log Analytics。
 
 **内网模式替代项**：

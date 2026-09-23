@@ -16,7 +16,7 @@
 | 入口 | 用途 | 认证 | 网络 |
 | --- | --- | --- | --- |
 | `llm-api.<客户域名>` | 批准的推理API | Entra access token，逐身份映射内部Virtual Key | Front Door/WAF经Private Link到独立私有API ingress，阶段9完成入口建设 |
-| `llm-admin.<客户域名>` | 管理OIDC登录和批准的管理API | 独立OIDC Code + PKCE、App Role、短会话和CSRF | 独立私有admin ingress与内部DNS，不配置公网数据面路由 |
+| `llm-admin.<客户域名>` | 管理OIDC登录和批准的管理API | 独立OIDC Code + PKCE、App Role、短会话和CSRF | 截至Stage7仅有独立私有admin ingress与内部DNS；Stage9在此基础上增加独立Admin Front Door endpoint、PLS和WAF来源IP门禁 |
 
 当前验证环境的主域名已确认，保存在被Git忽略的`auth-proxy/domain.local.json`的`baseDomain`中。客户环境通过自己的`baseDomain`参数替换，不与当前验证域名绑定。公共模板继续使用`llm-api.example.com`和`llm-admin.example.com`，避免把个人环境写入通用方案。
 

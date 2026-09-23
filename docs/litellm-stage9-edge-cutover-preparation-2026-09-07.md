@@ -1,6 +1,8 @@
 # 阶段9：边缘入口、试点与切流准备
 
-> **历史记录：** 本文记录2026-09-07的API-only边缘决策。2026-09-22当前实现已改为API/Admin独立endpoint、双PLS和Admin严格mTLS；执行以[当前迁移指南](customer-migration-guide-zh.md#阶段9试点切流与回退窗口)及[边缘模块说明](../infra/edge/README_ZH.md)为准。本文中的“Admin不进入Front Door”不再是现行要求。
+> **历史记录：** 本文记录2026-09-07的API-only边缘决策。当前实现已改为API/Admin独立endpoint、双PLS、Admin WAF来源IP白名单和内层登录；执行以[当前迁移指南](customer-migration-guide-zh.md#阶段9试点切流与回退窗口)及[边缘模块说明](../infra/edge/README_ZH.md)为准。本文中的“Admin不进入Front Door”不再是现行要求。
+
+> **禁止将下文参数、WAF模式或单API拓扑用于当前部署。** 下文的Detection均指当时的API-only设计；当前Admin WAF从创建起固定Prevention，现行字段和证据名称只以链接的当前指南为准。
 
 > 2026-09-10审计范围更新：基础版已选择原生Spend Logs，自建L3按需选用。本文保留历史发布契约与检查，不能把旧L3条件直接视为基础版最终清单；代码中的前序证据和release检查尚待按审计模式适配，禁止跳过或伪造通过。原生正文/查询/容量/留存/故障及数据库回退、身份和协议仍需验收，详见[当前迁移指南](customer-migration-guide-zh.md)。
 
@@ -13,7 +15,7 @@
 | 项目 | 实现 | 默认状态 |
 | --- | --- | --- |
 | Front Door Premium | 单profile/endpoint、API自定义域、HTTPS私有origin | 不创建，流量开关关闭 |
-| WAF | Microsoft DRS 2.1、Bot Manager 1.1、非POST规则、IP速率规则、日志scrubbing | Detection；不声称阻断生效 |
+| WAF | Microsoft DRS 2.1、Bot Manager 1.1、非POST规则、IP速率规则、日志scrubbing | 历史API-only设计为Detection；不代表当前Admin WAF模式 |
 | 入口路径 | Chat、Responses、Embeddings的6个精确路径 | 无`/*`推理兜底、无管理/健康公网route |
 | 回源 | HTTPS、证书名校验、源站Host为llm-api、PLS托管连接 | 连接需手工审批 |
 | PLS | 仅引用已存在的API Standard internal LB frontend | 不创建、不接管LB/controller |
@@ -60,9 +62,9 @@ API代理额外要求配置的Front Door ID，缺失/不同/重复Header拒绝�
 
 | phase | 流量 | WAF | 需要的主要证据 |
 | --- | --- | --- | --- |
-| prepare | 关闭 | Detection | 私有TLS、源站绕过拒绝、admin私网隔离、诊断隐私、PLS批准、回退计划 |
-| canary | 批准客户端试点 | Detection | 再加Entra/后端ACL、阶段8采集架构、L3治理恢复、实际协议矩阵、数据库恢复、遥测告警、WAF评估和试点客户端 |
-| production | 允许提出生产切流计划 | Prevention | 再加试点SLO、Prevention评审、DNS切流/回退证据 |
+| prepare | 关闭 | 历史API WAF Detection | 私有TLS、源站绕过拒绝、admin私网隔离、诊断隐私、PLS批准、回退计划 |
+| canary | 批准客户端试点 | 历史API WAF Detection | 再加Entra/后端ACL、阶段8采集架构、L3治理恢复、实际协议矩阵、数据库恢复、遥测告警、WAF评估和试点客户端 |
+| production | 允许提出生产切流计划 | 历史API WAF Prevention | 再加试点SLO、Prevention评审、DNS切流/回退证据 |
 
 每项检查需要passed、report和近7天observedAt；变更工单及两个不同审批Owner必填。证据是受控流程提交的attestation，脚本不会鉴别报告真实性、验证工单签名或代替Entra PIM。Azure RBAC和GitHub Environment审批仍需独立执行；直接编辑Bicep绕过脚本的权限应被限制。
 
@@ -77,7 +79,7 @@ prepare要求的证据可来自先完成的PLS/origin隔离测试；尚无Front 
 3. 仅给批准客户端配置新base URL，API客户端App ID及逐主体binding控制试点范围。不得把客户端提交的Header当作灰度授权。
 4. 不把旧公网AKS作为Front Door fallback origin，不将不同schema/身份/审计状态的两套环境随机分流。当前只有一个private origin，未实现按权重百分比灰度。
 5. 对比成功率、429/5xx、upstream attempts、TTFT、缓存率、成本、审计缺口和权限负向测试；观察窗口与阈值由业务Owner批准。任何权限绕过或未批准审计缺口立即停止试点。
-6. WAF先Detection，评审后独立窗口切Prevention，再计划更大范围客户端迁移或生产DNS切流。
+6. 历史API WAF先Detection，评审后独立窗口切Prevention；当前Admin WAF不遵循这条历史切换顺序，而是固定Prevention执行来源IP白名单。
 7. 回退优先停止新增试点客户端，恢复旧base URL/原DNS记录；保留旧TTL快照，等待缓存到期并验证新连接去向。DNS回退不迁移已建立的SSE/WS连接。
 8. 若需要停止新边缘流量，审阅将enableApiTraffic设为false的What-if，再人工执行；这会影响新请求，必须协调排空/通知。不能仅把deployEdge=false当作删除/禁用指令：Incremental模式下false不会删除既有资源。
 9. 镜像降级不能回滚Prisma schema，数据已写入新库时不能直接切到旧只读库，必须按事先批准的恢复/对账方案操作，防止双写分叉。
