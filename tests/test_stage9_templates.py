@@ -47,6 +47,15 @@ class Stage9TemplateTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             validate_templates(edge, self.origin)
 
+    def test_managed_waf_rule_sets_require_explicit_supported_actions(self):
+        edge = copy.deepcopy(self.edge)
+        resources = edge["resources"]
+        resources = resources.values() if isinstance(resources, dict) else resources
+        waf = next(item for item in resources if item["type"] == "Microsoft.Network/FrontDoorWebApplicationFirewallPolicies")
+        del waf["properties"]["managedRules"]["managedRuleSets"][0]["ruleSetAction"]
+        with self.assertRaises(AssertionError):
+            validate_templates(edge, self.origin)
+
     def test_admin_domain_requires_source_ip_allowlist(self):
         resources = self.edge["resources"]
         resources = resources.values() if isinstance(resources, dict) else resources

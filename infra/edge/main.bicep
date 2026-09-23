@@ -202,8 +202,8 @@ resource waf 'Microsoft.Network/frontDoorWebApplicationFirewallPolicies@2024-02-
     }
     managedRules: {
       managedRuleSets: [
-        { ruleSetType: 'Microsoft_DefaultRuleSet', ruleSetVersion: '2.1' }
-        { ruleSetType: 'Microsoft_BotManagerRuleSet', ruleSetVersion: '1.1' }
+        { ruleSetType: 'Microsoft_DefaultRuleSet', ruleSetVersion: '2.1', ruleSetAction: 'Block' }
+        { ruleSetType: 'Microsoft_BotManagerRuleSet', ruleSetVersion: '1.1', ruleSetAction: 'Block' }
       ]
     }
     customRules: {
@@ -252,8 +252,8 @@ resource adminWaf 'Microsoft.Network/frontDoorWebApplicationFirewallPolicies@202
     }
     managedRules: {
       managedRuleSets: [
-        { ruleSetType: 'Microsoft_DefaultRuleSet', ruleSetVersion: '2.1' }
-        { ruleSetType: 'Microsoft_BotManagerRuleSet', ruleSetVersion: '1.1' }
+        { ruleSetType: 'Microsoft_DefaultRuleSet', ruleSetVersion: '2.1', ruleSetAction: 'Block' }
+        { ruleSetType: 'Microsoft_BotManagerRuleSet', ruleSetVersion: '1.1', ruleSetAction: 'Block' }
       ]
     }
     customRules: {
