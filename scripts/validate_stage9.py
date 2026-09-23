@@ -68,7 +68,10 @@ def validate_templates(edge, origin):
         waf = waf_resource["properties"]
         assert waf["policySettings"]["requestBodyCheck"] == "Enabled"
         assert waf["policySettings"]["logScrubbing"]["state"] == "Enabled"
-        assert {item["ruleSetType"] for item in waf["managedRules"]["managedRuleSets"]} == {"Microsoft_DefaultRuleSet", "Microsoft_BotManagerRuleSet"}
+        assert {(item["ruleSetType"], item["ruleSetVersion"], item.get("ruleSetAction")) for item in waf["managedRules"]["managedRuleSets"]} == {
+            ("Microsoft_DefaultRuleSet", "2.1", "Block"),
+            ("Microsoft_BotManagerRuleSet", "1.1", "Block"),
+        }
         assert not waf["managedRules"].get("exclusions")
         assert all(rule["action"] != "Allow" for rule in waf["customRules"]["rules"])
     block_non_post = next(rule for rule in wafs["api"]["properties"]["customRules"]["rules"] if rule["name"] == "BlockNonPost")

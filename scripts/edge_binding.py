@@ -103,8 +103,8 @@ def validate_private_edge_resources(config, azure, profile_resource_id, deployed
     waf = deployed_resource(azure, edge_output["adminWafId"], "2024-02-01").get("properties", {})
     policy = waf.get("policySettings", {})
     require(waf.get("provisioningState") == "Succeeded" and policy.get("enabledState") == "Enabled" and policy.get("mode") == "Prevention" and policy.get("requestBodyCheck") == "Enabled" and policy.get("logScrubbing", {}).get("state") == "Enabled", "Admin WAF source-IP gate, body checks or log scrubbing are not enabled in Prevention mode")
-    managed = {(item.get("ruleSetType"), item.get("ruleSetVersion")) for item in waf.get("managedRules", {}).get("managedRuleSets", [])}
-    require(managed == {("Microsoft_DefaultRuleSet", "2.1"), ("Microsoft_BotManagerRuleSet", "1.1")}, "Admin WAF managed rule sets differ from the reviewed contract")
+    managed = {(item.get("ruleSetType"), item.get("ruleSetVersion"), item.get("ruleSetAction")) for item in waf.get("managedRules", {}).get("managedRuleSets", [])}
+    require(managed == {("Microsoft_DefaultRuleSet", "2.1", "Block"), ("Microsoft_BotManagerRuleSet", "1.1", "Block")}, "Admin WAF managed rule sets or actions differ from the reviewed contract")
     rules = {rule.get("name"): rule for rule in waf.get("customRules", {}).get("rules", [])}
     require(set(rules) == {"BlockUnapprovedAdminSources", "BlockUnsafeMethods", "RateLimitAdmin"}, "Admin WAF contains an unexpected custom rule set")
     allowlist = rules["BlockUnapprovedAdminSources"]
