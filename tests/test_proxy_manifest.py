@@ -107,6 +107,7 @@ class ProxyManifestTests(unittest.TestCase):
             resources[plane] = {item["kind"].lower(): item for item in documents}
             for item in resources[plane].values():
                 item.setdefault("metadata", {}).setdefault("uid", item["metadata"]["name"] + "-uid")
+            resources[plane]["deployment"]["spec"]["template"]["spec"]["volumes"][0]["configMap"]["defaultMode"] = 420
             clients[plane] = Mock()
             clients[plane].get.side_effect = lambda kind, name, selected=plane: copy.deepcopy(resources[selected][kind])
             def change(kind, name, operations, selected=plane):
@@ -169,6 +170,10 @@ class ProxyManifestTests(unittest.TestCase):
             wrong_service["spec"]["selector"]["plane"] = "admin"
             with self.assertRaisesRegex(ValueError, "private routing contract"):
                 native_ingress_document_state(config, resources["api"]["configmap"], resources["api"]["deployment"], wrong_service)
+            wrong_volume = copy.deepcopy(resources["api"]["deployment"])
+            wrong_volume["spec"]["template"]["spec"]["volumes"][0]["configMap"]["defaultMode"] = 511
+            with self.assertRaisesRegex(ValueError, "reviewed route ConfigMap"):
+                native_ingress_document_state(config, resources["api"]["configmap"], wrong_volume, resources["api"]["service"])
 
     def test_front_door_binding_survives_generated_application_publish(self):
         from scripts.edge_binding import bind_deployment, preserve_binding

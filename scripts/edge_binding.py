@@ -217,7 +217,17 @@ def native_ingress_document_state(config, config_map, deployment, service, ident
     require(labels == expected_labels, "Native API ingress deployment labels changed")
     pod = deployment["spec"]["template"]["spec"]
     dynamic_volumes = [item for item in pod.get("volumes", []) if item.get("name") == "dynamic"]
-    require(dynamic_volumes == [{"name": "dynamic", "configMap": {"name": f"llm-{plane}-ingress"}}], f"Native {plane} ingress does not mount the reviewed route ConfigMap")
+    dynamic_volume = dynamic_volumes[0] if len(dynamic_volumes) == 1 else {}
+    config_map_source = dynamic_volume.get("configMap", {})
+    volume_contract = (
+        set(dynamic_volume) == {"name", "configMap"}
+        and isinstance(config_map_source, dict)
+        and set(config_map_source).issubset({"name", "defaultMode", "optional"})
+        and config_map_source.get("name") == f"llm-{plane}-ingress"
+        and config_map_source.get("defaultMode", 420) == 420
+        and config_map_source.get("optional", False) is False
+    )
+    require(volume_contract, f"Native {plane} ingress does not mount the reviewed route ConfigMap")
     containers = pod.get("containers", [])
     require(len(containers) == 1 and containers[0].get("name") == "traefik" and {"name": "dynamic", "mountPath": "/dynamic", "readOnly": True} in containers[0].get("volumeMounts", []), "Native API ingress controller does not read the reviewed route ConfigMap")
     return {
