@@ -17,13 +17,21 @@ from LiteLLM.runtime.azure_postgresql import DatabaseAuthError, database_url_tem
 
 
 SCHEMA_PATH = Path("/app/litellm-proxy-extras/litellm_proxy_extras/schema.prisma")
-SCHEMA_SHA256 = "af3ffb1dace4333f67bbd10518eaab013b132ac456328552aa80af556c6a72d0"
-VIEWS_SHA256 = "a68e3ced155fd3613477f274900764f2d05092ac7a612441cfef86119f0a5375"
+SCHEMA_SHA256 = "dbb02f20858ed397ea83b0dfabe2d3cfe59ef658976fdcde373c5baad33df387"
+VIEWS_SHA256 = "6118f5eba52c8e3a56accc8973b80b44d53e87f90e7d578ca14be0e8b39c66ad"
 # SHA256 of ordered, active {name, sha256} rows from reviewed source databases.
 SUPPORTED_SOURCE_HISTORIES = {
     "0a730273fd745521b36008b01816142d92294792667a6a5c046147e0821e0dbb": 141,
     "3263a9bd2b458c8e78fa35af9378a21500bb11b7fdfdff74970a5a2bd3973958": 141,
 }
+OPERATOR_MANAGED_SPEND_LOG_INDEXES = {
+    "LiteLLM_SpendLogs_litellm_call_id_idx": ("litellm_call_id",),
+    "LiteLLM_SpendLogs_api_key_startTime_idx": ("api_key", "startTime"),
+}
+CREATE_SPEND_LOG_INDEX = re.compile(
+    r'^CREATE\s+INDEX\s+"(?P<index>[^"]+)"\s+'
+    r'ON\s+(?:"public"\.)?"LiteLLM_SpendLogs"\s*\((?P<columns>[^)]*)\)\s*$',
+)
 
 
 @contextmanager
@@ -114,19 +122,33 @@ def state_fingerprint(assets, state):
     return hashlib.sha256(json.dumps({"assets": assets, "state": state}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def unapproved_schema_diff(diff_sql):
+    remaining = []
+    for statement in diff_sql.split(";"):
+        bare = "\n".join(line for line in statement.splitlines() if line.strip() and not line.strip().startswith("--")).strip()
+        if not bare:
+            continue
+        match = CREATE_SPEND_LOG_INDEX.match(bare)
+        columns = tuple(column.strip().strip('"') for column in match["columns"].split(",")) if match else ()
+        if match and OPERATOR_MANAGED_SPEND_LOG_INDEXES.get(match["index"]) == columns:
+            continue
+        remaining.append(bare)
+    return ";\n".join(remaining)
+
+
 async def verify_database_schema():
-    process = await asyncio.create_subprocess_exec("/app/.venv/bin/prisma", "migrate", "diff", "--from-schema-datasource", str(SCHEMA_PATH), "--to-schema-datamodel", str(SCHEMA_PATH), "--exit-code", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = await asyncio.create_subprocess_exec("/app/.venv/bin/prisma", "migrate", "diff", "--from-schema-datasource", str(SCHEMA_PATH), "--to-schema-datamodel", str(SCHEMA_PATH), "--script", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        await asyncio.wait_for(process.communicate(), timeout=120)
+        output, errors = await asyncio.wait_for(process.communicate(), timeout=120)
     except BaseException:
         if process.returncode is None:
             process.kill()
             await process.wait()
         raise
-    if process.returncode == 2:
-        raise DatabaseAuthError("Database schema differs from the approved datamodel after migration; no automatic db push or data-loss repair is permitted")
     if process.returncode != 0:
         raise DatabaseAuthError("Read-only database schema verification failed")
+    if unapproved_schema_diff(output.decode(errors="replace")):
+        raise DatabaseAuthError("Database schema differs from the approved datamodel after migration; no automatic db push or data-loss repair is permitted")
 
 
 async def execute_schema(operation, expected_state, mode):

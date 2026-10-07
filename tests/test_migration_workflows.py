@@ -6,7 +6,7 @@ import unittest
 import yaml
 
 from scripts.customer_migration import COMPONENTS, ROOT
-from scripts.source_supply_chain import check_source, image_content_sha256, source_image
+from scripts.source_supply_chain import RUNTIME_CONTRACT, check_source, image_content_sha256, source_image
 
 
 class MigrationWorkflowTests(unittest.TestCase):
@@ -62,7 +62,12 @@ class MigrationWorkflowTests(unittest.TestCase):
             def run(command, **kwargs):
                 commands.append(command)
                 if command[0] == "docker":
-                    output = json.dumps({"Id": "sha256:" + "b" * 64, "Architecture": "amd64", "Os": "linux", "RootFS": {"Type": "layers", "Layers": ["sha256:" + "c" * 64]}, "Config": {"User": "10001:10001"}}) if command[1:3] == ["image", "inspect"] else ""
+                    if command[1:3] == ["image", "inspect"]:
+                        output = json.dumps({"Id": "sha256:" + "b" * 64, "Architecture": "amd64", "Os": "linux", "RootFS": {"Type": "layers", "Layers": ["sha256:" + "c" * 64]}, "Config": {"User": "10001:10001"}})
+                    elif command[1] == "run":
+                        output = json.dumps(RUNTIME_CONTRACT)
+                    else:
+                        output = ""
                     return subprocess.CompletedProcess(command, 0, output, "not-for-artifact")
                 document = {"spdxVersion": "SPDX-2.3", "packages": [{"name": "synthetic"}]} if command[0] == "syft" else {"ArtifactName": "sha256:" + "b" * 64, "Results": [{"Target": "synthetic"}]}
                 return subprocess.CompletedProcess(command, 0 if command[0] == "syft" else scan_code, json.dumps(document), "not-for-artifact")
@@ -70,13 +75,13 @@ class MigrationWorkflowTests(unittest.TestCase):
                 report = check_source(Path(folder), "a" * 40, run)
                 self.assertEqual(report["status"], "passed" if scan_code == 0 else "failed")
                 self.assertFalse(report["stageAccepted"])
-                self.assertEqual([command[0] for command in commands], ["docker", "docker", "syft", "trivy"])
-                self.assertEqual(len(report["results"]), 3)
+                self.assertEqual([command[0] for command in commands], ["docker", "docker", "docker", "syft", "trivy"])
+                self.assertEqual(len(report["results"]), 4)
                 self.assertRegex(report["evaluatedImageContentSha256"], r"^[0-9a-f]{64}$")
                 self.assertNotIn("not-for-artifact", (Path(folder) / "source-summary.json").read_text())
                 self.assertTrue(all("sha256" in item for item in report["results"]))
                 if scan_code:
-                    self.assertEqual(report["results"][2]["reason"], "Fixable CRITICAL vulnerabilities matched policy")
+                    self.assertEqual(report["results"][3]["reason"], "Fixable CRITICAL vulnerabilities matched policy")
 
     def test_missing_source_tool_is_a_failed_check(self):
         def unavailable(*args, **kwargs):
@@ -86,6 +91,21 @@ class MigrationWorkflowTests(unittest.TestCase):
             self.assertEqual(report["status"], "failed")
             self.assertNotIn("private environment details", json.dumps(report))
             self.assertTrue(all(item["diagnostic"]["code"] == "validation-failed" for item in report["results"]))
+
+    def test_runtime_contract_nonzero_exit_fails_with_explicit_reason(self):
+        def run(command, **_kwargs):
+            if command[:3] == ["docker", "image", "inspect"]:
+                image = {"Id": "sha256:" + "b" * 64, "Architecture": "amd64", "Os": "linux", "RootFS": {"Type": "layers", "Layers": ["sha256:" + "c" * 64]}, "Config": {"User": "10001:10001"}}
+                return subprocess.CompletedProcess(command, 0, json.dumps(image), "")
+            if command[:2] == ["docker", "run"]:
+                return subprocess.CompletedProcess(command, 1, json.dumps(RUNTIME_CONTRACT), "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            report = check_source(Path(folder), "a" * 40, run)
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["results"][1]["exitCode"], 1)
+        self.assertEqual(report["results"][1]["reason"], "Runtime contract command returned a nonzero exit code")
 
     def test_workflow_components_match_controller_including_network(self):
         for name, extra in (("customer-deploy.yml", set()), ("customer-migration.yml", {"none"})):

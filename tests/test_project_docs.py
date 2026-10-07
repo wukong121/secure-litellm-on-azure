@@ -26,6 +26,7 @@ READMES = (
     "docs/customer-stage1-acceptance-checklist-zh.md",
     "docs/customer-stage2-acceptance-checklist-zh.md",
     "docs/customer-stage3-acceptance-checklist-zh.md",
+    "docs/litellm-1.104.0-upgrade-validation-2026-10-07.md",
     "docs/customer-stage4-acceptance-checklist-zh.md",
     "docs/litellm-security-hardening-implementation-roadmap-zh.md",
     "docs/litellm-security-hardening-change-list-zh.md",
@@ -335,6 +336,29 @@ class ProjectDocumentationTests(unittest.TestCase):
         for filename in ("reviewed-plan.json", "deployment-receipt.json", "deployment-outputs.json"):
             self.assertIn(filename, infrastructure)
             self.assertIn(filename, guide)
+
+    def test_litellm_1104_runtime_upgrade_contract_is_aligned(self):
+        from scripts.source_supply_chain import RUNTIME_CONTRACT, source_image
+        from scripts.validate_manifests import EXPECTED_DIGEST
+        from scripts.validate_stage6 import APPROVED_DIGEST
+
+        digest = "sha256:625981c83410a3ea68eb0697590a57ec1d764d634514d54fa5db0591077ee839"
+        self.assertEqual(source_image(), "docker.litellm.ai/berriai/litellm@" + digest)
+        self.assertEqual(EXPECTED_DIGEST, digest)
+        self.assertEqual(APPROVED_DIGEST, digest)
+        self.assertEqual(RUNTIME_CONTRACT["versions"], {"litellm": "1.104.0", "anyio": "4.14.2", "PyJWT": "2.15.0"})
+        self.assertTrue(all(RUNTIME_CONTRACT["gpt6"].values()))
+        self.assertTrue(all(RUNTIME_CONTRACT["catalog"].values()))
+        promotion = yaml.load((ROOT / ".github/workflows/promote-litellm-image.yml").read_text(), Loader=yaml.BaseLoader)
+        inputs = promotion["on"]["workflow_dispatch"]["inputs"]
+        self.assertEqual(inputs["source_image"]["default"], "docker.litellm.ai/berriai/litellm@" + digest)
+        self.assertEqual(inputs["environment"]["default"], "test")
+        self.assertEqual(inputs["target_tag"]["default"], "litellm-azure:1.104.0")
+        self.assertEqual(inputs["build_azure_runtime"]["default"], "true")
+        self.assertIn("docker.litellm.ai/berriai/litellm@" + digest, (ROOT / ".github/workflows/ci.yml").read_text())
+        evidence = (ROOT / "docs/litellm-1.104.0-upgrade-validation-2026-10-07.md").read_text()
+        for required in (digest, "CVE-2026-102268", "gpt-6.1", "189", "operator-managed"):
+            self.assertIn(required, evidence)
 
     def test_stage_three_guide_links_and_shell_examples(self):
         import subprocess

@@ -43,12 +43,13 @@ class AzurePrismaContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_refresh_coalesces_and_keeps_tls(self):
         self.credential.get_token.return_value = SimpleNamespace(token="synthetic-new-token", expires_on=int(time.time()) + 3600)
         self.wrapper._replace_prisma_client_for_token_refresh_locked = AsyncMock()
-        os.environ["DATABASE_URL"] = TEMPLATE
+        current = TEMPLATE + "&max_idle_connection_lifetime=60"
+        os.environ["DATABASE_URL"] = current
         await asyncio.gather(*(self.wrapper._safe_refresh_token() for _attempt in range(8)))
         self.wrapper._replace_prisma_client_for_token_refresh_locked.assert_awaited_once()
         self.credential.get_token.assert_called_once()
         passed = self.wrapper._replace_prisma_client_for_token_refresh_locked.call_args.args[0]
-        self.assertEqual(parse_qs(urlsplit(passed).query), parse_qs(urlsplit(TEMPLATE).query))
+        self.assertEqual(parse_qs(urlsplit(passed).query), parse_qs(urlsplit(current).query))
 
     async def test_failed_connection_keeps_previous_url_and_original_client(self):
         self.credential.get_token.return_value = SimpleNamespace(token="synthetic-new-token", expires_on=int(time.time()) + 3600)
@@ -103,7 +104,8 @@ class AzurePrismaContractTests(unittest.IsolatedAsyncioTestCase):
             install_prisma_adapter(self.tokens)
             settings = db_url_settings.DatabaseURLSettings()
             self.assertTrue(settings.apply_to_env())
-            self.assertEqual(parse_qs(urlsplit(os.environ["DATABASE_URL"]).query), parse_qs(urlsplit(TEMPLATE).query))
+            expected = {**parse_qs(urlsplit(TEMPLATE).query), "max_idle_connection_lifetime": ["60"]}
+            self.assertEqual(parse_qs(urlsplit(os.environ["DATABASE_URL"]).query), expected)
             self.assertEqual(os.environ["IAM_TOKEN_DB_AUTH"], "True")
             installed = prisma_client.PrismaWrapper(self.original, True)
             self.assertIsNotNone(installed._parse_token_expiration("synthetic-startup"))

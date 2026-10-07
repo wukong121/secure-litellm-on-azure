@@ -457,9 +457,9 @@ execute会重新生成实时plan；代码、配置、云状态或发布报告变
 .venv/bin/python -m local_execution --config local_execution/customer.json --step stage3-source-check
 ```
 
-该步骤先从固定LiteLLM `1.98.0`上游digest构建当前仓库的派生运行镜像，再对派生镜像生成SBOM并执行Trivy门禁；不会推送ACR。派生构建通过SHA256固定的`security-requirements.txt`把AnyIO升级到`4.14.2`，用于修复上游层中的`CVE-2026-63374`，但不改变LiteLLM或Prisma版本。不要把上游层单独作为最终应用镜像部署。
+该步骤先从固定LiteLLM `1.104.0`上游digest构建当前仓库的派生运行镜像，再验证非root UID、LiteLLM/AnyIO/PyJWT版本、GPT-6.1系列识别及Azure GPT-6 Astra/Sol/Luna目录项，然后生成SBOM并执行Trivy门禁；不会推送ACR。派生构建继续用SHA256固定的`security-requirements.txt`约束AnyIO `4.14.2`，防止依赖回退。不要把上游层单独作为最终应用镜像部署。
 
-失败时查看本次三项结果；`build`、`sbom`和`scan`必须全部为`passed`：
+失败时查看本次四项结果；`build`、`runtime`、`sbom`和`scan`必须全部为`passed`：
 
 ```bash
 RUN_DIR="$(ls -1dt temp/local-stage09/*-stage3-source-check-* | head -n 1)"
@@ -467,7 +467,7 @@ jq '{sourceImage,evaluatedImage,evaluatedImageId,buildInputsSha256,status,result
   "$RUN_DIR/source-summary.json"
 ```
 
-发现新的可修复CRITICAL时停在Stage3，更新受审查的安全覆盖或选择通过完整兼容验证的新稳定LiteLLM版本；不得改报告、降低严重级别或改用RC/dev镜像绕过。
+发现新的可修复CRITICAL或runtime模型合同不匹配时停在Stage3，更新受审查的安全覆盖或选择通过完整兼容验证的新稳定LiteLLM版本；不得改报告、降低严重级别或改用RC/dev镜像绕过。`1.104.0`的数据库迁移会有意省略两个大表索引；Stage5严格允许的仅是这两项operator-managed差异，详见[升级验证](../docs/litellm-1.104.0-upgrade-validation-2026-10-07.md)。
 
 3. 计划并真正部署Stage3 platform：
 
@@ -1055,7 +1055,18 @@ az postgres flexible-server show --subscription "$SUBSCRIPTION_ID" \
 
 **客户模式使用当前登录账号；验证模式使用operator UAMI。** 它已获得新AKS Cluster User/Cluster Admin；Stage5数据库、秘密和Schema回执必须属于当前代码和配置。
 
-1. 按Stage4第7步的提取命令取得当前revision的`BACKEND_DIGEST`，将其纯64位值填入Stage6 values文件的`REPLACE_BUILT_64_HEX_DIGEST`；不要填写完整镜像引用、`sha256:`前缀、tag、schema plan哈希或SBOM哈希。`REPLACE_EXISTING_MODEL_DEPLOYMENT_NAME`填写`connectionAlias=primary`对应Azure OpenAI账号中实际Succeeded的deployment名称，不是模型展示名。需要在新shell继续时，重新运行Stage4提取块从证据恢复变量，然后合并：
+1. 按Stage4第7步的提取命令取得当前revision的`BACKEND_DIGEST`，将其纯64位值填入Stage6 values文件的`REPLACE_BUILT_64_HEX_DIGEST`；不要填写完整镜像引用、`sha256:`前缀、tag、schema plan哈希或SBOM哈希。`REPLACE_EXISTING_MODEL_DEPLOYMENT_NAME`填写`connectionAlias=primary`对应Azure OpenAI账号中实际Succeeded的deployment资源名称；`REPLACE_EXISTING_MODEL_BASE_MODEL`填写同一deployment的底层模型名（例如`gpt-6-luna`，values中不要加`azure/`，合并器会生成`baseModel=azure/gpt-6-luna`）。可从Portal的模型部署页取得，或运行：
+
+```bash
+az cognitiveservices account deployment list \
+  --subscription "REPLACE_MODEL_SUBSCRIPTION_ID" \
+  --resource-group "REPLACE_MODEL_RESOURCE_GROUP" \
+  --name "REPLACE_MODEL_ACCOUNT_NAME" \
+  --query '[].{deployment:name,model:properties.model.name,version:properties.model.version,state:properties.provisioningState}' \
+  --output table
+```
+
+只有`state=Succeeded`的同一行可用于这两个字段。新Stage6分阶段合并要求`baseModel`；升级前已经完整合并的旧配置可暂时省略以保持读取兼容，但在启用GPT-6或下一次重合并前必须补齐。需要在新shell继续时，重新运行Stage4提取块从证据恢复变量，然后合并：
 
 ```bash
 .venv/bin/python -m local_execution.merge_config \

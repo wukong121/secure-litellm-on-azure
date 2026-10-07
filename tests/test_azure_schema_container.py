@@ -25,7 +25,7 @@ from scripts.database_roles import grant_roles
 from tests.test_azure_postgresql import TEMPLATE
 
 
-LITELLM_IMAGE = "docker.litellm.ai/berriai/litellm@sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4"
+LITELLM_IMAGE = "docker.litellm.ai/berriai/litellm@sha256:625981c83410a3ea68eb0697590a57ec1d764d634514d54fa5db0591077ee839"
 LEGACY_LITELLM_IMAGE = "docker.litellm.ai/berriai/litellm@sha256:af806882b7a6ced41658db5b6a7e98ed7b9b51d03b935e0417bf1c8552d688af"
 POSTGRES_IMAGE = "postgres@sha256:e17e86066e5ef83e0952a9347f5c792b7ece00972e2aa787a6986f471b3dd3d5"
 
@@ -41,7 +41,7 @@ class AzureSchemaContainerTests(unittest.TestCase):
     def test_new_database_migration_then_application_read_only_startup(self):
         self.run_database_scenario()
 
-    def test_legacy_195_restore_then_198_upgrade_preserves_budget_and_source(self):
+    def test_legacy_195_restore_then_1104_upgrade_preserves_budget_and_source(self):
         self.run_database_scenario(legacy=True)
 
     def run_database_scenario(self, legacy=False):

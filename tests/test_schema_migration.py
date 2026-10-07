@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from LiteLLM.runtime.azure_postgresql import DatabaseAuthError
-from LiteLLM.runtime.schema_migration import check_history, state_fingerprint
+from LiteLLM.runtime.schema_migration import check_history, state_fingerprint, unapproved_schema_diff
 
 
 class SchemaMigrationTests(unittest.TestCase):
@@ -54,3 +54,23 @@ class SchemaMigrationTests(unittest.TestCase):
         first = state_fingerprint(self.assets, {"history": []})
         second = state_fingerprint(self.assets, {"history": [self.record]})
         self.assertNotEqual(first, second)
+
+    def test_only_operator_managed_spend_log_indexes_are_allowed_drift(self):
+        approved = '''
+-- CreateIndex
+CREATE INDEX "LiteLLM_SpendLogs_litellm_call_id_idx" ON "LiteLLM_SpendLogs"("litellm_call_id");
+CREATE INDEX "LiteLLM_SpendLogs_api_key_startTime_idx" ON "public"."LiteLLM_SpendLogs"("api_key", "startTime");
+'''
+        self.assertEqual(unapproved_schema_diff(approved), "")
+        for rejected in (
+            'CREATE UNIQUE INDEX "LiteLLM_SpendLogs_litellm_call_id_idx" ON "LiteLLM_SpendLogs"("litellm_call_id");',
+            'CREATE INDEX CONCURRENTLY "LiteLLM_SpendLogs_litellm_call_id_idx" ON "LiteLLM_SpendLogs"("litellm_call_id");',
+            'create index "LiteLLM_SpendLogs_litellm_call_id_idx" on "LiteLLM_SpendLogs"("litellm_call_id");',
+            'CREATE INDEX "LiteLLM_SpendLogs_litellm_call_id_idx" ON "LiteLLM_SpendLogs"("request_id");',
+            'CREATE INDEX "LiteLLM_SpendLogs_litellm_call_id_idx" ON "litellm_spendlogs"("litellm_call_id");',
+            'CREATE INDEX "other_idx" ON "LiteLLM_SpendLogs"("litellm_call_id");',
+            'CREATE INDEX "LiteLLM_SpendLogs_litellm_call_id_idx" ON "LiteLLM_UserTable"("litellm_call_id");',
+            'ALTER TABLE "LiteLLM_SpendLogs" ADD COLUMN "unexpected" TEXT;',
+        ):
+            with self.subTest(rejected=rejected):
+                self.assertEqual(unapproved_schema_diff(rejected), rejected.removesuffix(";"))

@@ -24,7 +24,7 @@ def backend_customer():
     config["parameters"]["platform"]["stage4Network"]["podCidr"] = "10.244.0.0/16"
     config["parameters"]["platform"]["azureOpenAIConnections"] = [{"alias": "primary", "accountName": "synthetic-model"}]
     config["parameters"]["platform"]["stage5Data"] = {"postgresqlDatabaseName": "litellm"}
-    config["application"] = {"backendImage": "customerregistry.azurecr.io/litellm-azure@sha256:" + "a" * 64, "models": [{"modelGroup": "coding", "connectionAlias": "primary", "deploymentName": "gpt-deployment", "id": "primary-coding", "apiVersion": "v1"}]}
+    config["application"] = {"backendImage": "customerregistry.azurecr.io/litellm-azure@sha256:" + "a" * 64, "models": [{"modelGroup": "coding", "connectionAlias": "primary", "deploymentName": "gpt-deployment", "baseModel": "azure/gpt-6-luna", "id": "primary-coding", "apiVersion": "v1"}]}
     return config
 
 
@@ -64,6 +64,9 @@ class BackendManifestTests(unittest.TestCase):
         self.assertNotIn("replicas", deployment["spec"])
         self.assertEqual(autoscaler["spec"]["minReplicas"], 2)
         environment = {item["name"]: item["value"] for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+        runtime = yaml.safe_load(next(item for item in documents if item["kind"] == "ConfigMap" and "config.yaml" in item.get("data", {}))["data"]["config.yaml"])
+        self.assertEqual(runtime["model_list"][0]["litellm_params"]["base_model"], "azure/gpt-6-luna")
+        self.assertEqual(runtime["model_list"][0]["model_info"]["base_model"], "azure/gpt-6-luna")
         self.assertEqual(application_authentication(config), {"mode": "native", "adminUsername": "gateway-admin"})
         self.assertEqual(environment["LLMGW_GATEWAY_AUTH_MODE"], "native")
         self.assertEqual(environment["LLMGW_NATIVE_ADMIN_USERNAME"], "gateway-admin")
@@ -279,8 +282,13 @@ class BackendManifestTests(unittest.TestCase):
 
     def test_unapproved_images_accounts_and_duplicate_ids_are_rejected(self):
         config = backend_customer()
-        for change in (lambda value: value["application"].update(backendImage="other.azurecr.io/litellm:latest"), lambda value: value["application"]["models"][0].update(connectionAlias="other"), lambda value: value["application"]["models"].append(copy.deepcopy(value["application"]["models"][0])), lambda value: value["parameters"]["platform"]["azureOpenAIConnections"].append(copy.deepcopy(value["parameters"]["platform"]["azureOpenAIConnections"][0]))):
+        for change in (lambda value: value["application"].update(backendImage="other.azurecr.io/litellm:latest"), lambda value: value["application"]["models"][0].update(connectionAlias="other"), lambda value: value["application"]["models"][0].update(baseModel="gpt-6-luna"), lambda value: value["application"]["models"].append(copy.deepcopy(value["application"]["models"][0])), lambda value: value["parameters"]["platform"]["azureOpenAIConnections"].append(copy.deepcopy(value["parameters"]["platform"]["azureOpenAIConnections"][0]))):
             modified = copy.deepcopy(config)
             change(modified)
             with self.assertRaises(ValueError):
                 application_settings(modified)
+
+    def test_existing_model_mapping_without_base_model_remains_compatible(self):
+        config = backend_customer()
+        config["application"]["models"][0].pop("baseModel")
+        self.assertNotIn("baseModel", application_settings(config)["models"][0])

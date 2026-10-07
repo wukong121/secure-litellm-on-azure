@@ -139,11 +139,11 @@ jq '{schemaVersion,check,revision,sourceImage,evaluatedImage,evaluatedImageId,bu
 | observedAt | 本次检查时间，明确时区及所用运行尝试，近期证据仍适用 |
 | status | passed |
 | policy | severity为["CRITICAL"]，ignoreUnfixed为true；若实际政策不同须重新审核 |
-| results | 恰好build、sbom和scan三项，各自status=passed、exitCode=0及64位sha256；sbom和scan另有对应artifact |
+| results | 恰好build、runtime、sbom和scan四项，各自status=passed、exitCode=0及64位sha256；runtime、sbom和scan另有对应artifact |
 | stageAccepted | false是正常值：工具未自动验收整个Stage3 |
 | notCovered | 保留上游发布者身份、目标ACR签名/私网拉取、客户阶段批准等未覆盖项 |
 
-固定公共基线来自[源检查脚本](../scripts/source_supply_chain.py)读取的[派生镜像Dockerfile](../LiteLLM/runtime/Dockerfile)。检查会先构建该Dockerfile，再扫描实际派生镜像。当前派生层使用带SHA256的`security-requirements.txt`把AnyIO固定为`4.14.2`，修复基线层的`CVE-2026-63374`，同时保持LiteLLM `1.98.0`及其Prisma合同不变。在GitHub运行页面点击commit SHA，再打开该版本文件核对FROM和安全覆盖；不要使用另一个分支或后来改变的本地文件来比较。代码/digest不匹配时重新生成适用报告，不手改摘要以求一致。
+固定公共基线来自[源检查脚本](../scripts/source_supply_chain.py)读取的[派生镜像Dockerfile](../LiteLLM/runtime/Dockerfile)。检查会先构建该Dockerfile，执行隔离runtime合同，再扫描实际派生镜像。当前基线为LiteLLM `1.104.0`，AnyIO `4.14.2`和PyJWT `2.15.0`；升级消除了旧派生镜像中PyJWT `2.13.0`的`CVE-2026-102268`，并加入GPT-6系列转换与Azure目录验证。在GitHub运行页面点击commit SHA，再打开该版本文件核对FROM和安全覆盖；不要使用另一个分支或后来改变的本地文件来比较。代码/digest不匹配时重新生成适用报告，不手改摘要以求一致。完整证据见[1.104.0升级验证](litellm-1.104.0-upgrade-validation-2026-10-07.md)。
 
 ### S-3 核对SBOM、扫描内容与策略边界
 
@@ -153,7 +153,7 @@ jq '{ArtifactName,targets:[.Results[] | {Target,Class,Type,vulnerabilityCount:((
   "$SOURCE_DIR/source-scan.json"
 ```
 
-SBOM应有spdxVersion及非空packages，检查LiteLLM仍为`1.98.0`、AnyIO为`4.14.2`且其他组成符合该派生镜像，而非空壳报告；不要求把每个包手工逐行验收。扫描ArtifactName须与摘要evaluatedImageId完全一致，Results有实际扫描目标，查询/文件损坏不等于零漏洞。sourceImage只是不可变上游基线，不是允许直接部署的最终镜像。
+`source-runtime.json`必须记录非root UID 10001、LiteLLM `1.104.0`、AnyIO `4.14.2`、PyJWT `2.15.0`，并确认GPT-6.1识别及Azure GPT-6 Astra/Sol/Luna目录项。SBOM应有spdxVersion及非空packages，其他组成须符合该派生镜像，而非空壳报告；不要求把每个包手工逐行验收。扫描ArtifactName须与摘要evaluatedImageId完全一致，Results有实际扫描目标，查询/文件损坏不等于零漏洞。sourceImage只是不可变上游基线，不是允许直接部署的最终镜像。
 
 查看发现项时关注VulnerabilityID、PkgName、InstalledVersion、FixedVersion和Severity。当前调用Trivy使用`--severity CRITICAL --ignore-unfixed --exit-code 1`，只有在工具正常完成且符合此策略时才通过：没有可修复CRITICAL阻断不等于零漏洞，HIGH/MEDIUM、未修复漏洞可能被过滤。SBOM不是恶意代码检测或上游发布者签名证明。
 
@@ -161,13 +161,13 @@ SBOM应有spdxVersion及非空packages，检查LiteLLM仍为`1.98.0`、AnyIO为`
 
 ### S-4 校验文件哈希并记录结论
 
-在同一SOURCE_DIR中执行，先限定摘要只能引用本workflow的两个报告文件，再校验哈希：
+在同一SOURCE_DIR中执行，先限定摘要只能引用本workflow的三份附件，再校验哈希：
 
 ```bash
 pushd "$SOURCE_DIR" > /dev/null &&
 jq -er '
-  if ([.results[].name] | sort) == ["build", "sbom", "scan"]
-     and ([.results[] | select(.artifact) | .artifact] | sort) == ["source-sbom.spdx.json", "source-scan.json"]
+    if ([.results[].name] | sort) == ["build", "runtime", "sbom", "scan"]
+      and ([.results[] | select(.artifact) | .artifact] | sort) == ["source-runtime.json", "source-sbom.spdx.json", "source-scan.json"]
      and all(.results[]; (.sha256 | test("^[0-9a-f]{64}$")))
   then .results[] | select(.artifact) | "\(.sha256)  \(.artifact)"
   else error("Unexpected source evidence entries") end
@@ -175,11 +175,11 @@ jq -er '
 popd > /dev/null
 ```
 
-两个文件都应显示OK，无jq/sha256sum错误。任何失败都停在此项，不能因最后popd成功而忽略前面校验失败。文件重新格式化也会导致哈希不同，应重新取回原始附件比较，不把新哈希写入摘要。
+三份附件都应显示OK，无jq/sha256sum错误。任何失败都停在此项，不能因最后popd成功而忽略前面校验失败。文件重新格式化也会导致哈希不同，应重新取回原始附件比较，不把新哈希写入摘要。
 
-哈希只证明报告与摘要一致，不是独立认证或数字签名；信任起点仍是受审查仓库/运行及固定源。保留run URL、SHA、digest、时间、政策、两份文件校验及未覆盖范围。
+哈希只证明报告与摘要一致，不是独立认证或数字签名；信任起点仍是受审查仓库/运行及固定源。保留run URL、SHA、digest、时间、政策、三份附件校验及未覆盖范围。
 
-**source_image_sbom_scan通过标准：** 本次受审查默认分支的固定源匹配，三份报告齐全有效，SBOM/扫描均通过当前获批策略且报告哈希一致。这里不是target_image_signature_sbom验收，后者在Stage4对实际晋级镜像与私网路径验证。
+**source_image_sbom_scan通过标准：** 本次受审查默认分支的固定源匹配，摘要及三份附件齐全有效，runtime/SBOM/扫描均通过当前获批策略且报告哈希一致。这里不是target_image_signature_sbom验收，后者在Stage4对实际晋级镜像与私网路径验证。
 
 ## 4. target_isolation：计划、实际资源与旧环境
 

@@ -11,7 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGE6 = ROOT / "deploy/components/stage6-ha"
-APPROVED_DIGEST = "sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4"
+APPROVED_DIGEST = "sha256:625981c83410a3ea68eb0697590a57ec1d764d634514d54fa5db0591077ee839"
 AFFINITY_CHECKS = {
     "encrypted_content_affinity",
     "responses_api_deployment_check",
