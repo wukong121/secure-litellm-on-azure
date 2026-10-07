@@ -2,7 +2,7 @@
 
 > 核对日期：2026-09-23
 >
-> 适用：Stage0–1已按本地执行包完成，客户不能使用GitHub Actions，需要继续在受控执行主机上部署Stage2–9。
+> 适用：migration已完成本地Stage0–1，或greenfield已完成Stage0 bootstrap/network/Runner Peering；客户不能使用GitHub Actions，需要继续在受控执行主机上部署Stage2–9。
 
 ## 1. 执行边界
 
@@ -45,7 +45,7 @@ az account set --subscription "REPLACE_SUBSCRIPTION_ID"
 
 但有两个例外不能用普通用户账号代替：
 
-- Stage5的`backend-secrets`、`restore-target`和`schema-migrate`必须使用`databaseAccess.migrationPrincipalId`对应的服务身份Token，因为数据库角色固定映射为服务主体`llmgw_migrator`。客户可在这些步骤前切换到已有runtime UAMI，或使用下面的单一operator UAMI。
+- Stage5的`backend-secrets`和`schema-migrate`必须使用`databaseAccess.migrationPrincipalId`对应的服务身份Token；migration模式的`restore-target`也使用该身份。数据库角色固定映射为服务主体`llmgw_migrator`。客户可在这些步骤前切换到已有runtime UAMI，或使用下面的单一operator UAMI。
 - Stage7的Entra动作必须使用两个彼此分离、且与迁移身份不同的服务身份，见第2.5节。
 
 **实施方验证：单一临时UAMI。** 无法在Runner交互登录时，只创建一个`llmgw-test-local-operator`，并只配置`default`：
@@ -284,7 +284,7 @@ chmod 600 "local_execution/stage-REPLACE_STAGE-values.local.json"
 | 2 | `governance`、原生`contentAudit`决策；可选UAMI认证profile |
 | 3 | `parameters.platform`的ACR、Workspace、目标网络和AKS |
 | 4 | 模型账号、稳定角色命名、证书Vault、Runner目标DNS、私有入口及本地Cosign配置；自动证书为可选块 |
-| 5 | `stage5Data`、数据库迁移身份、Private DNS归属及Stage0备份引用/SHA256 |
+| 5 | `stage5Data`、数据库初始化身份及Private DNS归属；仅migration加入Stage0备份引用/SHA256 |
 | 6 | `application`后端镜像digest和模型部署映射；可选原生认证模式/管理员用户名 |
 | 7 | `entra`、`proxy`和`entraMode=enabled` |
 | 8 | 可选原生观测collector；增强L3是单独替代方案 |
@@ -292,7 +292,9 @@ chmod 600 "local_execution/stage-REPLACE_STAGE-values.local.json"
 
 合并后先运行当前Stage的`--operation plan`。plan会校验该组件配置并生成What-if或运行时预览；配置缺字段或仍有占位符时不得进入execute。
 
-### 4.1 Stage5恢复输入
+### 4.1 Stage5恢复输入（仅migration）
+
+`deploymentMode=greenfield`不得执行本节：Stage5合并器会省略`backupBlob`、`backupSha256`、`postgresMigrationUser`和`legacySaltSource`，也不得选择`legacy-master-key-salt`。greenfield直接在空目标库初始化新秘密和Schema。
 
 从**当前Runner本地执行Stage0**时生成的同一个成功备份报告取得Blob名和SHA256；不要使用Actions artifact、开发机`temp/reviewed-backup-*`或另一台机器保存的旧报告。先在Runner仓库根目录定位并核验报告：
 
@@ -804,15 +806,17 @@ printf 'api expected=%s actual=%s\nadmin expected=%s actual=%s\n' \
 - 查询到用户自建且目标为该AKS的Private Endpoint时，停止自动恢复，由网络Owner按客户变更流程删除并重建该PE；不要删除AKS管理的API PE，也不要误删ACR/Vault/PG/Redis PE。
 - 已进入Stage9时，还要复核Private Link Service、Front Door origin和实际客户端；入口前端地址或资源映射变化时重新plan受影响的Stage9步骤，不直接启流量。
 
-### Stage5：PostgreSQL、Redis、后台秘密和恢复演练
+### Stage5：PostgreSQL、Redis、后台秘密与数据库初始化
 
 **客户模式按步骤使用IT部署账号、PG管理员和migration/runtime身份；验证模式除可选的独立database UAMI外继续使用operator。** Stage5开始前：
 
 - PG管理员使用安全组时，把获批执行主体加入组，`stage5Data`填写组Object ID、组名和`Group`；没有组管理权限时可选择独立database UAMI路径。
 - `databaseAccess.migrationPrincipalId`填operator UAMI Principal ID，不能填PG管理员组ID。
-- operator具有Stage0备份容器Blob Data Contributor，以及旧AKS `litellm-env` Secret读取权；目标RGOwner已覆盖管理面和回执写入。
-- `runtimeInputs.backupBlob`和`backupSha256`来自同一个成功Stage0报告。
+- migration模式的operator还需Stage0备份容器Blob Data Contributor及旧AKS `litellm-env` Secret读取权；greenfield不需要这些旧环境权限。
+- migration模式的`runtimeInputs.backupBlob`和`backupSha256`来自同一个成功Stage0报告；greenfield配置不得包含这两项。
 - deploy仍有目标RG Contributor、Lock Writer和受约束角色分配权限。
+
+两种模式共用platform、database-roles、backend-secrets和schema-migrate。仅migration执行`stage5-restore-target`；greenfield的backend-secrets计划必须显示新Master Key/Salt为`generate`，且目标库在生成秘密前必须没有业务表。
 
 验证模式中，`REPLACE_LOCAL_OPERATOR_UAMI_PRINCIPAL_ID`填写operator UAMI的Principal ID；两个`REPLACE_PG_ADMIN_GROUP_*`字段必须填写另一个真实Entra安全组的显示名和Object ID，不能重复填写UAMI名称/Principal ID。这个组不是另一个UAMI：它没有Client ID、凭据或VM挂载，只把现有operator列为成员。不能用Azure RBAC角色分配代替Entra组成员关系，也不能把同一个operator Principal ID直接同时配置成PG管理员和`migrationPrincipalId`；执行器会阻止该权限合并。若客户尚无批准的PG管理员组，由Entra组管理员在客户外部管理终端创建专用安全组并加入operator服务主体：
 
@@ -915,7 +919,7 @@ getent ahostsv4 "$REDIS_HOST"
 - PG管理员组路径：当前Azure CLI账号必须是该组成员；客户IT管理员可保持交互登录，验证operator必须已加入组。
 - `database-admin-identity`路径：无需手工切换账号；本地执行器在本步骤前自动执行`az login --identity --client-id <authentication.database.clientId>`，使用独立database UAMI取得PG Token。
 
-客户IT账号在目标RG拥有Azure `Owner`或`Contributor`只代表管理面部署权限，不会自动成为PostgreSQL Entra管理员、数据库owner或schema owner。当前自动化把已迁移业务对象归`llmgw_migrator`所有；需要IT人员直接进入PG时，须另行批准并把该用户配置为额外Entra管理员，或使用包含该用户的PG管理员组，不能用Azure RBAC代替数据库数据面授权。
+客户IT账号在目标RG拥有Azure `Owner`或`Contributor`只代表管理面部署权限，不会自动成为PostgreSQL Entra管理员、数据库owner或schema owner。当前自动化把业务对象归`llmgw_migrator`所有；需要IT人员直接进入PG时，须另行批准并把该用户配置为额外Entra管理员，或使用包含该用户的PG管理员组，不能用Azure RBAC代替数据库数据面授权。
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -927,7 +931,11 @@ getent ahostsv4 "$REDIS_HOST"
   --approved-plan-sha256 "REPLACE_STAGE5_DATABASE_ROLES_PLAN_SHA256"
 ```
 
-3. 在此处使用`databaseAccess.migrationPrincipalId`对应的runtime服务身份；验证模式继续使用operator。客户若在`localExecution.authentication.runtime`配置了managed identity，执行器会自动登录；未配置专项runtime profile、而`default=existing`时，必须在运行本步骤前从database UAMI或IT用户会话切换到已挂载的migration/runtime UAMI：
+3. 在此处使用`databaseAccess.migrationPrincipalId`对应的runtime服务身份；验证模式继续使用operator。客户若在`localExecution.authentication.runtime`配置了managed identity，执行器会自动登录；未配置专项runtime profile、而`default=existing`时，必须在运行本步骤前切换到已挂载的runtime UAMI。
+
+greenfield不读取旧AKS：确认`runtimeInputs`没有备份和旧Salt字段，然后直接运行本步骤末尾的`stage5-backend-secrets` plan/execute。计划中缺失的`litellm-master-key`和`litellm-salt-key`必须为`generate`，`source`必须为`null`。
+
+**以下登录、旧Secret检查和`legacy-master-key-salt`兼容说明仅适用于migration。** migration从database UAMI或IT用户会话切换到migration/runtime UAMI：
 
 ```bash
 az logout
@@ -979,7 +987,7 @@ kubectl --kubeconfig "$LEGACY_RUNTIME_KUBECONFIG" -n "$LEGACY_NAMESPACE" \
 
 当前`customer.json`已经完整应用过相同Stage5身份路径时，合并器会按现有字段复用PG SKU、迁移Principal、备份引用及database UAMI标识，因此上述命令不需要再次填写这些值。plan的`missingPlaceholders`应为空，`changedPaths`应只有`localExecution.runtimeInputs.legacySaltSource`；若仍出现其他占位符或变更路径，停止apply并核对所选option是否与现有管理员类型一致，不复制空的`values.required.json`覆盖原values文件。
 
-确认`customer.json`中的`legacySaltSource`为获批值后，再生成backend-secrets计划；execute必须使用本次新计划哈希：
+migration确认`customer.json`中的`legacySaltSource`为获批值；greenfield确认四个迁移运行输入均不存在。然后生成backend-secrets计划；execute必须使用本次新计划哈希：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -991,7 +999,7 @@ kubectl --kubeconfig "$LEGACY_RUNTIME_KUBECONFIG" -n "$LEGACY_NAMESPACE" \
   --approved-plan-sha256 "REPLACE_STAGE5_BACKEND_SECRETS_PLAN_SHA256"
 ```
 
-4. 保持上述迁移服务身份登录，下载Stage0备份、核对SHA256，并只恢复到绑定的空目标库：
+4. **仅migration**保持上述迁移服务身份登录，下载Stage0备份、核对SHA256，并只恢复到绑定的空目标库。greenfield跳过整个`stage5-restore-target`步骤：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -1005,7 +1013,7 @@ kubectl --kubeconfig "$LEGACY_RUNTIME_KUBECONFIG" -n "$LEGACY_NAMESPACE" \
 
 目标库非空时脚本会拒绝覆盖。不得手工加`--clean`、DROP数据库或改连任意DATABASE_URL来强行重跑。
 
-5. 保持迁移服务身份登录，执行固定Schema迁移并保存回执：
+5. 两种模式都保持runtime服务身份登录，执行固定Schema迁移并保存回执：
 
 ```bash
 .venv/bin/python -m local_execution \
@@ -1018,6 +1026,8 @@ kubectl --kubeconfig "$LEGACY_RUNTIME_KUBECONFIG" -n "$LEGACY_NAMESPACE" \
 ```
 
 恢复成功后，长期升级形成的旧Prisma历史可能与“全新安装同版本”不同：迁移名称仍相同，但旧库保留当年执行时的checksum和顺序。迁移器只接受代码中已通过固定旧镜像、恢复副本和隔离升级验证的精确源历史指纹；匹配后只执行目标镜像中尚未出现的迁移，原141条历史不改写。若plan仍报`Database migration history differs from the approved image`，不得跳过plan、直接execute、运行`prisma migrate resolve/reset`或手工更新`_prisma_migrations`；保存只读的名称/checksum/完成状态供实施负责人新增受审查的兼容指纹，并重新完成隔离升级测试。
+
+greenfield在空库上执行当前受审镜像的完整迁移，不应出现旧Prisma历史兼容分支；plan必须显示目标库状态与全新初始化一致。
 
 schema plan绑定稳定的运行镜像内容指纹（RootFS层、完整镜像配置、固定源digest、构建输入和运行时代码），实际本地Docker image ID只记录在本次观察/执行回执中。相同内容因Docker创建时间元数据产生不同image ID时不应让plan漂移；RootFS、配置、迁移资产或数据库state任一变化仍会改变plan哈希并阻止execute。
 
@@ -1776,7 +1786,7 @@ az aks start --subscription "$SUBSCRIPTION_ID" \
 | Stage3–4 | 当前账号 | 单一operator UAMI |
 | Stage5 platform | 当前部署账号 | 单一operator UAMI |
 | Stage5 database-roles | PG管理员用户/组成员，或独立database UAMI | PG管理员组内operator，或独立database UAMI |
-| Stage5 secrets/restore/schema | migrationPrincipalId对应服务身份 | 单一operator UAMI |
+| Stage5 secrets/schema；migration restore | migrationPrincipalId对应服务身份 | 单一operator UAMI |
 | Stage6 application | 当前账号或客户runtime身份 | 单一operator UAMI |
 | Stage7代理镜像/foundation/runtime | 当前账号 | 单一operator UAMI |
 | Stage7 entra-apps/admin-credentials | 客户专项服务身份 | entra-bootstrap UAMI |

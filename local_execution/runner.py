@@ -32,6 +32,7 @@ from scripts.workflow_diagnostics import command_failure_summary, diagnostic_exi
 
 INFRASTRUCTURE_STEPS = {
     "bootstrap": (0, "bootstrap"),
+    "network": (0, "network"),
     "backup": (0, "backup"),
     "execution-host-connectivity": (0, "runner-connectivity"),
     "legacy-logging": (1, "legacy-logging"),
@@ -89,6 +90,7 @@ IMAGE_STEPS = {
 STEPS = (
     "config-check",
     "bootstrap",
+    "network",
     "backup",
     "execution-host-connectivity",
     "connectivity-check",
@@ -121,10 +123,11 @@ def reviewed_revision(run=subprocess.run):
 
 def local_settings(document):
     settings = document.get("localExecution")
-    require(isinstance(settings, dict) and {"postgresRestoreImage", "executionHost"}.issubset(settings) and not set(settings) - LOCAL_SETTING_FIELDS, "localExecution has unexpected or missing fields")
+    required = {"executionHost"} | ({"postgresRestoreImage"} if deployment_mode(document) == "migration" else set())
+    require(isinstance(settings, dict) and required.issubset(settings) and not set(settings) - LOCAL_SETTING_FIELDS, "localExecution has unexpected or missing fields")
     settings = copy.deepcopy(settings)
-    image = settings["postgresRestoreImage"]
-    require(isinstance(image, str) and re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image) is not None, "localExecution.postgresRestoreImage must pin a full image digest")
+    image = settings.get("postgresRestoreImage")
+    require(image is None or isinstance(image, str) and re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image) is not None, "localExecution.postgresRestoreImage must pin a full image digest")
     host = settings["executionHost"]
     require(isinstance(host, dict) and set(host) == {"virtualNetworkId", "managePeering", "manageBlobDnsLink"}, "localExecution.executionHost has unexpected or missing fields")
     require(isinstance(host["virtualNetworkId"], str) and host["virtualNetworkId"], "Configure the execution host VNet resource ID")
@@ -143,6 +146,9 @@ def local_settings(document):
     runtime_inputs = settings.setdefault("runtimeInputs", {})
     require(isinstance(runtime_inputs, dict) and not set(runtime_inputs) - {"backupBlob", "backupSha256", "postgresMigrationUser", "legacySaltSource", "privateApiIngressClass", "privateAdminIngressClass", "auditRecoveryCursor"}, "localExecution.runtimeInputs contains unknown fields")
     require("legacySaltSource" not in runtime_inputs or runtime_inputs["legacySaltSource"] in {"secret", "master-key"}, "localExecution.runtimeInputs.legacySaltSource must be secret or master-key")
+    if deployment_mode(document) == "greenfield":
+        migration_inputs = {"backupBlob", "backupSha256", "postgresMigrationUser", "legacySaltSource"}
+        require(not migration_inputs & runtime_inputs.keys(), "Greenfield local execution cannot contain migration-only runtime inputs")
     for field in ("releaseReportPath", "imageSigning"):
         require(field not in settings or settings[field] is not None, f"localExecution.{field} cannot be null")
     if "releaseReportPath" in settings:
@@ -238,9 +244,10 @@ def load_config(path):
     customer = copy.deepcopy(document)
     customer.pop("localExecution")
     config = validate_config(customer, customer.get("environment"))
-    require(deployment_mode(config) == "migration", "Local Stage0-9 currently applies only to migration mode")
     require("runner-connectivity" not in config["parameters"], "Move execution host connectivity from parameters into localExecution.executionHost")
     host = settings["executionHost"]
+    if deployment_mode(config) == "greenfield":
+        require(host["manageBlobDnsLink"] is False, "Greenfield execution host connectivity must not manage migration-only Blob DNS")
     config["parameters"]["runner-connectivity"] = {
         "runnerVirtualNetworkId": host["virtualNetworkId"],
         "managePeering": host["managePeering"],
@@ -469,6 +476,9 @@ def local_operation_environment(config, settings, step, profile):
 def enforce_local_policy(settings, step, config=None):
     features = settings["features"]
     native = False
+    if config and deployment_mode(config) == "greenfield":
+        migration_only = {"backup", "connectivity-check", "backup-restore", "legacy-logging", "monitoring", "monitoring-onboard", "legacy-hardening", "legacy-access-restrict", "legacy-access-restore", "stage5-restore-target"}
+        require(step not in migration_only, "Greenfield local execution does not run legacy backup, restore, monitoring or access operations")
     if config and "application" in config:
         from scripts.backend_manifest import application_authentication
         native = application_authentication(config)["mode"] == "native"
@@ -710,7 +720,8 @@ def run_backup_restore(config, settings, revision, destination):
 
 
 def check_configuration(config):
-    for stage, component in ((0, "bootstrap"), (0, "backup"), (0, "runner-connectivity"), (1, "legacy-logging"), (1, "monitoring")):
+    components = ((0, "bootstrap"), (0, "network"), (0, "runner-connectivity")) if deployment_mode(config) == "greenfield" else ((0, "bootstrap"), (0, "backup"), (0, "runner-connectivity"), (1, "legacy-logging"), (1, "monitoring"))
+    for stage, component in components:
         parameters_for(config, stage, component)
     return {"status": "valid"}
 

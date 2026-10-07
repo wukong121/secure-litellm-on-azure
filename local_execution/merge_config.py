@@ -11,7 +11,7 @@ import tempfile
 from uuid import uuid4
 
 from local_execution.runner import load_config
-from scripts.customer_migration import ROOT, MigrationError, private_write, require
+from scripts.customer_migration import ROOT, MigrationError, deployment_mode, private_write, require
 from scripts.workflow_diagnostics import diagnostic_exit
 
 
@@ -70,6 +70,8 @@ def derived_values(config):
     platform = config.get("parameters", {}).get("platform", {})
     stage5 = platform.get("stage5Data", {})
     backup = config.get("parameters", {}).get("backup", {})
+    network = config.get("parameters", {}).get("network", {})
+    bootstrap = config.get("parameters", {}).get("bootstrap", {})
     certificate = config.get("parameters", {}).get("certificate-vault", {})
     local = config.get("localExecution", {})
     host = local.get("executionHost", {})
@@ -82,8 +84,8 @@ def derived_values(config):
         "REPLACE_SUBSCRIPTION_ID": config.get("azure", {}).get("subscriptionId"),
         "REPLACE_AZURE_REGION": config.get("location"),
         "REPLACE_CUSTOMER_BASE_DOMAIN": config.get("baseDomain"),
-        "REPLACE_TARGET_LOG_WORKSPACE": platform.get("logAnalyticsWorkspaceName") or backup.get("logAnalyticsWorkspaceName"),
-        "REPLACE_TARGET_VNET": platform.get("stage4Network", {}).get("virtualNetworkName") or backup.get("virtualNetworkName"),
+        "REPLACE_TARGET_LOG_WORKSPACE": platform.get("logAnalyticsWorkspaceName") or backup.get("logAnalyticsWorkspaceName") or bootstrap.get("logAnalyticsWorkspaceName"),
+        "REPLACE_TARGET_VNET": platform.get("stage4Network", {}).get("virtualNetworkName") or backup.get("virtualNetworkName") or network.get("virtualNetworkName"),
         "REPLACE_RUNNER_VNET_RESOURCE_ID": host.get("virtualNetworkId"),
         "REPLACE_GLOBALLY_UNIQUE_ACR_NAME": platform.get("containerRegistryName"),
         "REPLACE_CERTIFICATE_VAULT_NAME": certificate.get("vaultName"),
@@ -164,6 +166,8 @@ def merge_stage(config, catalog, stage, options=(), values=None):
     selected = catalog["stages"].get(str(stage))
     require(isinstance(selected, dict), f"Stage {stage} is missing from the fragment catalog")
     validate_options(stage, tuple(options))
+    mode = deployment_mode(config)
+    require(mode != "greenfield" or "legacy-master-key-salt" not in options, "legacy-master-key-salt does not apply to greenfield")
     merged = copy.deepcopy(config)
     require(isinstance(merged.get("localExecution"), dict), "Base configuration requires localExecution")
     apply_section(merged, selected)
@@ -176,6 +180,9 @@ def merge_stage(config, catalog, stage, options=(), values=None):
             apply_section(merged, section)
         else:
             deep_merge(merged["localExecution"], section)
+    if stage == 5 and mode == "greenfield":
+        runtime_inputs = merged["localExecution"].setdefault("runtimeInputs", {})
+        remove_keys(runtime_inputs, ["backupBlob", "backupSha256", "postgresMigrationUser", "legacySaltSource"])
     replacements = {**derived_values(merged), **derived_values(config), **(values or {})}
     merged = replace_placeholders(merged, replacements)
     return merged, sorted(unresolved_placeholders(merged))

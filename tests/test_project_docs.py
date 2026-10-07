@@ -878,6 +878,16 @@ class ProjectDocumentationTests(unittest.TestCase):
         for required in ("dev/test native canary", "可省略人工checks", "其他canary/production继续要求完整证据"):
             self.assertIn(required, delivery)
 
+    def test_local_execution_documents_greenfield_without_legacy_operations(self):
+        local = (ROOT / "local_execution/README_ZH.md").read_text()
+        main = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
+        later = (ROOT / "local_execution/stage2-9-guide-zh.md").read_text()
+        for required in ("deploymentMode=greenfield", "manageBlobDnsLink=false", "--step network", "不得运行`backup`", "stage5-restore-target"):
+            self.assertIn(required, local)
+        self.assertIn("migration与greenfield均可", main)
+        self.assertNotIn("当前不支持greenfield", main)
+        self.assertIn("greenfield已完成Stage0 bootstrap/network/Runner Peering", later)
+
     def test_audit_costs_describe_native_storage_and_optional_enhancement(self):
         text = (ROOT / "docs/litellm-bom-cost-comparison-zh.md").read_text()
         section = text.split("## 6. 员工与 Agent 上下文审计成本影响", 1)[1].split("## 7.", 1)[0]

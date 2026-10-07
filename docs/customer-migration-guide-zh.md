@@ -10,7 +10,7 @@
 
 阅读顺序：第1节辨认workflow → 第2节准备配置/身份/Runner → 第3节学会plan批准与附件审核 → 第4节逐Stage执行并发布并行canary → 第5节按需最终迁移/退役 → 第6节排错。资源实现细节和可选增强流程见[部署参考](customer-deployment-workflows-zh.md)，机器准备见[Runner指南](customer-private-runner-preparation-zh.md)。客户资源值、日志正文和现场记录只保存在受控位置，不填进本文或公共Git。
 
-客户无法运行GitHub Actions时，不混用本手册的run ID、Environment和artifact步骤；既有网关迁移可改走独立的[Stage0–9本地手工执行包](../local_execution/README_ZH.md)。本地路径使用自己的plan哈希、UAMI/现有Azure会话及客户Cosign密钥，当前不支持greenfield；Stage7可延期，但延期期间不能发布Stage8应用或启用Stage9流量。
+客户无法运行GitHub Actions时，不混用本手册的run ID、Environment和artifact步骤；migration与greenfield均可改走独立的[Stage0–9本地手工执行包](../local_execution/README_ZH.md)。本地路径使用自己的plan哈希、UAMI/现有Azure会话及客户Cosign密钥。greenfield跳过旧集群备份/恢复、Stage1和`stage5-restore-target`，但仍须创建新目标网络、初始化新库/密钥并完成Stage2–9门禁。Stage7可延期，但延期期间不能发布Stage8应用或启用Stage9流量。
 
 ## 1. 迁移原则与入口
 

@@ -6,7 +6,7 @@ import re
 import subprocess
 from urllib.parse import urlsplit
 
-from scripts.customer_migration import configured, require
+from scripts.customer_migration import configured, deployment_mode, require
 from scripts.workflow_diagnostics import exception_diagnostic
 
 
@@ -19,20 +19,23 @@ def connectivity_settings(config):
     require(match is not None, "runnerVirtualNetworkId must identify a VNet, not a subnet or VM")
     subscription, group, name = match.groups()
     require(subscription.lower() == config["azure"]["subscriptionId"].lower(), "Runner connectivity currently requires the same subscription")
-    backup = config["parameters"].get("backup", {})
-    backup_name = backup.get("virtualNetworkName", "")
-    require(isinstance(backup_name, str) and configured(backup_name) and re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", backup_name), "Runner connectivity requires the configured backup VNet")
-    target = f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{config['target']['resourceGroup']}/providers/Microsoft.Network/virtualNetworks/{backup_name}"
-    require(identifier.lower() != target.lower(), "Runner and backup VNet must be separate; reuse an existing same-VNet path without this component")
+    mode = deployment_mode(config)
+    foundation = config["parameters"].get("backup" if mode == "migration" else "network", {})
+    target_name = foundation.get("virtualNetworkName", "")
+    require(isinstance(target_name, str) and configured(target_name) and re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", target_name), "Runner connectivity requires the configured target VNet")
+    target = f"/subscriptions/{config['azure']['subscriptionId']}/resourceGroups/{config['target']['resourceGroup']}/providers/Microsoft.Network/virtualNetworks/{target_name}"
+    require(identifier.lower() != target.lower(), "Runner and target VNet must be separate; reuse an existing same-VNet path without this component")
     manage_peering = settings.get("managePeering", True)
     manage_dns = settings.get("manageBlobDnsLink", True)
     require(type(manage_peering) is bool and type(manage_dns) is bool, "Connectivity management switches must be booleans")
+    require(mode == "migration" or manage_dns is False, "Greenfield runner connectivity cannot manage migration-only Blob DNS")
     suffix = hashlib.sha256((identifier.lower() + "|" + target.lower()).encode()).hexdigest()[:16]
     return {
         "runnerVirtualNetworkId": identifier, "runnerResourceGroupName": group,
         "runnerVirtualNetworkName": name, "backupVirtualNetworkId": target,
-        "backupVirtualNetworkName": backup_name, "managePeering": manage_peering,
-        "manageBlobDnsLink": manage_dns, "connectionName": "llmgw-backup-" + suffix,
+        "backupVirtualNetworkName": target_name, "managePeering": manage_peering,
+        "manageBlobDnsLink": manage_dns,
+        "connectionName": ("llmgw-backup-" if mode == "migration" else "llmgw-target-") + suffix,
     }
 
 
@@ -101,7 +104,7 @@ def connectivity_resource_ids(config, dns_zone):
 
 def inspect_connectivity(config, azure):
     settings = connectivity_settings(config)
-    target = backup_target(config, azure)
+    target = backup_target(config, azure) if deployment_mode(config) == "migration" else {}
     networks = [azure.scoped(["network", "vnet", "show", "--ids", settings[key]]) for key in ("runnerVirtualNetworkId", "backupVirtualNetworkId")]
     spaces = []
     for network, identifier in zip(networks, (settings["runnerVirtualNetworkId"], settings["backupVirtualNetworkId"])):
@@ -128,8 +131,8 @@ def inspect_connectivity(config, azure):
             if same_name:
                 require(same_network and link.get("registrationEnabled") is False, "Existing DNS link conflicts with managed backup connectivity")
     return {**target, "runnerAddressSpaces": [str(prefix) for prefix in spaces[0]],
-            "backupAddressSpaces": [str(prefix) for prefix in spaces[1]],
-            "allowedResourceIds": sorted(connectivity_resource_ids(config, target["privateDnsZoneName"]))}
+        "backupAddressSpaces": [str(prefix) for prefix in spaces[1]],
+        "allowedResourceIds": sorted(connectivity_resource_ids(config, target.get("privateDnsZoneName", "")))}
 
 
 BACKUP_PROBES = ("backup-resources", "backup-private-dns", "backup-private-tls", "backup-blob-read")

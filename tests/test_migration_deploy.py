@@ -352,6 +352,7 @@ class MigrationDeploymentTests(unittest.TestCase):
         self.assertEqual(document["parameters"]["runnerResourceGroupName"]["value"], "rg-runner")
         self.assertTrue(document["parameters"]["managePeering"]["value"])
         settings = connectivity_settings(config)
+        self.assertTrue(settings["connectionName"].startswith("llmgw-backup-"))
         original = copy.deepcopy(config)
         config["parameters"]["runner-connectivity"]["runnerVirtualNetworkId"] = settings["runnerVirtualNetworkId"].upper()
         self.assertEqual(settings["connectionName"], connectivity_settings(config)["connectionName"])

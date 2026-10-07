@@ -38,7 +38,7 @@ STAGES = (
     ("Approved pilot and cutover", ("enabled_what_if", "origin_tls_private_link", "pilot_regression", "rollback_rehearsal", "dual_owner_release")),
 )
 COMPONENTS = {
-    "bootstrap": (0, "bootstrap", {"workspaceMode", "logRetentionDays"}),
+    "bootstrap": (0, "bootstrap", {"workspaceMode", "logRetentionDays", "logAnalyticsWorkspaceName"}),
     "network": (0, "network-bootstrap", {"virtualNetworkName", "virtualNetworkAddressPrefix", "privateEndpointSubnetName", "privateEndpointSubnetPrefix"}),
     "backup": (0, "backup-storage", {"storageAccountName", "virtualNetworkName", "virtualNetworkAddressPrefix", "privateEndpointSubnetName", "privateEndpointSubnetPrefix", "logAnalyticsWorkspaceName", "backupOwnerPrincipalId", "backupAutomationPrincipalId", "storageSku", "softDeleteRetentionDays"}),
     "runner-connectivity": (0, "runner-connectivity", {"runnerVirtualNetworkId", "managePeering", "manageBlobDnsLink"}),
@@ -165,7 +165,7 @@ def stage_fingerprint(config, stage):
     if stage < 4:
         scoped.pop("privateIngress", None)
         scoped.pop("certificates", None)
-    scoped["bootstrapWorkspaceName"] = config["parameters"].get("backup", config["parameters"].get("platform", {})).get("logAnalyticsWorkspaceName")
+    scoped["bootstrapWorkspaceName"] = config["parameters"].get("bootstrap", {}).get("logAnalyticsWorkspaceName") or config["parameters"].get("backup", config["parameters"].get("platform", {})).get("logAnalyticsWorkspaceName")
     scoped["parameters"] = {}
     for component, values in config["parameters"].items():
         if COMPONENTS[component][0] > stage:
@@ -375,7 +375,7 @@ def parameters_for(config, stage, component):
     require(REQUIRED[component].issubset(parameters) and configured(parameters), "Component configuration is missing or contains placeholders")
     if component == "bootstrap":
         logging = config["parameters"].get("backup", config["parameters"].get("platform", {}))
-        workspace_name = logging.get("logAnalyticsWorkspaceName", "")
+        workspace_name = parameters.get("logAnalyticsWorkspaceName") or logging.get("logAnalyticsWorkspaceName", "")
         require(configured(workspace_name), "Target Log Analytics workspace name is required for bootstrap")
         parameters.update(resourceGroupName=config["target"]["resourceGroup"], logAnalyticsWorkspaceName=workspace_name)
     elif component == "legacy-logging":
