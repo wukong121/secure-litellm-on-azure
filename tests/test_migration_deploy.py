@@ -383,6 +383,61 @@ class MigrationDeploymentTests(unittest.TestCase):
         config["parameters"]["runner-connectivity"].update(managePeering=False, manageBlobDnsLink=False)
         self.assertEqual(connectivity_resource_ids(config, context["privateDnsZoneName"]), set())
 
+    def test_greenfield_connectivity_scope_does_not_require_blob_dns(self):
+        from scripts.runner_connectivity import connectivity_resource_ids
+        config = self.connectivity_config()
+        config["deploymentMode"] = "greenfield"
+        config.pop("legacy")
+        config["parameters"]["network"] = config["parameters"].pop("backup")
+        config["parameters"]["runner-connectivity"]["manageBlobDnsLink"] = False
+        allowed = connectivity_resource_ids(config, "")
+        self.assertEqual(len(allowed), 3)
+        changes = [{"changeType": "Create", "resourceId": identifier} for identifier in allowed]
+
+        assert_change_scope(config, "runner-connectivity", changes, {})
+
+        with self.assertRaisesRegex(ValueError, "unapproved resource"):
+            assert_change_scope(config, "runner-connectivity", [{"changeType": "Create", "resourceId": group_id(config) + "/providers/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"}], {})
+
+    def test_greenfield_connectivity_plan_and_deploy_need_no_backup_dns(self):
+        from unittest.mock import Mock
+        from scripts.runner_connectivity import connectivity_resource_ids, connectivity_settings
+        config = self.connectivity_config()
+        config["deploymentMode"] = "greenfield"
+        config.pop("legacy")
+        config["parameters"].pop("monitoring")
+        config["parameters"]["network"] = {
+            "virtualNetworkName": "backup-vnet",
+            "virtualNetworkAddressPrefix": "10.30.0.0/16",
+            "privateEndpointSubnetName": "snet-private-endpoints",
+            "privateEndpointSubnetPrefix": "10.30.8.0/24",
+        }
+        config["parameters"].pop("backup")
+        config["parameters"]["platform"]["stage4Network"]["virtualNetworkName"] = "backup-vnet"
+        config["parameters"]["runner-connectivity"]["manageBlobDnsLink"] = False
+        settings = connectivity_settings(config)
+        networks = {
+            settings["runnerVirtualNetworkId"]: {"id": settings["runnerVirtualNetworkId"], "addressSpace": {"addressPrefixes": ["10.50.0.0/24"]}},
+            settings["backupVirtualNetworkId"]: {"id": settings["backupVirtualNetworkId"], "addressSpace": {"addressPrefixes": ["10.30.0.0/16"]}},
+        }
+        azure = Mock()
+        azure.run.return_value = {"tenantId": config["azure"]["tenantId"], "id": config["azure"]["subscriptionId"]}
+
+        def scoped(command):
+            if command[:3] == ["network", "vnet", "show"]:
+                return networks[command[command.index("--ids") + 1]]
+            if "what-if" in command:
+                return {"status": "Succeeded", "changes": [{"resourceId": identifier, "changeType": "Create"} for identifier in sorted(connectivity_resource_ids(config, ""))]}
+            if command[:3] == ["deployment", "group", "create"]:
+                return {"properties": {"provisioningState": "Succeeded"}}
+            raise AssertionError(command)
+
+        azure.scoped.side_effect = scoped
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_deploy.subprocess.run", side_effect=self.compile):
+            plan = deploy_component(config, 0, "runner-connectivity", "a" * 40, "plan", [], directory, azure=azure)
+            self.assertEqual(len(plan["changes"]), 3)
+            deploy_component(config, 0, "runner-connectivity", "a" * 40, "deploy", [], directory, plan["planSha256"], azure)
+
     def connectivity_azure(self, config):
         from unittest.mock import Mock
         from scripts.runner_connectivity import connectivity_settings
