@@ -40,7 +40,7 @@ Base清单包含：
 - `test`：2副本；
 - `prod`：2副本。
 
-当前镜像固定为阶段2验证过的官方LiteLLM `1.98.0` digest。该清单只用于渲染和后续新环境验证；在镜像同步、扫描、SBOM和签名完成后，供应链流程必须通过Pull Request把镜像替换为目标ACR digest。
+当前镜像固定为受审查的官方LiteLLM `1.104.0` digest。该清单只用于渲染和后续新环境验证；在镜像同步、扫描、SBOM和签名完成后，供应链流程必须通过Pull Request把镜像替换为目标ACR digest。版本、漏洞、GPT-6和数据库兼容证据见[1.104.0升级验证](../docs/litellm-1.104.0-upgrade-validation-2026-10-07.md)。
 
 ## 尚未投入环境Overlay
 

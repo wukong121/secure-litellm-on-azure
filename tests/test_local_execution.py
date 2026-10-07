@@ -641,6 +641,7 @@ class LocalExecutionTests(unittest.TestCase):
         self.assertIn("legacyMasterKeySaltCompatibility", stage5)
         self.assertIn("separateDatabaseAdminIdentity", stage5)
         self.assertIn("application", staged["stages"]["6"]["customerConfig"])
+        self.assertEqual(staged["stages"]["6"]["customerConfig"]["application"]["models"][0]["baseModel"], "azure/REPLACE_EXISTING_MODEL_BASE_MODEL")
         self.assertEqual(staged["stages"]["6"]["nativeAuthentication"]["customerConfig"]["application"]["authentication"]["mode"], "native")
         self.assertEqual(set(staged["stages"]["7"]["customerConfig"]), {"entra", "proxy"})
         self.assertEqual(staged["stages"]["7"]["localExecutionMerge"]["features"]["entraMode"], "enabled")
@@ -727,6 +728,7 @@ class LocalExecutionTests(unittest.TestCase):
             "REPLACE_64_HEX_SHA256": "2" * 64,
             "REPLACE_BUILT_64_HEX_DIGEST": "3" * 64,
             "REPLACE_EXISTING_MODEL_DEPLOYMENT_NAME": "gpt-deployment",
+            "REPLACE_EXISTING_MODEL_BASE_MODEL": "gpt-6-luna",
             "REPLACE_ENTRA_BOOTSTRAP_SERVICE_PRINCIPAL_OBJECT_ID": "77777777-7777-4777-8777-777777777777",
             "REPLACE_ENTRA_ACCESS_SERVICE_PRINCIPAL_OBJECT_ID": "88888888-8888-4888-8888-888888888888",
             "REPLACE_CALLING_APPLICATION_CLIENT_ID": "99999999-9999-4999-8999-999999999999",

@@ -14,8 +14,8 @@ import yaml
 from LiteLLM.runtime.azure_postgresql import DatabaseAuthError, database_url_template, install_prisma_adapter, workload_identity_tokens
 
 
-UTILS_SHA256 = "eb957b8a6028baeb675c260ddcccf46584cb84034538a1c545cf2bffe4698526"
-SERVER_SHA256 = "14b954201801f7ef19df1f328dda37f489a03315b856f0dc43da8827d07669ec"
+UTILS_SHA256 = "81e6fdba0c204a852883ac96a1b47ec2254c9fe97547f7e05bd0110e0d90933f"
+SERVER_SHA256 = "32bdd5e335da78426935c72e3c06b1417f26d23709eb180aaddbfc56819cc1e2"
 REQUIRED_VIEWS = ("LiteLLM_VerificationTokenView", "MonthlyGlobalSpend", "Last30dKeysBySpend", "Last30dModelsBySpend", "MonthlyGlobalSpendPerKey", "MonthlyGlobalSpendPerUserPerKey", "Last30dTopEndUsersSpend", "DailyTagSpend")
 REQUIRED_TABLES = ("LiteLLM_VerificationToken", "LiteLLM_TeamTable", "LiteLLM_UserTable", "LiteLLM_SpendLogs", "_prisma_migrations")
 

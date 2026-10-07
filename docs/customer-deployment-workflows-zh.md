@@ -93,7 +93,7 @@ Stage4建立私网连接后，才验收`target_image_signature_sbom`，继续使
 
 完整模式执行11个检查组，包括真实PG/schema、JSON/SSE落库、原生UI核心读取、TLS、Prisma、collector、两种应用镜像构建和源镜像扫描。浏览器详细结果及合成截图在忽略目录`temp/native-ui-browser/`，其中`fullManagementAccepted`和`mobileAccepted`保持false。不能把核心读取通过说成所有页面功能已验收。
 
-完整模式同时运行固定LiteLLM 1.95.0到1.98.0的隔离升级：旧镜像digest为`sha256:af806882b7a6ced41658db5b6a7e98ed7b9b51d03b935e0417bf1c8552d688af`，先初始化旧库、写入合成预算及密文、dump/restore到空目标，再执行受控schema升级及应用/浏览器检查。旧版141个迁移在新版151个迁移中并非连续前缀；迁移器仅接受已核对的有序名称/checksum源历史指纹及其后续升级顺序，兼容全新旧版库和另行审查的长期升级库，不改写历史、不自动baseline、不跳过未知迁移。合成记录及旧库历史保持不变，旧版加密值可由新版使用相同签名材料解密。结果在`temp/legacy-upgrade/report.json`。
+完整模式同时运行固定LiteLLM 1.95.0到1.104.0的隔离升级：旧镜像digest为`sha256:af806882b7a6ced41658db5b6a7e98ed7b9b51d03b935e0417bf1c8552d688af`，先初始化旧库、写入合成预算及密文、dump/restore到空目标，再执行受控schema升级及应用/浏览器检查。旧版141个迁移在新版189个迁移中并非连续前缀；迁移器仅接受已核对的有序名称/checksum源历史指纹及其后续升级顺序，兼容全新旧版库和另行审查的长期升级库，不改写历史、不自动baseline、不跳过未知迁移。合成记录及旧库历史保持不变，旧版加密值可由新版使用相同签名材料解密。两个LiteLLM SpendLogs索引按上游1.104.0合同由operator在线创建，不在自动迁移中锁表创建。结果在`temp/legacy-upgrade/report.json`。
 
 这验证的是指定镜像生成的小型合成数据库，不是客户实际镜像digest、完整数据或停机时长。必须先盘点实际数据库大小、Spend Logs/WAL增长、旧镜像digest和迁移历史，再测量备份、传输、恢复、升级、核验及入口切换总耗时。开发人员数量不能直接换算数据库容量；最终写入冻结、最终空目标选择、切流后写入对账和数据回退编排仍未完成。
 
@@ -560,7 +560,7 @@ Stage9 `release=true`只控制Front Door流量与WAF，不自动改任意DNS，�
 
 ### 每批的实施步骤
 
-本次A04增量：[Azure凭据适配](../LiteLLM/runtime/azure_postgresql.py)已安装到专用应用入口，覆盖启动URL和运行期刷新。除wrapper契约测试外，新增隔离PostgreSQL/TLS端到端测试，验证151个迁移、八个视图、datamodel一致性、无DDL ASGI启动、真实查询引擎换池和旧事务排空；失败/取消契约仍有独立测试。尚未获取真实Azure Token或完成AKS/CSI/旧版本恢复验收，不宣称生产可用；A05/A06需将身份、密钥、镜像及生成清单接线后再跑客户环境门禁。
+本次A04增量：[Azure凭据适配](../LiteLLM/runtime/azure_postgresql.py)已安装到专用应用入口，覆盖启动URL和运行期刷新。除wrapper契约测试外，新增隔离PostgreSQL/TLS端到端测试，验证189个迁移、八个视图、除两项operator-managed索引外的datamodel一致性、无DDL ASGI启动、真实查询引擎换池和旧事务排空；失败/取消契约仍有独立测试。尚未获取真实Azure Token或完成AKS/CSI验收，不宣称生产可用；A05/A06需将身份、密钥、镜像及生成清单接线后再跑客户环境门禁。
 
 1. 先固定输入、资源作用域、身份权限、失败/重试和客户决策边界。未明确的DNS/PKI、协议范围、RTO/RPO、审计故障策略记录为待批准输入，不猜测客户政策。
 2. 在拥有该行为的模块实现最小闭环，立即运行能推翻假设的定向测试；不先添加一个实际能力为空的workflow按钮。

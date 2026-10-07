@@ -65,7 +65,7 @@ Private Link配置：
 - Private DNS：`privatelink.redis.azure.net`；
 - 应用连接`<name>.<region>.redis.azure.net:10000`并执行TLS主机名校验。
 
-LiteLLM 1.98.0配置使用Workload Identity Object ID作为`REDIS_USERNAME`，并启用`azure_redis_ad_token`。正式启用前必须实测初次Token、到期前刷新、连接池重认证、planned maintenance和failover重连。
+LiteLLM 1.104.0目标配置使用Workload Identity Object ID作为`REDIS_USERNAME`，并启用`azure_redis_ad_token`。正式启用前必须实测初次Token、到期前刷新、连接池重认证、planned maintenance和failover重连。
 
 ## 3. Key Vault与Secret边界
 
@@ -160,7 +160,7 @@ LiteLLM当前仍以环境变量读取Master Key、Salt和`DATABASE_URL`，因此
 4. Key Vault恢复、Purge Protection和删除锁运维流程批准；
 5. Secret无日志引导和Salt保全流程演练完成；
 6. 私网runner或管理跳板可解析并访问三个Private Endpoint；
-7. LiteLLM 1.98.0 PostgreSQL/Redis协议兼容性实测通过；
+7. LiteLLM 1.104.0 PostgreSQL协议隔离测试已通过；Redis仍须在目标Azure环境完成Token刷新、连接池重认证和failover实测；
 8. NetworkPolicy、Firewall FQDN和端口与实际流量一致；
 9. What-if再次证明现有VNet、Blob PE、当前AKS、APIM和VMSS UAMI无Modify/Delete；
 10. 数据迁移、只读回退、PITR和故障注入窗口获批。

@@ -134,9 +134,11 @@ ACR Soft Delete没有写入当前稳定API模块；需在目标区域/API验证�
 
 ### 4.2 镜像
 
-当前渲染使用阶段2验证的官方LiteLLM `1.98.0` digest：
+当前渲染已更新为受审查的官方LiteLLM `1.104.0` digest；原阶段2的`1.98.0`验证保留为历史证据：
 
-`sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4`
+`sha256:625981c83410a3ea68eb0697590a57ec1d764d634514d54fa5db0591077ee839`
+
+升级原因、CVE扫描、GPT-6运行合同和数据库兼容结果见[1.104.0升级验证](litellm-1.104.0-upgrade-validation-2026-10-07.md)。
 
 这只是候选渲染基线，不表示允许从官方registry直接部署生产。正式部署前必须由镜像晋级工作流导入目标ACR、扫描、生成SBOM和签名，再通过Pull Request把overlay更新为ACR digest。
 

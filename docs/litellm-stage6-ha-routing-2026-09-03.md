@@ -11,7 +11,7 @@
 阶段6第一轮代码改造已完成：
 
 - 新增独立`stage6-ha` Kustomize组件和Stage4/5/6组合渲染目标；
-- 固定LiteLLM `1.98.0`候选镜像digest，保持非Root、只读根文件系统和三类探针；
+- 固定LiteLLM `1.104.0`受审镜像digest，保持非Root、只读根文件系统和三类探针；版本与GPT-6兼容证据见[1.104.0升级验证](litellm-1.104.0-upgrade-validation-2026-10-07.md)；
 - 双副本、`maxUnavailable=0`、`maxSurge=1`、PDB和跨节点强制拓扑分布；
 - 增加`minReadySeconds=30`、600秒终止窗口和30秒端点摘除等待；
 - 新增CPU/内存HPA，最少2副本、最多6副本，并限制快速缩容；

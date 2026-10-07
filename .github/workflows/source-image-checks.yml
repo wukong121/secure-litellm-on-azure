@@ -35,6 +35,7 @@ jobs:
           name: source-image-${{ github.run_id }}
           path: |
             temp/source-supply-chain/source-summary.json
+            temp/source-supply-chain/source-runtime.json
             temp/source-supply-chain/source-sbom.spdx.json
             temp/source-supply-chain/source-scan.json
           if-no-files-found: error

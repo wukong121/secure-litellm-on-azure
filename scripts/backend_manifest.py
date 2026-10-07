@@ -41,9 +41,11 @@ def application_settings(config):
     require(len(accounts) == len(connections), "Model connection aliases must be unique")
     identities = set()
     for model in settings["models"]:
-        require(isinstance(model, dict) and set(model) == {"modelGroup", "connectionAlias", "deploymentName", "id", "apiVersion"} and configured(model), "Invalid model deployment mapping")
+        required = {"modelGroup", "connectionAlias", "deploymentName", "id", "apiVersion"}
+        require(isinstance(model, dict) and required.issubset(model) and not set(model) - required - {"baseModel"} and configured(model), "Invalid model deployment mapping")
         for key in ("modelGroup", "deploymentName", "id", "apiVersion"):
             require(isinstance(model[key], str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", model[key]) is not None, "Model mapping must contain plain identifiers")
+        require("baseModel" not in model or isinstance(model["baseModel"], str) and re.fullmatch(r"azure/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", model["baseModel"]) is not None, "Azure base model must identify the deployed model family")
         require(model["connectionAlias"] in accounts and model["id"] not in identities, "Model account is unapproved or deployment ID is duplicated")
         require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{1,62}", accounts[model["connectionAlias"]]["accountName"]) is not None, "Invalid model account name")
         identities.add(model["id"])
@@ -64,7 +66,7 @@ def render_backend_manifest(config, platform, versions, host, endpoint_subnet):
     router = yaml.safe_load((ROOT / "deploy/components/stage6-ha/config-patch.yaml").read_text())["data"]["config.yaml"]
     runtime = yaml.safe_load(router)
     accounts = {item["alias"]: item for item in config["parameters"]["platform"]["azureOpenAIConnections"]}
-    runtime["model_list"] = [{"model_name": model["modelGroup"], "litellm_params": {"model": "azure/" + model["deploymentName"], "api_base": "https://" + accounts[model["connectionAlias"]]["accountName"] + ".openai.azure.com", "api_version": model["apiVersion"]}, "model_info": {"id": model["id"]}} for model in settings["models"]]
+    runtime["model_list"] = [{"model_name": model["modelGroup"], "litellm_params": {"model": "azure/" + model["deploymentName"], "api_base": "https://" + accounts[model["connectionAlias"]]["accountName"] + ".openai.azure.com", "api_version": model["apiVersion"], **({"base_model": model["baseModel"]} if "baseModel" in model else {})}, "model_info": {"id": model["id"], **({"base_model": model["baseModel"]} if "baseModel" in model else {})}} for model in settings["models"]]
     affinities = next(iter(runtime["router_settings"]["model_group_affinity_config"].values()))
     runtime["router_settings"]["model_group_affinity_config"] = {name: list(affinities) for name in sorted({model["modelGroup"] for model in settings["models"]})}
     runtime["general_settings"].update(disable_prisma_schema_update=True, store_model_in_db=False)

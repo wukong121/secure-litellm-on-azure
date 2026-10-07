@@ -15,6 +15,31 @@ from scripts.workflow_diagnostics import command_failure_summary, exception_diag
 RUNTIME_DOCKERFILE = ROOT / "LiteLLM/runtime/Dockerfile"
 RUNTIME_DOCKERIGNORE = ROOT / "LiteLLM/runtime/Dockerfile.dockerignore"
 HARDENING_REQUIREMENTS = ROOT / "LiteLLM/runtime/security-requirements.txt"
+RUNTIME_CONTRACT = {
+    "uid": 10001,
+    "versions": {"litellm": "1.104.0", "anyio": "4.14.2", "PyJWT": "2.15.0"},
+    "gpt6": {"gpt-6.1": True, "azure/gpt-6.1": True},
+    "catalog": {"azure/gpt-6-astra": True, "azure/gpt-6-sol": True, "azure/gpt-6-luna": True},
+    "customDeploymentConfig": "AzureOpenAIGPT5Config",
+}
+RUNTIME_CONTRACT_SCRIPT = """import importlib.metadata as metadata
+import json
+import os
+import litellm
+from litellm.llms.openai.chat.gpt_5_transformation import OpenAIGPT5Config
+from litellm.types.utils import LlmProviders
+from litellm.utils import ProviderConfigManager
+models = ("gpt-6.1", "azure/gpt-6.1")
+catalog = ("azure/gpt-6-astra", "azure/gpt-6-sol", "azure/gpt-6-luna")
+custom = ProviderConfigManager.get_provider_chat_config(model="azure/custom-deployment", provider=LlmProviders.AZURE, base_model="azure/gpt-6.1")
+print(json.dumps({
+    "uid": os.getuid(),
+    "versions": {name: metadata.version(name) for name in ("litellm", "anyio", "PyJWT")},
+    "gpt6": {name: OpenAIGPT5Config.is_model_gpt_6_plus_model(name) for name in models},
+    "catalog": {name: name in litellm.model_cost for name in catalog},
+    "customDeploymentConfig": type(custom).__name__,
+}))
+"""
 
 
 def source_image():
@@ -101,6 +126,7 @@ def check_source(directory, revision, run=subprocess.run):
         return report
     evaluated_reference = report["evaluatedImageId"]
     operations = (
+        ("runtime", ["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--tmpfs", "/tmp:rw,nosuid,size=64m", "--entrypoint", "/app/.venv/bin/python", evaluated_reference, "-c", RUNTIME_CONTRACT_SCRIPT], "source-runtime.json"),
         ("sbom", ["syft", evaluated_reference, "--output", "spdx-json"], "source-sbom.spdx.json"),
         ("scan", ["trivy", "image", "--exit-code", "1", "--severity", "CRITICAL", "--ignore-unfixed", "--format", "json", evaluated_reference], "source-scan.json"),
     )
@@ -112,7 +138,9 @@ def check_source(directory, revision, run=subprocess.run):
             result = run(command, capture_output=True, text=True, check=False, timeout=1200)
             document = json.loads(result.stdout)
             require(isinstance(document, dict), "Tool output must be a JSON object")
-            if name == "sbom":
+            if name == "runtime":
+                require(document == RUNTIME_CONTRACT, "Runtime version, security dependency or GPT-6 model contract differs from the reviewed release")
+            elif name == "sbom":
                 require(document.get("spdxVersion") and isinstance(document.get("packages"), list) and document["packages"], "Incomplete SPDX inventory")
             else:
                 require(document.get("ArtifactName") == evaluated_reference and isinstance(document.get("Results"), list) and document["Results"], "Scan output is not bound to the hardened runtime")
@@ -121,7 +149,7 @@ def check_source(directory, revision, run=subprocess.run):
             entry.update(status="passed" if result.returncode == 0 else "failed", exitCode=result.returncode,
                          artifact=filename, sha256=hashlib.sha256(content.encode()).hexdigest())
             if result.returncode:
-                entry["reason"] = "Fixable CRITICAL vulnerabilities matched policy" if name == "scan" else "SBOM command returned a nonzero exit code"
+                entry["reason"] = {"runtime": "Runtime contract command returned a nonzero exit code", "scan": "Fixable CRITICAL vulnerabilities matched policy"}.get(name, "SBOM command returned a nonzero exit code")
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             entry["reason"] = "Tool unavailable, timed out, or returned invalid evidence"
             entry["diagnostic"] = exception_diagnostic(error, "source-supply-chain")

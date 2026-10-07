@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 
-PRISMA_WRAPPER_SHA256 = "12971b66c0c34f2490226802f5f957a693a7214c287a4fb54fa0d4acc08495de"
-DATABASE_SETTINGS_SHA256 = "f892164f9183af557df89d37f35caa96c3e171109d4a57fc5d17b90feb267f47"
+PRISMA_WRAPPER_SHA256 = "ae2a2de72c1f7462c23fe68cba688f74a5a669c597df84aeeea9ad43af24e976"
+DATABASE_SETTINGS_SHA256 = "b4fb9c12850a99856e1b222a2a39f4ac4efa22e630995b0c1e1ab33e0d73818e"
 DATABASE_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
 
 
@@ -93,6 +93,8 @@ def azure_wrapper_type(base, tokens):
                     raise DatabaseAuthError("Unsupported Azure Prisma refresh configuration")
                 value = await asyncio.to_thread(tokens.new_url)
                 previous = os.environ.get("DATABASE_URL")
+                from litellm.proxy.db.db_url_settings import add_missing_query_params, token_refresh_params_from_url
+                value = add_missing_query_params(value, token_refresh_params_from_url(previous or ""))
                 os.environ["DATABASE_URL"] = value
                 try:
                     await self._replace_prisma_client_for_token_refresh_locked(value)

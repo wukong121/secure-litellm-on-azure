@@ -197,6 +197,7 @@
               "modelGroup": "coding",
               "connectionAlias": "primary",
               "deploymentName": "REPLACE_EXISTING_MODEL_DEPLOYMENT_NAME",
+              "baseModel": "azure/REPLACE_EXISTING_MODEL_BASE_MODEL",
               "id": "primary-coding",
               "apiVersion": "v1"
             }
