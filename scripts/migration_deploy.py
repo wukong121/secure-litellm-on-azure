@@ -52,9 +52,12 @@ def assert_change_scope(config, component, changes, connectivity=None):
             require(resource in certificate_resource_ids(config), "Certificate plan attempts to modify an unapproved resource")
             continue
         if component == "runner-connectivity":
-            from scripts.runner_connectivity import connectivity_resource_ids
-            require(connectivity is not None, "Connectivity changes require resolved backup resources")
-            require(resource in connectivity_resource_ids(config, connectivity["privateDnsZoneName"]), "Connectivity plan attempts to modify an unapproved resource")
+            from scripts.runner_connectivity import connectivity_resource_ids, connectivity_settings
+            require(connectivity is not None, "Connectivity changes require resolved network resources")
+            settings = connectivity_settings(config)
+            dns_zone = connectivity.get("privateDnsZoneName", "")
+            require(not settings["manageBlobDnsLink"] or configured(dns_zone), "Managed Blob DNS connectivity requires a resolved Private DNS zone")
+            require(resource in connectivity_resource_ids(config, dns_zone), "Connectivity plan attempts to modify an unapproved resource")
             continue
         if component == "aks-ingress-role":
             network = config["parameters"]["platform"]["stage4Network"]
