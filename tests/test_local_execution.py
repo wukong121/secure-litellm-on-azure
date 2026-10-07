@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -72,6 +73,112 @@ class LocalExecutionTests(unittest.TestCase):
             "manageBlobDnsLink": host["manageBlobDnsLink"],
         }
         return validate_config(source, "test"), settings
+
+    def greenfield_configuration(self):
+        config = self.configuration()
+        config["deploymentMode"] = "greenfield"
+        config.pop("legacy")
+        config["parameters"]["network"] = {
+            key: config["parameters"]["backup"][key]
+            for key in ("virtualNetworkName", "virtualNetworkAddressPrefix", "privateEndpointSubnetName", "privateEndpointSubnetPrefix")
+        }
+        for component in ("backup", "legacy-logging", "monitoring"):
+            config["parameters"].pop(component, None)
+        config["localExecution"]["executionHost"]["manageBlobDnsLink"] = False
+        return config
+
+    def test_local_greenfield_uses_network_peering_and_blocks_legacy_steps(self):
+        from scripts.runner_connectivity import connectivity_settings
+
+        source = self.greenfield_configuration()
+        source["localExecution"].pop("postgresRestoreImage")
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            path = Path(folder) / "customer.json"
+            path.write_text(json.dumps(source))
+            config, settings = load_config(path)
+        self.assertEqual(check_configuration(config), {"status": "valid"})
+        self.assertEqual(INFRASTRUCTURE_STEPS["network"], (0, "network"))
+        self.assertIn("network", STEPS)
+        self.assertEqual(config["parameters"]["runner-connectivity"]["manageBlobDnsLink"], False)
+        self.assertTrue(connectivity_settings(config)["connectionName"].startswith("llmgw-target-"))
+        parameters = parameters_for(config, 0, "runner-connectivity")[1]["parameters"]
+        self.assertEqual(parameters["backupVirtualNetworkName"]["value"], config["parameters"]["network"]["virtualNetworkName"])
+        enforce_local_policy(settings, "network", config)
+        for step in ("backup", "connectivity-check", "backup-restore", "legacy-hardening", "stage5-restore-target"):
+            with self.subTest(step=step), self.assertRaisesRegex(ValueError, "Greenfield"):
+                enforce_local_policy(settings, step, config)
+
+        invalid = self.greenfield_configuration()
+        invalid["localExecution"].pop("postgresRestoreImage")
+        invalid["localExecution"]["executionHost"]["manageBlobDnsLink"] = True
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            path = Path(folder) / "customer.json"
+            path.write_text(json.dumps(invalid))
+            with self.assertRaisesRegex(ValueError, "Blob DNS"):
+                load_config(path)
+
+        invalid = self.greenfield_configuration()
+        invalid["localExecution"].pop("postgresRestoreImage")
+        invalid["localExecution"]["runtimeInputs"] = {"backupBlob": "pre-change/" + "1" * 32 + ".dump"}
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            path = Path(folder) / "customer.json"
+            path.write_text(json.dumps(invalid))
+            with self.assertRaisesRegex(ValueError, "migration-only runtime inputs"):
+                load_config(path)
+
+    def test_greenfield_stage5_merge_omits_migration_inputs(self):
+        source = self.greenfield_configuration()
+        source["localExecution"].pop("postgresRestoreImage")
+        catalog = json.loads((ROOT / "local_execution/customer.stage2-9.fragments.example.json").read_text())
+        values = {
+            "REPLACE_SUPPORTED_PG_SKU": "Standard_D2s_v3",
+            "REPLACE_PG_ADMIN_GROUP_OBJECT_ID": "66666666-6666-4666-8666-666666666666",
+            "REPLACE_PG_ADMIN_GROUP_NAME": "database-bootstrap-group",
+            "REPLACE_LOCAL_OPERATOR_UAMI_PRINCIPAL_ID": "44444444-4444-4444-8444-444444444444",
+        }
+
+        merged, missing = merge_stage(source, catalog, 5, values=values)
+
+        self.assertEqual(missing, [])
+        self.assertFalse({"backupBlob", "backupSha256", "postgresMigrationUser", "legacySaltSource"} & merged["localExecution"]["runtimeInputs"].keys())
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            path = Path(folder) / "customer.json"
+            path.write_text(json.dumps(merged))
+            load_config(path)
+        with self.assertRaisesRegex(ValueError, "greenfield"):
+            merge_stage(source, catalog, 5, options=("legacy-master-key-salt",), values=values)
+
+    def test_greenfield_stage3_merge_derives_bootstrap_network(self):
+        source = self.greenfield_configuration()
+        source["localExecution"].pop("postgresRestoreImage")
+        source["parameters"].pop("platform")
+        source["parameters"]["bootstrap"] = {
+            "workspaceMode": "create",
+            "logRetentionDays": 30,
+            "logAnalyticsWorkspaceName": "target-logs",
+        }
+        catalog = json.loads((ROOT / "local_execution/customer.stage2-9.fragments.example.json").read_text())
+        values = {
+            "REPLACE_GLOBALLY_UNIQUE_ACR_NAME": "syntheticregistry",
+            "REPLACE_NEW_PRIVATE_AKS_NAME": "target-aks",
+            "REPLACE_NEW_AKS_DNS_PREFIX": "target-aks",
+            "REPLACE_SUPPORTED_K8S_VERSION": "1.30",
+            "REPLACE_SUPPORTED_VM_SKU": "Standard_D4s_v4",
+        }
+
+        merged, missing = merge_stage(source, catalog, 3, values=values)
+
+        self.assertEqual(missing, [])
+        self.assertEqual(merged["parameters"]["platform"]["stage4Network"]["virtualNetworkName"], source["parameters"]["network"]["virtualNetworkName"])
+        self.assertEqual(merged["parameters"]["platform"]["logAnalyticsWorkspaceName"], source["parameters"]["bootstrap"]["logAnalyticsWorkspaceName"])
+
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as folder:
+            path = Path(folder) / "customer.json"
+            path.write_text(json.dumps(source))
+            config, _settings = load_config(path)
+        self.assertEqual(check_configuration(config), {"status": "valid"})
+        bootstrap = parameters_for(config, 0, "bootstrap")[1]["parameters"]
+        self.assertEqual(bootstrap["logAnalyticsWorkspaceName"]["value"], "target-logs")
 
     def test_standalone_configuration_is_translated_before_shared_validation(self):
         source = self.configuration()
@@ -569,8 +676,18 @@ class LocalExecutionTests(unittest.TestCase):
             self.assertIn(value, guide)
         for step in STEPS:
             self.assertIn(f"--step {step}", all_guides)
-        ordered = ["config-check", "bootstrap", "backup", "execution-host-connectivity", "connectivity-check", "backup-restore", "legacy-logging", "monitoring-onboard", "monitoring", "legacy-hardening", "legacy-access-restrict"]
-        self.assertEqual([guide.index(f"--step {step}") for step in ordered], sorted(guide.index(f"--step {step}") for step in ordered))
+        config_check = guide.index("--step config-check")
+        bootstrap = guide.index("--step bootstrap")
+        network = guide.index("--step network")
+        connectivity_positions = [match.start() for match in re.finditer(r"--step execution-host-connectivity", guide)]
+        backup = guide.index("--step backup")
+        connectivity_check = guide.index("--step connectivity-check")
+        backup_restore = guide.index("--step backup-restore")
+        self.assertTrue(config_check < bootstrap < network < connectivity_positions[0])
+        migration_connectivity = next(position for position in connectivity_positions if position > backup)
+        migration_ordered = [config_check, bootstrap, backup, migration_connectivity, connectivity_check, backup_restore]
+        migration_ordered.extend(guide.index(f"--step {step}") for step in ("legacy-logging", "monitoring-onboard", "monitoring", "legacy-hardening", "legacy-access-restrict"))
+        self.assertEqual(migration_ordered, sorted(migration_ordered))
 
     def test_stage2_to_9_fragments_merge_into_validator_compatible_config(self):
         catalog = json.loads((ROOT / "local_execution/customer.stage2-9.fragments.example.json").read_text())["stages"]

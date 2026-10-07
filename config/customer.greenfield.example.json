@@ -8,7 +8,7 @@
   "ownerEmail": "owner@example.com",
   "target": {"resourceGroup": "REPLACE_NEW_RESOURCE_GROUP"},
   "parameters": {
-    "bootstrap": {"workspaceMode": "create", "logRetentionDays": 30},
+    "bootstrap": {"workspaceMode": "create", "logRetentionDays": 30, "logAnalyticsWorkspaceName": "REPLACE_TARGET_LOG_WORKSPACE"},
     "network": {
       "virtualNetworkName": "REPLACE_TARGET_VNET",
       "virtualNetworkAddressPrefix": "10.30.0.0/16",

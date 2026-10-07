@@ -1,8 +1,8 @@
 # Stage0–9 本地手工执行包
 
-> 核对日期：2026-09-20
+> 核对日期：2026-10-07
 >
-> 适用：客户无法运行GitHub Actions，但已取得本仓库受审核代码，需要从本地完成Stage0–9。本文件详细覆盖已验证的Stage0–1；后续按[Stage2–9本地手工部署指南](stage2-9-guide-zh.md)执行。
+> 适用：客户无法运行GitHub Actions，但已取得本仓库受审核代码，需要从本地完成migration或greenfield的Stage0–9。本文件详细覆盖Stage0–1及两种模式边界；后续按[Stage2–9本地手工部署指南](stage2-9-guide-zh.md)执行。
 
 本目录是一套独立入口：
 
@@ -137,7 +137,7 @@ az vm identity remove \
 
 ## 2. 网络前提
 
-Runner VM已有Bastion和管理VNet，但Stage0创建的备份VNet仍需连接。`execution-host-connectivity`步骤会使用配置中的执行主机VNet ID，创建两端Peering和Blob Private DNS链接。
+Runner VM已有Bastion和管理VNet，但Stage0创建的目标VNet仍需连接。migration的`execution-host-connectivity`创建两端Peering和Blob Private DNS链接；greenfield只创建Runner与新目标VNet的双向Peering，并强制`manageBlobDnsLink=false`，因为没有迁移备份Storage。
 
 旧AKS为私有集群时，执行主机VNet还必须已有到旧AKS API的路由和DNS。旧AKS为受限公网API时，允许来源须包含该VM实际NAT出口。Azure管理员权限不能穿透网络，不得临时开放Storage公网来规避Private Endpoint。
 
@@ -218,13 +218,17 @@ chmod 600 local_execution/customer.json
 
 `customer.example.json`故意只包含Stage0–1可运行的基础字段。进入Stage2后，按[Stage2–9指南的分阶段模板说明](stage2-9-guide-zh.md#分阶段配置模板)使用`python -m local_execution.merge_config`合并当前阶段；不要手工覆盖整个`customer.json`。
 
+greenfield使用`deploymentMode=greenfield`，省略`legacy`、`parameters.backup`、`parameters.legacy-logging`和`parameters.monitoring`，改用与Stage4 VNet同名的`parameters.network`，并在`parameters.bootstrap.logAnalyticsWorkspaceName`填写新目标Workspace名称。该名称来自客户新环境命名规范；部署后用Portal目标RG或`az monitor log-analytics workspace show`核对。`localExecution.postgresRestoreImage`可省略，`executionHost.manageBlobDnsLink`必须为false。greenfield不运行旧集群备份、恢复、Stage1监控/加固或`stage5-restore-target`。
+
 ### 4.1 配置字段
 
 | 配置 | 含义与来源 |
 | --- | --- |
 | `azure`、`location`、`environment` | 客户租户、订阅和批准区域；与当前`az account show`一致 |
-| `legacy` | 旧RG、AKS、namespace和PostgreSQL PVC |
-| `target.resourceGroup` | 与旧RG不同的新备份资源RG |
+| `legacy` | 仅migration：旧RG、AKS、namespace和PostgreSQL PVC |
+| `target.resourceGroup` | 新安全环境的独立目标RG；migration还要求与旧RG不同 |
+| `parameters.bootstrap` | 新目标Workspace的创建/复用模式、留存期；greenfield还在这里显式填写Workspace名称 |
+| `parameters.network` | 仅greenfield：新目标VNet地址空间和Private Endpoint子网；名称必须与后续Stage4一致 |
 | `parameters.backup` | 备份Workspace、Owner、VNet和PE子网；UAMI路径可增加`backupAutomationPrincipalId` |
 | `parameters.monitoring` | 旧环境Log Analytics Workspace名称 |
 | `parameters.legacy-logging` | 创建或复用旧日志Workspace的模式 |
@@ -280,7 +284,7 @@ az monitor log-analytics workspace list \
 }
 ```
 
-这两个名称都描述旧环境监控目的地。Stage0备份及后续新网关使用的是`parameters.backup.logAnalyticsWorkspaceName`，不要把两者因名称相似而互换。
+这两个名称都描述旧环境监控目的地。migration的Stage0备份及后续新网关使用`parameters.backup.logAnalyticsWorkspaceName`；greenfield使用`parameters.bootstrap.logAnalyticsWorkspaceName`，Stage3合并时会复用该值。不要把旧监控Workspace与新目标Workspace因名称相似而互换。
 
 恢复镜像必须使用完整RepoDigest：
 
@@ -308,6 +312,8 @@ Stage0–1变更步骤会读取配置、记录Git提交、生成实时预览并�
 
 ## 6. Stage0顺序
 
+以下S0-L03、S0-L05至S0-L07只适用于migration。greenfield在S0-L02后执行`network`和`execution-host-connectivity`，然后直接进入Stage2；不访问任何旧AKS或旧数据库。
+
 ### S0-L01 配置检查
 
 ```bash
@@ -325,6 +331,19 @@ Stage0–1变更步骤会读取配置、记录Git提交、生成实时预览并�
 ```
 
 确认新RG和目标Log Analytics Workspace成功，旧RG未修改。
+
+### S0-G03 Greenfield目标网络与Runner Peering
+
+仅`deploymentMode=greenfield`执行：
+
+```bash
+.venv/bin/python -m local_execution \
+  --config local_execution/customer.json --step network
+.venv/bin/python -m local_execution \
+  --config local_execution/customer.json --step execution-host-connectivity
+```
+
+确认新目标VNet已创建，Runner与目标VNet双向Peering为Connected；不得运行`backup`、`connectivity-check`或`backup-restore`。
 
 ### S0-L03 备份基础设施
 
