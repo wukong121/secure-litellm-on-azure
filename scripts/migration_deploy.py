@@ -17,7 +17,11 @@ from scripts.workflow_diagnostics import command_failure_summary, command_name, 
 
 
 def deployment_name(config, stage, component):
-    return f"llmgw-{config['environment']}-s{stage}-{component}"
+    base = f"llmgw-{config['environment']}-s{stage}-{component}"
+    if stage == 0 and component == "bootstrap":
+        scope = fingerprint({"location": config["location"], "targetResourceGroup": config["target"]["resourceGroup"].lower()})[:8]
+        return f"{base}-{scope}"
+    return base
 
 
 def group_id(config, legacy=False):
