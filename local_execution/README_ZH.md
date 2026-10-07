@@ -317,6 +317,8 @@ Stage0–1变更步骤会读取配置、记录Git提交、生成实时预览并�
 
 ### S0-L02 Bootstrap
 
+订阅级ARM deployment名称会绑定目标RG和区域的稳定短哈希；同一个environment并行准备不同目标区域时不会复用旧区域的deployment名称，也不会删除或覆盖旧bootstrap回执。
+
 ```bash
 .venv/bin/python -m local_execution \
   --config local_execution/customer.json --step bootstrap

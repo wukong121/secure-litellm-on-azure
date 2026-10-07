@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.customer_migration import ROOT, MigrationError, parameters_for, stage_checks, stage_fingerprint, validate_config
-from scripts.migration_deploy import AzureCommands, assert_change_scope, build_plan, deploy_component, group_id, resolve_origin
+from scripts.migration_deploy import AzureCommands, assert_change_scope, build_plan, deploy_component, deployment_name, group_id, resolve_origin
 from tests.test_customer_migration import certificate_config, customer_config
 
 
@@ -720,6 +720,18 @@ class MigrationDeploymentTests(unittest.TestCase):
         self.assertNotEqual(plan["planSha256"], build_plan(self.config, 0, "bootstrap", "c" * 40, "b" * 64, {}, [self.change])["planSha256"])
         self.assertNotIn("after", plan["changes"][0])
 
+    def test_subscription_bootstrap_name_is_stable_and_target_scoped(self):
+        name = deployment_name(self.config, 0, "bootstrap")
+        self.assertRegex(name, r"^llmgw-test-s0-bootstrap-[0-9a-f]{8}$")
+        self.assertEqual(name, deployment_name(copy.deepcopy(self.config), 0, "bootstrap"))
+        regional = copy.deepcopy(self.config)
+        regional["location"] = "westus3"
+        self.assertNotEqual(name, deployment_name(regional, 0, "bootstrap"))
+        targeted = copy.deepcopy(self.config)
+        targeted["target"]["resourceGroup"] = "rg-another-target"
+        self.assertNotEqual(name, deployment_name(targeted, 0, "bootstrap"))
+        self.assertEqual(deployment_name(self.config, 0, "backup"), "llmgw-test-s0-backup")
+
     def compile(self, command, **kwargs):
         Path(command[command.index("--outfile") + 1]).write_text('{"resources": []}')
         return SimpleNamespace(returncode=0, stderr="")
@@ -733,7 +745,9 @@ class MigrationDeploymentTests(unittest.TestCase):
                 deploy_component(self.config, 0, "bootstrap", self.revision, "deploy", [], directory, "f" * 64, azure)
             self.assertFalse(any("create" in call for call in azure.calls))
             receipt = deploy_component(self.config, 0, "bootstrap", self.revision, "deploy", [], directory, plan["planSha256"], azure)
-            self.assertTrue(any(call[:3] == ["deployment", "sub", "create"] for call in azure.calls))
+            creates = [call for call in azure.calls if call[:3] == ["deployment", "sub", "create"]]
+            self.assertEqual(len(creates), 1)
+            self.assertEqual(creates[0][creates[0].index("--name") + 1], deployment_name(self.config, 0, "bootstrap"))
             self.assertFalse(receipt["stageAccepted"])
             self.assertFalse((Path(directory) / "migration-evidence.json").exists())
 
