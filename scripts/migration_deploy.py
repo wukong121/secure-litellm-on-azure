@@ -224,10 +224,39 @@ def build_plan(config, stage, component, revision, template_hash, parameters, ch
     }
 
 
-def deploy_component(config, stage, component, revision, operation, previous, directory, approved_plan="", azure=None, release=None):
+def assert_allowlist_changes(changes, edge):
+    require(edge.get("apiTrafficEnabled") is True and edge.get("adminTrafficEnabled") is True,
+            "Allowlist updates require both existing traffic gates to be enabled")
+    for change in changes:
+        if change.get("changeType") in {"NoChange", "Ignore"}:
+            continue
+        require(change.get("changeType") == "Modify"
+                and change.get("resourceId", "").lower() == edge["adminWafId"].lower(),
+                "Allowlist update cannot change endpoints, routes or other resources")
+        deltas = change.get("delta")
+        require(isinstance(deltas, list) and deltas,
+                "Allowlist update requires explicit WAF property changes")
+        require(all(re.fullmatch(r"properties\.customRules\.rules\[0\]\.matchConditions\[0\]\.matchValue(?:\[\d+\])?",
+                                 delta.get("path", "")) for delta in deltas),
+                "Allowlist update requires granular source-IP matchValue changes only")
+
+
+def deploy_component(config, stage, component, revision, operation, previous, directory, approved_plan="", azure=None, release=None, allowlist_baseline=None):
     require(operation in {"plan", "deploy"}, "Invalid deployment operation")
     require(component in COMPONENTS, "Unknown deployment component")
     require(re.fullmatch(r"[0-9a-f]{40}", revision or "") is not None, "Full reviewed Git revision required")
+    if allowlist_baseline is not None:
+        require(operation == "plan" and stage == 9 and component == "edge" and release is not None,
+                "Allowlist baseline is only supported by the reviewed Stage9 edge plan")
+        expected = copy.deepcopy(allowlist_baseline)
+        before = expected["parameters"]["edge"]["adminAllowedCidrs"]
+        after = config["parameters"]["edge"]["adminAllowedCidrs"]
+        expected["parameters"]["edge"]["adminAllowedCidrs"] = after
+        require(expected == config and set(before) < set(after),
+                "Allowlist update must only add Admin CIDRs")
+        require(config["environment"] in {"dev", "test"} and release.get("phase") == "canary"
+                and release.get("authenticationMode") == "native" and release.get("auditMode") == "native",
+                "Allowlist update is limited to native dev/test canary")
     validate_config(config, config["environment"])
     require(stage in active_stages(config), "Stage does not apply to the selected deployment mode")
     completed = set()
@@ -295,10 +324,10 @@ def deploy_component(config, stage, component, revision, operation, previous, di
                 binding_client = {plane: AuditCluster([*kube, "--namespace", f"llm-{plane}-ingress"], directory) for plane in ("api", "admin")}
             else:
                 binding_client = AuditCluster(kube, directory)
-            require_edge_binding(config, revision, release["frontDoorId"], azure, binding_client)
+            require_edge_binding(allowlist_baseline or config, revision, release["frontDoorId"], azure, binding_client)
             if expected_authentication == "native":
                 from scripts.private_ingress_runtime import require_private_ingress_backends
-                require_private_ingress_backends(config, azure, front_door_id=release["frontDoorId"])
+                require_private_ingress_backends(allowlist_baseline or config, azure, front_door_id=release["frontDoorId"])
         document = json.loads(path.read_text())
         document["parameters"]["enableApiTraffic"] = {"value": release["phase"] != "prepare"}
         document["parameters"]["enableAdminTraffic"] = {"value": release["phase"] != "prepare"}
@@ -315,7 +344,11 @@ def deploy_component(config, stage, component, revision, operation, previous, di
     common = [*scope_args, "--name", deployment_name(config, stage, component), "--template-file", str(compiled), "--parameters", f"@{path}"]
     response = azure.scoped(["deployment", scope, "what-if", *common, "--result-format", "FullResourcePayloads", "--no-pretty-print"])
     require(response.get("status") == "Succeeded" and isinstance(response.get("changes"), list), "What-if did not produce a successful change list")
+    if allowlist_baseline is not None:
+        assert_allowlist_changes(response["changes"], previous_edge["edge"])
     reviewed_parameters = {"parameters": json.loads(path.read_text()), "release": release}
+    if allowlist_baseline is not None:
+        reviewed_parameters["allowlistBaselineSha256"] = stage_fingerprint(allowlist_baseline, 9)
     if connectivity is not None:
         reviewed_parameters["connectivity"] = connectivity
     plan = build_plan(config, stage, component, revision, template_hash, reviewed_parameters, response["changes"], connectivity)

@@ -24,7 +24,7 @@ validate-stage9:
 	bash scripts/validate-stage9.sh
 
 validate-local-execution:
-	./.venv/bin/python -m unittest tests.test_local_execution tests.test_local_release_report
+	./.venv/bin/python -m unittest tests.test_local_execution tests.test_local_release_report tests.test_admin_allowlist
 
 validate-oss-callbacks:
 	./.venv/bin/python -m unittest tests.test_litellm_audit_envelope
