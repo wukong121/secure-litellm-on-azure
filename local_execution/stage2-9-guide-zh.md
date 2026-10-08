@@ -1601,6 +1601,8 @@ native路径：
 
 此命令仅生成上述简化canary报告，不用于Entra/L3、prod canary或production；这些路径仍须提交完整真实证据。仅更新报告无需重跑edge-bind，但代码或客户配置发生变化后，应先生成当前报告，再重新执行edge-bind plan/execute。release plan始终独立检查回执和实时入口，生成报告不替代发布验收。
 
+native release在实时探测前核验当前双平面edge-bind回执和live路由。绑定后Admin `/fallback/login`仅携带正确`X-Azure-FDID`时应返回200；缺失或错误FDID必须返回404。API健康探针仍不依赖FDID，管理路径仍拒绝；绑定后的API推理探测使用正确FDID但不携带virtual key，必须得到401/403，缺失或错误FDID必须得到404。遇到探测失败不要删除FDID绑定或提前切CNAME；诊断包含实际HTTP状态码，但不输出响应正文、Cookie或密钥。
+
 deploy身份启用获批的canary phase：
 
 ```bash

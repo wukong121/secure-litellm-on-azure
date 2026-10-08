@@ -143,6 +143,11 @@ class PrivateIngressRuntimeTests(unittest.TestCase):
         self.azure.scoped.side_effect = [stage4, {"state": "Succeeded", "verification": result}]
         require_private_ingress_backends(self.config, self.azure)
         self.assertEqual(self.verify.call_count, 6)
+        self.azure.scoped.side_effect = [stage4, {"state": "Succeeded", "verification": result}]
+        identifier = "11111111-1111-4111-8111-111111111111"
+        require_private_ingress_backends(self.config, self.azure, front_door_id=identifier)
+        self.assertTrue(all(call.kwargs["front_door_id"] == identifier
+                            for call in self.verify.call_args_list[-2:]))
         result["revision"] = "invalid"
         self.azure.scoped.side_effect = [stage4, {"state": "Succeeded", "verification": result}]
         with self.assertRaisesRegex(ValueError, "Verify the current native private ingress"):
