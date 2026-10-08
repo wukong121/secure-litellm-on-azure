@@ -48,6 +48,8 @@ kubectl kustomize temp/stage9-domain
 
 `release.example.json`是失败关闭的结构样例，不是一份批准书。`phase`支持prepare（两个endpoint均关闭）、canary（两个endpoint启用、API WAF Detection）和production（API WAF Prevention）；Admin WAF在全部phase都保持Prevention。开启流量需要实际Front Door ID、两套PLS、`adminAllowedCidrs`、来源门禁/内层登录证据和回退批准。2026-09-10第一阶段改为原生Spend Logs，需验原生记录、权限、留存、容量及故障；只有选增强方案才需L3治理/恢复。协议矩阵与数据库恢复仍为必验，见[当前部署指南](../../docs/customer-deployment-workflows-zh.md)。
 
+本地native dev/test canary可使用`python -m local_execution.release_report`从当前配置和live资源生成报告，仅需显式提供真实变更编号和批准人；参见[本地生成步骤](../../local_execution/stage2-9-guide-zh.md#自动生成native-devtest-canary发布报告)。生成命令不部署或释放流量，edge-bind回执也不会自动生成报告。
+
 `checks`每项包含`passed=true`、`report`、近7天带时区的`observedAt`；changeTicket及两个不同approvedBy对象ID也必须存在。脚本只校验attestation结构/时效，不访问工单验证签名，不代替GitHub Environment审批、Azure RBAC或人工报告评审。
 
 生成物在忽略的`temp/`子目录：`edge.parameters.json`、Stage9 Kustomize overlay、代理policy、admin App Registration回调模板、配置摘要hash。默认域名脚本的输出不带已批准Front Door ID，应用时API和Admin代理都无法启动，不能直接用于生产。
