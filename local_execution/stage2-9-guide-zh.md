@@ -1584,6 +1584,23 @@ native路径：
 
 `approved-release`打开本地高风险动作门禁并指定报告路径。发布报告及现有edge-bind回执必须匹配当前revision和Stage9配置哈希；代码、客户配置或绑定对象有变化时，须重新执行`stage9-edge-bind`的plan/execute并使用新哈希，不能沿用失效回执。Stage6后端入口回执按Stage6配置哈希判断是否仍属于当前应用；release同时使用独立公有根包对当前Stage4证书、私有IP和native路由做实时探测。因此仅Git revision变化或合规源站证书轮换不要求回滚重跑`stage6-application`，但Stage6配置变化或实时入口探测失败仍会阻止release。
 
+#### 自动生成native dev/test canary发布报告
+
+`edge-bind execute`生成绑定回执，不生成或更新发布报告。对于`dev/test + canary + native authentication + native audit`，应用已审核的`approved-release`配置后，可使用正式生成器，避免复制旧环境报告：
+
+```bash
+.venv/bin/python -m local_execution.release_report \
+  --config "$CFG" \
+  --change-ticket "REPLACE_ACTUAL_APPROVED_CHANGE_REFERENCE" \
+  --approved-by "REPLACE_ACTUAL_APPROVER_OBJECT_ID"
+```
+
+双人审批策略需重复传入`--approved-by`；单人策略仍须符合配置中的具名批准人和显式风险接受。参数必须代表本次实际批准，不会自动推定旧审批有效，也不会验证外部工单的真实性。
+
+命令使用配置中的deploy身份及既有认证流程，读取当前revision/Stage9哈希、实际Front Door GUID和双PLS，复用live edge校验（域名、TLS、PLS审批、路由及Admin WAF），并核对部署的工作区和限流参数。报告以0600写入`localExecution.releaseReportPath`指定的ignored `temp/`路径。已有报告默认拒绝覆盖；人工确认替换后添加`--replace`，旧报告会先以0600备份到本次输出目录的`previous-release.json`。命令不修改客户配置，不部署资源、不开启流量、不修改DNS；生成后仍需审核报告和release plan。
+
+此命令仅生成上述简化canary报告，不用于Entra/L3、prod canary或production；这些路径仍须提交完整真实证据。仅更新报告无需重跑edge-bind，但代码或客户配置发生变化后，应先生成当前报告，再重新执行edge-bind plan/execute。release plan始终独立检查回执和实时入口，生成报告不替代发布验收。
+
 deploy身份启用获批的canary phase：
 
 ```bash
