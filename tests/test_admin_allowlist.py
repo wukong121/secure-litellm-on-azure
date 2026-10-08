@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from local_execution.admin_allowlist import desired_configuration, refresh_binding, update
 from scripts.customer_migration import ROOT, MigrationError, stage_fingerprint
-from scripts.migration_deploy import assert_allowlist_changes, deploy_component
+from scripts.migration_deploy import assert_allowlist_changes, deploy_component, prepare_allowlist_template
 from tests.test_customer_migration import customer_config
 
 
@@ -55,6 +55,71 @@ class AdminAllowlistTests(unittest.TestCase):
                 assert_allowlist_changes([value], edge)
         with self.assertRaises(MigrationError):
             assert_allowlist_changes([change], {**edge, "adminTrafficEnabled": False})
+
+    def test_nested_azure_array_deltas_are_checked_at_leaf_level(self):
+        edge = {"adminWafId": "/synthetic/admin-waf", "apiTrafficEnabled": True, "adminTrafficEnabled": True}
+        delta = {"path": "properties.customRules.rules", "children": [
+            {"path": "0", "children": [
+                {"path": "matchConditions", "children": [
+                    {"path": "0", "children": [
+                        {"path": "matchValue", "children": [
+                            {"path": "0", "propertyChangeType": "Create", "after": "111.193.185.231/32"}
+                        ]}
+                    ]}
+                ]}
+            ]}
+        ]}
+        change = {"changeType": "Modify", "resourceId": edge["adminWafId"], "delta": [delta]}
+        assert_allowlist_changes([change], edge)
+        delta["children"].append({"path": "2", "children": [{"path": "groupBy", "propertyChangeType": "Delete"}]})
+        with self.assertRaisesRegex(MigrationError, "granular"):
+            assert_allowlist_changes([change], edge)
+
+    def test_focused_template_preserves_live_defaults_and_only_deploys_admin_waf(self):
+        desired = desired_configuration(self.config, self.additions)
+        waf_id = (f"/subscriptions/{self.config['azure']['subscriptionId']}"
+                  "/resourceGroups/rg-secure/providers/Microsoft.Network/frontDoorWebApplicationFirewallPolicies/admin")
+        live = {
+            "id": waf_id, "location": "Global", "sku": {"name": "Premium_AzureFrontDoor", "tier": None},
+            "tags": {"owner": "test"},
+            "properties": {
+                "provisioningState": "Succeeded", "resourceState": "Enabled",
+                "frontendEndpointLinks": [], "securityPolicyLinks": [{"id": "/synthetic/association"}],
+                "policySettings": {"mode": "Prevention", "javascriptChallengeExpirationInMinutes": 30},
+                "managedRules": {"managedRuleSets": [{"ruleSetVersion": "2.1"}]},
+                "customRules": {"rules": [
+                    {"name": "BlockUnapprovedAdminSources", "matchConditions": [
+                        {"matchVariable": "SocketAddr", "matchValue": ["167.220.232.6/32"]}]},
+                    {"name": "BlockUnsafeMethods"},
+                    {"name": "RateLimitAdmin", "groupBy": [{"variableName": "SocketAddr"}]},
+                ]},
+            },
+        }
+        before = copy.deepcopy(live)
+        edge = {"adminWafId": waf_id, "adminAllowedCidrs": ["167.220.232.6/32"],
+                "apiTrafficEnabled": True, "adminTrafficEnabled": True, "endpointHost": "api.azurefd.net"}
+        azure = Mock()
+        azure.scoped.return_value = live
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as name:
+            compiled = prepare_allowlist_template(desired, edge, azure, Path(name),
+                                                  {"parameters": {"enableApiTraffic": {"value": True}}})
+            template = json.loads(compiled.read_text())
+        self.assertEqual(live, before)
+        self.assertEqual(len(template["resources"]), 1)
+        resource = template["resources"][0]
+        self.assertEqual(resource["name"], "admin")
+        self.assertEqual(resource["properties"]["policySettings"], live["properties"]["policySettings"])
+        self.assertEqual(resource["properties"]["customRules"]["rules"][2],
+                         live["properties"]["customRules"]["rules"][2])
+        self.assertEqual(resource["properties"]["customRules"]["rules"][0]["matchConditions"][0]["matchValue"],
+                         desired["parameters"]["edge"]["adminAllowedCidrs"])
+        self.assertNotIn("securityPolicyLinks", resource["properties"])
+        self.assertEqual(template["parameters"], {"enableApiTraffic": {"type": "bool"}})
+        output = template["outputs"]["edge"]["value"]
+        self.assertTrue(output["apiTrafficEnabled"])
+        self.assertTrue(output["adminTrafficEnabled"])
+        self.assertEqual(output["endpointHost"], edge["endpointHost"])
+        self.assertEqual(output["adminAllowedCidrs"], desired["parameters"]["edge"]["adminAllowedCidrs"])
 
     def test_baseline_cannot_hide_unrelated_configuration_changes(self):
         desired = desired_configuration(self.config, self.additions)
@@ -184,7 +249,13 @@ class AdminAllowlistTests(unittest.TestCase):
                                  "id": self.config["azure"]["subscriptionId"]}
         azure.scoped.side_effect = [
             {"state": "Succeeded", "edge": {"profileId": identifier, "adminWafId": waf,
-                                          "apiTrafficEnabled": True, "adminTrafficEnabled": True}},
+                                          "apiTrafficEnabled": True, "adminTrafficEnabled": True,
+                                          "adminAllowedCidrs": ["167.220.232.6/32"]}},
+            {"id": waf, "location": "Global", "sku": {"name": "Premium_AzureFrontDoor"},
+             "properties": {"provisioningState": "Succeeded", "policySettings": {"mode": "Prevention"},
+                            "managedRules": {}, "customRules": {"rules": [
+                                {"name": "BlockUnapprovedAdminSources",
+                                 "matchConditions": [{"matchValue": ["167.220.232.6/32"]}]}]}}},
             {"status": "Succeeded", "changes": [change]},
         ]
 

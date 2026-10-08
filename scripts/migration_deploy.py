@@ -224,6 +224,19 @@ def build_plan(config, stage, component, revision, template_hash, parameters, ch
     }
 
 
+def what_if_leaf_deltas(deltas, parent=""):
+    require(isinstance(deltas, list) and deltas, "What-if requires explicit property changes")
+    for delta in deltas:
+        segment = delta.get("path", "")
+        require(isinstance(segment, str) and segment, "What-if property path is missing")
+        path = parent + f"[{segment}]" if segment.isdigit() else ".".join(filter(None, (parent, segment)))
+        children = delta.get("children")
+        if children:
+            yield from what_if_leaf_deltas(children, path)
+        else:
+            yield path, delta
+
+
 def assert_allowlist_changes(changes, edge):
     require(edge.get("apiTrafficEnabled") is True and edge.get("adminTrafficEnabled") is True,
             "Allowlist updates require both existing traffic gates to be enabled")
@@ -237,8 +250,57 @@ def assert_allowlist_changes(changes, edge):
         require(isinstance(deltas, list) and deltas,
                 "Allowlist update requires explicit WAF property changes")
         require(all(re.fullmatch(r"properties\.customRules\.rules\[0\]\.matchConditions\[0\]\.matchValue(?:\[\d+\])?",
-                                 delta.get("path", "")) for delta in deltas),
+                                 path) for path, _delta in what_if_leaf_deltas(deltas)),
                 "Allowlist update requires granular source-IP matchValue changes only")
+
+
+def prepare_allowlist_template(config, edge, azure, directory, parameters):
+    identifier = edge["adminWafId"]
+    prefix = group_id(config) + "/providers/Microsoft.Network/frontDoorWebApplicationFirewallPolicies/"
+    require(identifier.lower().startswith(prefix.lower()) and "/" not in identifier[len(prefix):],
+            "Admin WAF must belong to the approved resource group")
+    live = azure.scoped(["resource", "show", "--ids", identifier, "--api-version", "2024-02-01"])
+    require(live.get("id", "").lower() == identifier.lower(), "Azure returned a different Admin WAF")
+    properties = live["properties"]
+    require(set(properties).issubset({"policySettings", "customRules", "managedRules",
+                                     "frontendEndpointLinks", "securityPolicyLinks", "routingRuleLinks",
+                                     "resourceState", "provisioningState"}),
+            "Admin WAF has unknown properties; review before updating")
+    desired = {key: copy.deepcopy(properties[key]) for key in ("policySettings", "customRules", "managedRules")}
+    require(properties.get("provisioningState") == "Succeeded"
+            and desired["policySettings"].get("mode") == "Prevention",
+            "Admin WAF must be provisioned in Prevention mode")
+    rules = desired["customRules"]["rules"]
+    require(rules and rules[0].get("name") == "BlockUnapprovedAdminSources"
+            and len(rules[0].get("matchConditions", [])) == 1,
+            "Admin source-IP rule must retain its reviewed position and condition")
+    require(rules[0]["matchConditions"][0].get("matchValue") == edge["adminAllowedCidrs"],
+            "Live Admin WAF differs from the reviewed baseline")
+    rules[0]["matchConditions"][0]["matchValue"] = config["parameters"]["edge"]["adminAllowedCidrs"]
+    resource = {
+        "type": "Microsoft.Network/frontDoorWebApplicationFirewallPolicies",
+        "apiVersion": "2024-02-01", "name": identifier[len(prefix):],
+        "location": live["location"], "sku": {"name": live["sku"]["name"]},
+        "properties": desired,
+    }
+    if live.get("tags") is not None:
+        resource["tags"] = live["tags"]
+    updated_edge = copy.deepcopy(edge)
+    updated_edge["adminAllowedCidrs"] = config["parameters"]["edge"]["adminAllowedCidrs"]
+    declarations = {}
+    for key, parameter in parameters["parameters"].items():
+        value = parameter["value"]
+        kind = {str: "string", bool: "bool", int: "int", list: "array", dict: "object"}.get(type(value))
+        require(kind is not None, "Unsupported edge parameter type")
+        declarations[key] = {"type": kind}
+    template = {
+        "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+        "contentVersion": "1.0.0.0", "parameters": declarations,
+        "resources": [resource], "outputs": {"edge": {"type": "object", "value": updated_edge}},
+    }
+    private_write(directory / "template.json", json.dumps(template, indent=2) + "\n")
+    private_write(directory / "admin-waf-before.json", json.dumps(live, indent=2) + "\n")
+    return directory / "template.json"
 
 
 def deploy_component(config, stage, component, revision, operation, previous, directory, approved_plan="", azure=None, release=None, allowlist_baseline=None):
@@ -334,10 +396,14 @@ def deploy_component(config, stage, component, revision, operation, previous, di
         document["parameters"]["wafMode"] = {"value": release["wafMode"]}
         private_write(path, json.dumps(document, indent=2) + "\n")
     compiled = directory / "template.json"
-    result = subprocess.run(["az", "bicep", "build", "--file", str(template), "--outfile", str(compiled)], capture_output=True, text=True, check=False)
-    private_write(directory / "bicep-diagnostics.txt", result.stderr)
-    if result.returncode:
-        raise MigrationError(f"Bicep compilation failed: {command_failure_summary(result.stdout, result.stderr, result.returncode)}")
+    if allowlist_baseline is not None:
+        compiled = prepare_allowlist_template(config, previous_edge["edge"], azure, directory,
+                                              json.loads(path.read_text()))
+    else:
+        result = subprocess.run(["az", "bicep", "build", "--file", str(template), "--outfile", str(compiled)], capture_output=True, text=True, check=False)
+        private_write(directory / "bicep-diagnostics.txt", result.stderr)
+        if result.returncode:
+            raise MigrationError(f"Bicep compilation failed: {command_failure_summary(result.stdout, result.stderr, result.returncode)}")
     template_hash = hashlib.sha256(compiled.read_bytes()).hexdigest()
     scope = "sub" if component == "bootstrap" else "group"
     scope_args = ["--location", config["location"]] if scope == "sub" else ["--resource-group", config["legacy" if component in {"monitoring", "legacy-logging"} else "target"]["resourceGroup"]]
