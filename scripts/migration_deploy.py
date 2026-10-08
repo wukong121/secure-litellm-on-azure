@@ -284,9 +284,6 @@ def deploy_component(config, stage, component, revision, operation, previous, di
         require(previous_edge.get("state") == "Succeeded", "Provision the disabled edge before releasing traffic")
         require(release.get("frontDoorId") == previous_edge.get("edge", {}).get("profileId"), "Release Front Door identity differs from the provisioned edge")
         if release["phase"] != "prepare" and "application" in config:
-            if expected_authentication == "native":
-                from scripts.private_ingress_runtime import require_private_ingress_backends
-                require_private_ingress_backends(config, azure)
             from scripts.edge_binding import require_edge_binding
             binding_client = None
             from scripts.audit_runtime import AuditCluster
@@ -299,6 +296,9 @@ def deploy_component(config, stage, component, revision, operation, previous, di
             else:
                 binding_client = AuditCluster(kube, directory)
             require_edge_binding(config, revision, release["frontDoorId"], azure, binding_client)
+            if expected_authentication == "native":
+                from scripts.private_ingress_runtime import require_private_ingress_backends
+                require_private_ingress_backends(config, azure, front_door_id=release["frontDoorId"])
         document = json.loads(path.read_text())
         document["parameters"]["enableApiTraffic"] = {"value": release["phase"] != "prepare"}
         document["parameters"]["enableAdminTraffic"] = {"value": release["phase"] != "prepare"}
