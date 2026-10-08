@@ -1629,6 +1629,34 @@ deploy身份启用获批的canary phase：
 
 Azure DNS动作在同一检查点中新增或更新`llm-api`和`llm-admin`两条CNAME，分别指向独立endpoint；中途失败可从已知状态继续，第三方漂移会阻止操作。第三方DNS由客户DNS管理员人工新增等效双记录，不选择`--option azure-dns`，也不运行`stage9-dns-publish`。新记录与旧系统域名并存，不是替换旧入口。新域名可解析后立即验证错误率/延迟、PG连接、Redis、预算和Spend Logs。API需确认缺Key、管理路径和非批准推理路径均拒绝；Admin需从白名单外公网出口验证403，并从白名单内出口验证错误密码拒绝、正确Entra或原生登录成功。私有Admin LB仅作Front Door回源，不再作为日常客户入口。
 
+### 已发布native dev/test canary新增Admin来源IP
+
+不要只在Portal修改WAF，也不要用`edge-prepare`更新已发布入口：前者造成配置漂移，后者会关闭API/Admin。已发布的native dev/test canary可使用专用命令新增精确公网IPv4 `/32`或IPv6 `/128`，保留原有白名单及两个流量开关。
+
+先从访问Admin的实际浏览器网络路径确认公网出口（终端和浏览器可能使用不同代理）。使用新代码revision前，按前述流程重新生成报告并执行edge-bind plan/审核/execute，以建立当前revision的基线；无需重新edge-release或更改DNS。
+
+```bash
+.venv/bin/python -m local_execution.admin_allowlist \
+  --config "$CFG" --operation plan \
+  --add-cidr "REPLACE_ACTUAL_PUBLIC_IPV4/32" \
+  --change-ticket "REPLACE_ACTUAL_APPROVED_CHANGE_REFERENCE" \
+  --approved-by "REPLACE_ACTUAL_APPROVER_OBJECT_ID"
+
+# 审核本次输出目录中的plan/reviewed-plan.json和desired-release.json后执行：
+.venv/bin/python -m local_execution.admin_allowlist \
+  --config "$CFG" --operation execute \
+  --add-cidr "REPLACE_ACTUAL_PUBLIC_IPV4/32" \
+  --change-ticket "REPLACE_ACTUAL_APPROVED_CHANGE_REFERENCE" \
+  --approved-by "REPLACE_ACTUAL_APPROVER_OBJECT_ID" \
+  --approved-plan-sha256 "REPLACE_CURRENT_ALLOWLIST_PLAN_SHA256"
+```
+
+可重复`--add-cidr`添加多个精确地址；双人审批需重复`--approved-by`。plan不修改Azure、客户配置或正式报告。命令要求当前双平面入口已开启、live资源和原配置一致、审批符合现有策略，只允许客户配置中的Admin CIDR增加，不允许移除已有地址或同时修改其他字段。What-if只允许Admin WAF首条来源IP规则`matchValue`的细粒度Modify，拒绝规则整体替换、action、endpoint/route、API WAF、managed rules或policy settings的变更；Azure返回粗粒度或不明差异时停止，不自动放宽校验。执行使用现有edge模板，保留原流量状态，不执行DNS动作。
+
+execute成功后，以0600备份并更新Git-ignored客户配置和发布报告，再刷新edge-bind回执（只允许已有ingress规则及Pod template均不变）。无需再运行release。新增IP生效仍需WAF边缘传播；从批准出口验证登录页，并从未批准出口验证拒绝，内层密码认证保持不变。家庭公网地址可能变化，下一次变化需单独审核新增，不能为方便扩大CIDR。
+
+若Azure已更新但本地写入或回执刷新失败，命令明确失败，并在输出目录保存`allowlist-summary.json`、`desired-customer.json`、`desired-release.json`及旧配置备份。检查实际部署后再恢复本地一致性；配置已更新时可重新执行edge-bind plan/审核/execute刷新回执。不要使用旧哈希盲重试、回滚整个配置或重跑edge-prepare。该命令不支持prod、production、Entra或L3路径，也不代替实际批准及公网验收。
+
 ### 8.3 停止试点、可选最终迁移和旧环境退役
 
 观察期内若新环境不达标，先撤销试点virtual key并让试点客户端恢复旧API域名；按批准变更禁用新route或删除新CNAME。旧系统原本就保持运行，不需要通过数据库回退才能继续服务。只有Azure DNS路径存在自动DNS checkpoint时，才执行独立的DNS rollback：
