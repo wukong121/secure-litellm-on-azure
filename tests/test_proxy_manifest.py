@@ -276,6 +276,57 @@ class ProxyManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "public route probe failed"):
             validate_private_edge_resources(config, azure, profile, {"api": edge["privateOrigin"], "admin": edge["adminPrivateOrigin"]}, edge, route_probe=probe)
 
+    def test_null_origin_status_requires_pls_approval_and_public_probe(self):
+        from scripts.edge_binding import validate_private_edge_resources
+        config = proxy_customer()
+        identifier = "11111111-1111-4111-8111-111111111111"
+        profile = group_id(config) + "/providers/Microsoft.Cdn/profiles/synthetic"
+        edge = edge_deployment_output(config, identifier, profile)
+        edge.update(apiTrafficEnabled=True, adminTrafficEnabled=True)
+        azure = Mock()
+        probe = Mock()
+        shared_status = None
+        connection_status = "Approved"
+        extra_connection = False
+
+        def cloud(arguments):
+            resource = live_edge_resource(config, identifier, profile, arguments,
+                                          connection_status=connection_status, edge_output=edge)
+            properties = resource["properties"]
+            if "sharedPrivateLinkResource" in properties:
+                properties["sharedPrivateLinkResource"]["status"] = shared_status
+            if extra_connection and "privateEndpointConnections" in properties:
+                properties["privateEndpointConnections"].append(copy.deepcopy(
+                    properties["privateEndpointConnections"][0]))
+            return resource
+
+        azure.scoped.side_effect = cloud
+        origins = {"api": edge["privateOrigin"], "admin": edge["adminPrivateOrigin"]}
+        validate_private_edge_resources(config, azure, profile, origins, edge, route_probe=probe)
+        self.assertEqual(probe.call_args_list, [
+            unittest.mock.call("llm-api." + config["baseDomain"], edge["endpointHost"], "api"),
+            unittest.mock.call("llm-admin." + config["baseDomain"], edge["adminEndpointHost"], "admin"),
+        ])
+        probe.side_effect = ValueError("HTTPS verification failed")
+        with self.assertRaisesRegex(ValueError, "HTTPS verification failed"):
+            validate_private_edge_resources(config, azure, profile, origins, edge, route_probe=probe)
+        probe.side_effect = None
+        for connection_status in ("Pending", "Rejected", "Disconnected"):
+            probe.reset_mock()
+            with self.subTest(pls=connection_status), self.assertRaisesRegex(ValueError, "exactly one approved"):
+                validate_private_edge_resources(config, azure, profile, origins, edge, route_probe=probe)
+            probe.assert_not_called()
+        connection_status = "Approved"
+        extra_connection = True
+        with self.assertRaisesRegex(ValueError, "exactly one approved"):
+            validate_private_edge_resources(config, azure, profile, origins, edge, route_probe=probe)
+        extra_connection = False
+        for shared_status in ("Pending", "Rejected", "Disconnected", "unexpected"):
+            probe.reset_mock()
+            with self.subTest(origin=shared_status), self.assertRaisesRegex(ValueError, "private connection"):
+                validate_private_edge_resources(config, azure, profile, origins, edge, route_probe=probe)
+            probe.assert_not_called()
+
     def test_live_route_probe_rejects_front_door_fallback(self):
         from scripts.edge_binding import probe_enabled_route
         connection = MagicMock()

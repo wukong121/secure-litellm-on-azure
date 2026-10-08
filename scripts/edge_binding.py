@@ -114,7 +114,7 @@ def validate_private_edge_resources(config, azure, profile_resource_id, deployed
         require(properties.get("provisioningState") == "Succeeded" and properties.get("enabledState") == "Enabled", f"Front Door {plane} private origin is not provisioned and enabled")
         require(properties.get("hostName") == hosts[plane] and properties.get("originHostHeader") == hosts[plane] and properties.get("enforceCertificateNameCheck") is True, f"Front Door {plane} origin TLS identity differs from the reviewed contract")
         traffic_enabled = edge_output.get(f"{plane}TrafficEnabled") is True
-        allowed_shared_statuses = {"approved"} if traffic_enabled else {"", "approved"}
+        allowed_shared_statuses = {"", "approved"}
         require(shared.get("privateLink", {}).get("id", "").lower() == deployed_origins[plane]["privateLinkServiceId"].lower() and shared.get("privateLinkLocation") == deployed_origins[plane]["privateLinkLocation"] and str(shared.get("status") or "").lower() in allowed_shared_statuses, f"Front Door {plane} private connection is not ready for the reviewed PLS and traffic state")
         service = deployed_resource(azure, deployed_origins[plane]["privateLinkServiceId"], "2024-07-01")
         service_properties = service.get("properties", {})
@@ -125,6 +125,8 @@ def validate_private_edge_resources(config, azure, profile_resource_id, deployed
                 active.append((status, connection.get("properties", {}).get("privateEndpoint", {}).get("id")))
         require(len(active) == 1 and active[0][0] == "approved" and isinstance(active[0][1], str) and bool(active[0][1]), f"{plane} PLS must have exactly one approved connection and no unexpected pending connection")
         require(service_properties.get("autoApproval", {}).get("subscriptions") == [], f"{plane} PLS must not auto-approve consumers")
+        if traffic_enabled and not shared.get("status"):
+            route_probe(hosts[plane], edge_output["endpointHost" if plane == "api" else "adminEndpointHost"], plane)
     for plane in ("api", "admin"):
         domain = deployed_resource(azure, profile_resource_id + f"/customDomains/llm-{plane}", "2025-04-15")
         properties = domain.get("properties", {})
