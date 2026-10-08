@@ -1603,6 +1603,8 @@ native路径：
 
 native release在实时探测前核验当前双平面edge-bind回执和live路由。绑定后Admin `/fallback/login`仅携带正确`X-Azure-FDID`时应返回200；缺失或错误FDID必须返回404。API健康探针仍不依赖FDID，管理路径仍拒绝；绑定后的API推理探测使用正确FDID但不携带virtual key，必须得到401/403，缺失或错误FDID必须得到404。遇到探测失败不要删除FDID绑定或提前切CNAME；诊断包含实际HTTP状态码，但不输出响应正文、Cookie或密钥。
 
+Front Door origin的`sharedPrivateLinkResource.status`可能返回null。已开启入口不会仅凭该空字段判断批准：必须核对正确PLS及区域、PLS侧恰有一个Approved连接且无额外Pending、autoApproval为空，并通过保留自定义域SNI/Host的严格HTTPS公网探测。显式Pending/Rejected/Disconnected仍拒绝；不要为修复报告生成而重复审批或关闭入口。
+
 deploy身份启用获批的canary phase：
 
 ```bash
