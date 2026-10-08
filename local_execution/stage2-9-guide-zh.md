@@ -1653,7 +1653,7 @@ Azure DNS动作在同一检查点中新增或更新`llm-api`和`llm-admin`两条
   --approved-plan-sha256 "REPLACE_CURRENT_ALLOWLIST_PLAN_SHA256"
 ```
 
-可重复`--add-cidr`添加多个精确地址；双人审批需重复`--approved-by`。plan不修改Azure、客户配置或正式报告。命令要求当前双平面入口已开启、live资源和原配置一致、审批符合现有策略，只允许客户配置中的Admin CIDR增加，不允许移除已有地址或同时修改其他字段。What-if只允许Admin WAF首条来源IP规则`matchValue`的细粒度Modify，拒绝规则整体替换、action、endpoint/route、API WAF、managed rules或policy settings的变更；Azure返回粗粒度或不明差异时停止，不自动放宽校验。执行使用现有edge模板，保留原流量状态，不执行DNS动作。
+可重复`--add-cidr`添加多个精确地址；双人审批需重复`--approved-by`。plan不修改Azure、客户配置或正式报告。命令要求当前双平面入口已开启、live资源和原配置一致、审批符合现有策略，只允许客户配置中的Admin CIDR增加，不允许移除已有地址或同时修改其他字段。命令从已核验的live Admin WAF生成单资源模板，完整保留现有策略设置、managed rules、其他custom rules和服务默认值，仅替换来源IP匹配值；不重新部署域名、证书、诊断、endpoint、route或API WAF。What-if展开Azure嵌套数组差异，只允许Admin WAF首条来源IP规则`matchValue`叶节点变更，拒绝规则整体替换、action及其他字段变更。原edge部署输出和参数保留，新输出仅更新CIDR，以供后续报告及绑定校验。保留原流量状态，不执行DNS动作；粗粒度或不明差异仍停止，不自动放宽校验。
 
 execute成功后，以0600备份并更新Git-ignored客户配置和发布报告，再刷新edge-bind回执（只允许已有ingress规则及Pod template均不变）。无需再运行release。新增IP生效仍需WAF边缘传播；从批准出口验证登录页，并从未批准出口验证拒绝，内层密码认证保持不变。家庭公网地址可能变化，下一次变化需单独审核新增，不能为方便扩大CIDR。
 
