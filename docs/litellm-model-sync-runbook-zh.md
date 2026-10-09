@@ -577,3 +577,26 @@ API Key、公开网络或关闭 TLS 来绕过发现/连接失败。
 确认修复已合入并更新 Runner 后，重新执行第 5 节 plan 并审核新 hash。
 代码 revision 变化后不能沿用旧批准 hash。若仍报错，通过受控检查核对字段名和
 类型，不在工单、终端输出或聊天中粘贴完整 ConfigMap、环境变量、Secret 或 token。
+
+### 8.2 Foundry 多服务 PE 与 OpenAI DNS 地址的对应
+
+Foundry 的同一个 `account` Private Endpoint NIC 可以有多个 IP，分别对应
+`<host>.cognitiveservices.azure.com`、`<host>.openai.azure.com` 和
+`<host>.services.ai.azure.com`。OpenAI 私有 DNS A 记录只应匹配 **OpenAI 的
+地址集合**，不是这个 NIC 的所有服务地址。
+
+旧版本可能在健康的多服务 PE 上误报
+`Private DNS A record does not match the approved Private Endpoint`。
+修复版本按 NIC 的 `privateLinkConnectionProperties.fqdns` 匹配已核验的
+OpenAI hostname，并核对 `groupId=account`；DNS A 记录仍须与对应地址集合
+严格相等，不能混入其他服务 IP。后续 Pod 的 DNS/TLS 探测也仅使用该集合。
+所有 NIC IP 仍须位于批准的 PE 子网，完整 NIC 元数据保留在受保护的 review 中。
+
+不要固定按 IP 顺序、`requiredMemberName` 或现有 DNS 值猜测 OpenAI 地址。
+旧式单地址且没有 FQDN 元数据的 NIC 可以明确复用；多地址缺少映射、映射指向
+别的 hostname、DNS 缺少地址或有额外地址时继续失败，不能退化为任意 NIC 子集
+即通过校验。错误中给出的 hostname、expected/actual 地址可用于受控排查，
+不代表工具会自动覆盖存在冲突的 DNS。
+
+确认修复已合入并更新 Runner 后重新 plan。不要为绕过旧误判而把 A 记录扩成
+全部 NIC 地址、删除/重建既有 PE，或重跑整套 Stage4 基础设施。

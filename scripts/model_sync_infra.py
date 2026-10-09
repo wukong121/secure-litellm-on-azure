@@ -77,16 +77,37 @@ def endpoint_state(account, alias, context, azure):
             and connection.get("groupIds") == ["account"]
             and connection.get("privateLinkServiceConnectionState", {}).get("status") == "Approved",
             "Private Endpoint must target this account and be Approved; pending requests require the account owner")
-    ips, nics = [], []
+    hostname = connection_endpoint(account).removeprefix("https://")
+    private_hostname = hostname.removesuffix(".openai.azure.com") + ".privatelink.openai.azure.com"
+    nic_ips, ips, nics = [], [], []
+    has_fqdns = False
     for reference in props.get("networkInterfaces", []):
         nic = get(azure, reference["id"])
         nics.append(nic)
         for item in nic.get("properties", {}).get("ipConfigurations", []):
-            ip = item.get("properties", {}).get("privateIPAddress")
+            properties = item.get("properties", {})
+            ip = properties.get("privateIPAddress")
             require(ip and any(ipaddress.ip_address(ip) in ipaddress.ip_network(prefix) for prefix in context["prefixes"]),
                     "Private Endpoint NIC address is outside the approved subnet")
-            ips.append(ip)
-    require(ips, "Private Endpoint requires private NIC addresses")
+            nic_ips.append(ip)
+            mapping = properties.get("privateLinkConnectionProperties", {})
+            require(isinstance(mapping, dict), "Private Endpoint NIC requires valid hostname mapping metadata")
+            if mapping:
+                require(mapping.get("groupId") == "account",
+                        "Private Endpoint NIC mapping must belong to the approved account group")
+            fqdns = mapping.get("fqdns", [])
+            require(isinstance(fqdns, list) and all(isinstance(fqdn, str) for fqdn in fqdns),
+                    "Private Endpoint NIC FQDN mappings must be strings")
+            has_fqdns = has_fqdns or bool(fqdns)
+            if any(fqdn.rstrip(".").lower() in {hostname, private_hostname} for fqdn in fqdns):
+                ips.append(ip)
+    require(nic_ips, "Private Endpoint requires private NIC addresses")
+    if not ips:
+        # Older single-address NIC responses are unambiguous; multi-service NICs require FQDN metadata.
+        require(not has_fqdns and len(set(nic_ips)) == 1,
+                "Private Endpoint NIC metadata cannot identify the OpenAI hostname: " + hostname)
+        ips = nic_ips
+    ips = sorted(set(ips))
     groups = collection(azure, endpoint["id"] + "/privateDnsZoneGroups", NETWORK_API)
     require(len(groups) <= 1, "Multiple Private DNS groups require explicit remediation")
     if groups:
@@ -95,15 +116,16 @@ def endpoint_state(account, alias, context, azure):
                 and configs[0].get("properties", {}).get("privateDnsZoneId", "").lower() == context["zoneId"].lower(),
                 "Private Endpoint DNS group differs from the approved zone")
     records = collection(azure, context["zoneId"] + "/A", DNS_API)
-    hostname = connection_endpoint(account).removeprefix("https://").split(".")[0]
-    record = next((r for r in records if r.get("name", "").lower() == hostname), None)
+    record_name = hostname.split(".")[0]
+    record = next((r for r in records if r.get("name", "").lower() == record_name), None)
     actual = {item.get("ipv4Address") for item in (record or {}).get("properties", {}).get("aRecords", [])}
     if groups:
-        require(actual == set(ips), "Private DNS A record does not match the approved Private Endpoint")
+        require(actual == set(ips), "Private DNS A record does not match the approved Private Endpoint for "
+                + hostname + "; expected " + json.dumps(ips) + ", actual " + json.dumps(sorted(actual, key=str)))
     else:
         require(not record or actual == set(ips), "Existing DNS A record conflicts with missing binding")
     return {"createEndpoint": False, "createDnsBinding": not groups, "endpointId": endpoint["id"],
-            "endpointName": endpoint["name"], "ips": sorted(ips), "live": endpoint,
+            "endpointName": endpoint["name"], "ips": ips, "nicIps": sorted(set(nic_ips)), "live": endpoint,
             "dnsGroups": groups, "nics": nics, "record": record}
 
 

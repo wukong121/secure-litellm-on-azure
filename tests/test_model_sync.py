@@ -224,11 +224,20 @@ class ModelSyncInfrastructureTests(unittest.TestCase):
         group_dns = {"id": pe["id"] + "/privateDnsZoneGroups/default", "properties": {"provisioningState": "Succeeded",
                      "privateDnsZoneConfigs": [{"properties": {"privateDnsZoneId": context["zoneId"]}}]}}
         record = {"name": account["accountName"], "properties": {"aRecords": [{"ipv4Address": "10.30.8.5"}]}}
+        nic = {"properties": {"ipConfigurations": [{"properties": {
+            "privateIPAddress": "10.30.8.5",
+            "privateLinkConnectionProperties": {
+                "groupId": "account", "requiredMemberName": "secondary",
+                "fqdns": [account["accountName"] + ".openai.azure.com"],
+            },
+        }}]}}
         def run(args):
             if args[:2] == ["resource", "show"]:
-                return {"properties": {"ipConfigurations": [{"properties": {"privateIPAddress": "10.30.8.5"}}]}}
+                return nic
             return {"value": [group_dns] if "privateDnsZoneGroups" in args[-1] else [record]}
-        return account, context, pe, Mock(run=Mock(side_effect=run))
+        azure = Mock(run=Mock(side_effect=run))
+        azure.nic, azure.record = nic, record
+        return account, context, pe, azure
 
     def test_approved_existing_customer_pe_reused_exactly(self):
         account, context, _, azure = self.endpoint_fixture()
@@ -237,6 +246,96 @@ class ModelSyncInfrastructureTests(unittest.TestCase):
         self.assertFalse(state["createDnsBinding"])
         self.assertEqual(state["endpointName"], "existing-customer-pe")
         self.assertEqual(state["ips"], ["10.30.8.5"])
+
+    def multiservice_endpoint_fixture(self):
+        account, context, pe, azure = self.endpoint_fixture()
+        for suffix, address, member in (
+            ("cognitiveservices.azure.com", "10.30.8.4", "default"),
+            ("services.ai.azure.com", "10.30.8.6", "third"),
+        ):
+            azure.nic["properties"]["ipConfigurations"].append({"properties": {
+                "privateIPAddress": address, "privateLinkConnectionProperties": {
+                    "groupId": "account", "requiredMemberName": member,
+                    "fqdns": [account["accountName"] + "." + suffix],
+                },
+            }})
+        return account, context, pe, azure
+
+    def test_foundry_multiservice_pe_reuses_only_openai_addresses_for_dns_and_probe(self):
+        account, context, _, azure = self.multiservice_endpoint_fixture()
+        state = endpoint_state(account, "alias", context, azure)
+        self.assertFalse(state["createEndpoint"])
+        self.assertFalse(state["createDnsBinding"])
+        self.assertEqual(state["ips"], ["10.30.8.5"])
+        self.assertEqual(state["nicIps"], ["10.30.8.4", "10.30.8.5", "10.30.8.6"])
+        with patch.object(runtime, "command", return_value="private-dns-tls-ok\n") as command:
+            runtime.network_probe(["kubectl"], account, state["ips"])
+        self.assertEqual(json.loads(command.call_args.args[1][-1]), ["10.30.8.5"])
+
+    def test_multiservice_dns_must_match_the_complete_openai_address_set(self):
+        for addresses in ([], ["10.30.8.4"], ["10.30.8.4", "10.30.8.5"], ["10.30.8.5", "10.30.8.6"]):
+            account, context, _, azure = self.multiservice_endpoint_fixture()
+            azure.record["properties"]["aRecords"] = [{"ipv4Address": address} for address in addresses]
+            with self.subTest(addresses=addresses), self.assertRaisesRegex(MigrationError, "expected.*10.30.8.5"):
+                endpoint_state(account, "alias", context, azure)
+
+    def test_multiple_openai_addresses_are_all_required(self):
+        account, context, _, azure = self.multiservice_endpoint_fixture()
+        second = copy.deepcopy(azure.nic["properties"]["ipConfigurations"][0])
+        second["properties"]["privateIPAddress"] = "10.30.8.7"
+        azure.nic["properties"]["ipConfigurations"].append(second)
+        with self.assertRaisesRegex(MigrationError, "does not match"):
+            endpoint_state(account, "alias", context, azure)
+        azure.record["properties"]["aRecords"].append({"ipv4Address": "10.30.8.7"})
+        self.assertEqual(endpoint_state(account, "alias", context, azure)["ips"], ["10.30.8.5", "10.30.8.7"])
+
+    def test_multiservice_missing_or_foreign_hostname_metadata_is_not_guessed_from_dns(self):
+        for mode in ("missing", "foreign"):
+            account, context, _, azure = self.multiservice_endpoint_fixture()
+            for item in azure.nic["properties"]["ipConfigurations"]:
+                if mode == "missing":
+                    item["properties"].pop("privateLinkConnectionProperties")
+                else:
+                    item["properties"]["privateLinkConnectionProperties"]["fqdns"] = ["foreign.openai.azure.com"]
+            with self.subTest(mode=mode), self.assertRaisesRegex(MigrationError, "cannot identify"):
+                endpoint_state(account, "alias", context, azure)
+
+    def test_single_address_legacy_metadata_is_unambiguous_but_wrong_hostname_is_rejected(self):
+        account, context, _, azure = self.endpoint_fixture()
+        properties = azure.nic["properties"]["ipConfigurations"][0]["properties"]
+        mapping = properties.pop("privateLinkConnectionProperties")
+        self.assertEqual(endpoint_state(account, "alias", context, azure)["ips"], ["10.30.8.5"])
+        mapping["fqdns"] = ["foreign.openai.azure.com"]
+        properties["privateLinkConnectionProperties"] = mapping
+        with self.assertRaisesRegex(MigrationError, "cannot identify"):
+            endpoint_state(account, "alias", context, azure)
+
+    def test_custom_openai_hostname_case_and_private_alias_are_supported(self):
+        for fqdn in ("CUSTOM-HOST.OPENAI.AZURE.COM.", "custom-host.privatelink.openai.azure.com"):
+            account, context, _, azure = self.multiservice_endpoint_fixture()
+            account["endpoint"] = "https://custom-host.openai.azure.com"
+            azure.record["name"] = "custom-host"
+            azure.nic["properties"]["ipConfigurations"][0]["properties"]["privateLinkConnectionProperties"]["fqdns"] = [fqdn]
+            with self.subTest(fqdn=fqdn):
+                self.assertEqual(endpoint_state(account, "alias", context, azure)["ips"], ["10.30.8.5"])
+
+    def test_unselected_member_subnet_and_selected_group_are_still_checked(self):
+        account, context, _, azure = self.multiservice_endpoint_fixture()
+        azure.nic["properties"]["ipConfigurations"][-1]["properties"]["privateIPAddress"] = "10.40.8.6"
+        with self.assertRaisesRegex(MigrationError, "outside the approved subnet"):
+            endpoint_state(account, "alias", context, azure)
+        account, context, _, azure = self.multiservice_endpoint_fixture()
+        azure.nic["properties"]["ipConfigurations"][0]["properties"]["privateLinkConnectionProperties"]["groupId"] = "foreign"
+        with self.assertRaisesRegex(MigrationError, "approved account group"):
+            endpoint_state(account, "alias", context, azure)
+
+    def test_invalid_nic_hostname_metadata_is_rejected(self):
+        for mapping in (None, [], {"groupId": "account", "fqdns": "synthetic-chat.openai.azure.com"},
+                        {"groupId": "account", "fqdns": [None]}, {"groupId": "foreign", "fqdns": []}):
+            account, context, _, azure = self.endpoint_fixture()
+            azure.nic["properties"]["ipConfigurations"][0]["properties"]["privateLinkConnectionProperties"] = mapping
+            with self.subTest(mapping=mapping), self.assertRaises(MigrationError):
+                endpoint_state(account, "alias", context, azure)
 
     def test_pending_foreign_private_endpoint_blocks(self):
         account, context, pe, azure = self.endpoint_fixture()
