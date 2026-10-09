@@ -426,6 +426,49 @@ class ModelSyncInfrastructureTests(unittest.TestCase):
         with self.assertRaisesRegex(MigrationError, "permissions"):
             assert_what_if({"status": "Failed", "error": {"code": "AuthorizationFailed"}}, {})
 
+    def test_incremental_what_if_accepts_untouched_resources_outside_template(self):
+        role = "/scope/roleAssignments/approved"
+        allowed = {role.lower(): "required"}
+        document = {"status": "Succeeded", "changes": [
+            {"resourceId": role, "changeType": "Create"},
+            {"resourceId": "/scope/managedClusters/existing", "changeType": "Ignore"},
+            {"resourceId": "/scope/privateDnsZones/existing", "changeType": "Ignore"},
+        ]}
+        assert_what_if(document, allowed)
+        for kind in ("Create", "Modify", "NoChange", "Delete", "Unsupported", "unexpected"):
+            bad = copy.deepcopy(document)
+            bad["changes"][1]["changeType"] = kind
+            with self.subTest(kind=kind), self.assertRaises(MigrationError):
+                assert_what_if(bad, allowed)
+
+    def test_ignored_resource_cannot_satisfy_required_expansion(self):
+        role = "/scope/roleAssignments/approved"
+        with self.assertRaisesRegex(MigrationError, "expand"):
+            assert_what_if({"status": "Succeeded", "changes": [
+                {"resourceId": role, "changeType": "Ignore"},
+            ]}, {role.lower(): "required"})
+
+    def test_ignored_resource_still_requires_valid_resource_identity(self):
+        for resource in (None, "", " ", 42):
+            with self.subTest(resource=resource), self.assertRaisesRegex(MigrationError, "resourceId"):
+                assert_what_if({"status": "Succeeded", "changes": [
+                    {"resourceId": resource, "changeType": "Ignore"},
+                ]}, {})
+
+    def test_ignored_parent_cannot_hide_unapproved_nested_changes(self):
+        role = "/scope/roleAssignments/approved"
+        for kind in ("Create", "Modify", "Delete", "Unsupported"):
+            document = {"status": "Succeeded", "changes": [
+                {"resourceId": role, "changeType": "Create"},
+                {"resourceId": "/scope/deployments/ignored", "changeType": "Ignore",
+                 "resourceChanges": [{"resourceId": "/scope/accounts/unapproved", "changeType": kind}]},
+            ]}
+            with self.subTest(kind=kind), self.assertRaises(MigrationError):
+                assert_what_if(document, {role.lower(): "required"})
+        document["changes"][1]["resourceChanges"] = {"unexpected": "shape"}
+        with self.assertRaisesRegex(MigrationError, "resourceChanges"):
+            assert_what_if(document, {role.lower(): "required"})
+
     def test_cross_subscription_focused_plan_exact_resources_and_one_account_once(self):
         config = customer()
         accounts = parse_catalog(catalog(("synthetic-cross",), [OTHER_SUB]), "v1")
@@ -462,6 +505,8 @@ class ModelSyncInfrastructureTests(unittest.TestCase):
         self.assertNotIn(account["accountResourceId"].lower(), plan["accounts"][0]["allowedResources"])
         self.assertIn("--result-format", azure.run.call_args.args[0])
         self.assertIn("FullResourcePayloads", azure.run.call_args.args[0])
+        arguments = azure.run.call_args.args[0]
+        self.assertEqual(arguments[arguments.index("--mode") + 1], "Incremental")
 
     def test_execute_records_partial_infra_before_pending_pe_blocks_application(self):
         account = parse_catalog(catalog(), "v1")[0]

@@ -617,3 +617,22 @@ principal 和条件，不需要 Microsoft Graph 显示名查询或额外角色�
 更新到修复版本后重新 plan 并审核新 hash。此修复不修改角色分配，也不保证
 其他资源的读写权限或整条计划已经验收；真正的 `AuthorizationFailed` 仍应按
 受控权限流程处理。
+
+### 8.4 增量 What-if 中未参与模板的既有资源
+
+若旧版本报 `What-if resource is outside the exact model-sync allowlist`，
+先在本次受保护输出目录的 `what-if-<alias>.json` 中核对 `changeType`。
+Azure 的增量 What-if 可以列出资源组中没有参与本次模板的既有资源，
+并标记为 `Ignore`；这表示本次部署不会操作它们，不表示它们需要加入变更白名单。
+旧检查器把这些记录也强制要求在白名单内，可能错误阻断计划。
+
+修复版本在 plan 和 execute 中均明确使用 `Incremental`。`Ignore` 记录不要求
+在变更白名单内，也不能充当“计划中的必要资源已展开”的证明；其嵌套
+`resourceChanges` 仍逐项校验，不能借 `Ignore` 父记录隐藏越界变更。
+所有非 `Ignore` 记录继续要求精确资源 ID；越界创建/修改、不允许的删除、
+Unsupported 或未完整展开的 PE/DNS/角色分配仍然阻断。
+
+不要扩大白名单、排除整类资源或关闭 What-if 检查。修复后的越界错误包含
+changeType 和 resourceId（诊断输出可能脱敏）；若它不是 `Ignore`，应继续
+受控排查模板与计划，不可按此误判直接放行。更新 Runner 后重新 plan 并审核
+新 hash；此修复不代表整条 Runner 计划或模型推理已经通过。
