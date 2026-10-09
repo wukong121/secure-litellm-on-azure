@@ -4,13 +4,16 @@
 
 当前客户方案入口见[项目总览](../README_ZH.md)和[安全增强迁移指南](../docs/customer-migration-guide-zh.md)，通过[Bicep](../infra/README_ZH.md)、[Kustomize](../deploy/README_ZH.md)和客户Environment配置交付。以下旧脚本不是安全增强版的原地升级入口，不得不经备份和差异审查直接重跑生产部署。旧公网入口、集群内单副本数据库与直接UI访问说明不代表新安全基线。
 
+**当前路径（2026-10-09）**：West US 3 greenfield测试，Private AKS、独立API/Admin Front Door Premium endpoint及PLS native ingress、LiteLLM `1.104.0`固定源码构建、Workload Identity Azure模型认证、Entra-only PostgreSQL/Redis、分离的私有backend/certificate Vault。用户已验证原生Admin用户名/密码fallback登录和virtual key的Codex Responses推理；这不是用户Entra SSO或生产全面验收。当前按[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)操作，不执行下文旧脚本；当前路径没有APIM/App Service公网容器或直连HTTP IP网关。
+
 ## 📂 结构
 
 - `deploy_mi_aks_litellm.py`: AKS、Managed Identity、PostgreSQL 和 LiteLLM Proxy 部署脚本。
 - `azure-openai.json`: 只能保存可提交的占位模板，禁止填写真实订阅 ID、资源名或 Endpoint。
 - `azure-openai.loc.json`: 本机实际部署配置（已被 `.gitignore` 忽略，不要提交）。
 - `USER_BUDGET_AND_MODEL_ACCESS_ZH.md`: 用户、Team、Virtual Key、预算和模型权限配置指南。
-- FOUNDRY_MODEL_SYNC_ZH.md: Foundry 新增模型 deployment 后同步到 LiteLLM 的操作指南。
+- [当前模型同步runbook](../docs/litellm-model-sync-runbook-zh.md)：模型发现/同步的权威操作入口。
+- `FOUNDRY_MODEL_SYNC_ZH.md`：旧部署脚本的历史模型更新参考，不是当前同步流程。
 - `RESOURCE_CLEANUP_ZH.md`: 删除脚本创建/修改的 AKS、Managed Identity、RBAC 和 Kubernetes 资源，并验证无残留。
 - `POSTGRESQL_CAPACITY_AND_SPEND_LOG_RETENTION_ZH.md`: PostgreSQL 数据影响、PVC 扩容、Spend Logs retention、kubectl 手工修复和脚本修复手册。
 - `CODEX_0147_EMPTY_FUNCTIONS_DESCRIPTION_WORKAROUND_ZH.md`: Codex 0.147 Responses Lite 空 namespace description 的 LiteLLM Custom Callback 兼容方案。
@@ -141,6 +144,8 @@ $env:AKS_VM_SIZE = "Standard_B2ms"
 
 ## 🔐 用户预算和模型权限
 
+当前网关从批准公网出口访问`https://llm-admin.<客户域名>/ui`，使用原生用户名/密码登录；推理使用独立`https://llm-api.<客户域名>`和受限virtual key。当前模型同步由配置管理，禁用数据库模型存储，见上面的专用runbook。下文`STORE_MODEL_IN_DB`及直连IP操作只适用于旧脚本。
+
 如果需要在 Admin UI 中新增模型或修改 Router Settings，部署前启用数据库配置存储：
 
 ```powershell
@@ -169,7 +174,7 @@ http://<AKS LoadBalancer IP>:4000/ui
 
 ## PostgreSQL 容量与 Spend Logs
 
-本节是旧网关脚本的默认行为，不是当前基础版启用流程。2026-09-10已选择原生Spend Logs保存获批正文，发布/查询及阶段门禁仍待适配；不能直接重跑旧脚本或改一个布尔值绕过。原文表中的“生产建议关闭”适用于未经批准/未验收的旧默认，不否定新方案经批准后启用；详见[当前部署指南](../docs/customer-deployment-workflows-zh.md)。
+本节是旧网关脚本的默认行为，不是当前原生Spend Logs启用流程。原生发布及模式化门禁已实现，实际查询权限、留存、容量及故障仍须验收；不能重跑旧脚本或改一个布尔值绕过。原文表中的“生产建议关闭”适用于未经批准/未验收的旧默认，不否定新方案经批准后启用；详见[当前部署指南](../docs/customer-deployment-workflows-zh.md)。
 
 启用数据库后，LiteLLM 会保存 Virtual Key、用户、团队、预算、UI 配置以及逐请求 Spend Logs。调用量较大时，`LiteLLM_SpendLogs` 通常是增长最快的表。默认配置保留 7 天明细，并关闭 Prompt/Response 正文存储。
 
@@ -191,25 +196,24 @@ kubectl get pvc pg-data -n litellm
 
 ## 🧪 验证部署
 
-实际测试脚本文件是 `../tests/test_all_deployments.py`：
+以下只验证旧网关，不代表当前native授权层验收。实际脚本是`../tests/test_all_deployments.py`；先由秘密管理系统向进程注入受限`API_KEY`，不要将Key写入命令行：
 
 ```powershell
 python ..\tests\test_all_deployments.py `
   --config .\azure-openai.loc.json `
-  --base-url "http://<AKS LoadBalancer IP>:4000" `
-  --api-key "<LiteLLM Virtual Key>" `
+  --base-url "https://<approved-legacy-gateway-host>" `
   --prompt ok
 ```
 
 测试会验证 OpenAI 风格和 Azure OpenAI 风格的 Chat 路由。使用 Windows 默认控制台时，建议传入 ASCII prompt，避免 `cp1252` 无法输出中文造成测试脚本提前退出。
 
-## ⚠️ 注意事项
+## ⚠️ 旧脚本注意事项
 
 - 不要把管理员 Master Key 分发给普通用户；应为每个用户创建 Virtual Key。
 - 未设置 `LITELLM_HOSTNAME` 时使用公网 `LoadBalancer:4000`；生产环境建议配置域名、TLS、网络访问限制和强随机 Key。
 - PostgreSQL 当前是 AKS 内单副本部署，适合验证和轻量场景；生产环境建议使用高可用数据库和备份。
 
-## 🌐 绑定自有域名并启用 HTTPS
+## 🌐 旧脚本绑定自有域名并启用 HTTPS
 
 想通过 `https://litellm.你的域名.com` 访问（而不是 `http://<IP>:4000`），请按上面的生产配置同时设置 `LITELLM_HOSTNAME` 和 `LETSENCRYPT_EMAIL`。脚本会自动配置 ingress-nginx + cert-manager（Let's Encrypt 证书）。
 

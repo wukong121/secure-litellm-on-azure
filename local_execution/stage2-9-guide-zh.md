@@ -1,8 +1,18 @@
 # Stage2–9本地手工部署指南
 
-> 核对日期：2026-09-23
+> 核对日期：2026-10-09
 >
 > 适用：migration已完成本地Stage0–1，或greenfield已完成Stage0 bootstrap/network/Runner Peering；客户不能使用GitHub Actions，需要继续在受控执行主机上部署Stage2–9。
+
+## 当前运行状态（2026-10-09）
+
+当前greenfield native dev/test网关已在West US 3运行：Private AKS为`Running/Succeeded`，Azure RBAC与禁用本地账号、WI/OIDC均开启，Azure CNI Overlay，2个system加2个user节点，节点SKU `Standard_D4s_v4`。API/Admin通过Front Door Premium分别连接两条PLS和两个私有入口；这不是生产容量或其他区域可用性保证。
+
+用户已确认Admin `/fallback/login`原生用户名/密码登录及virtual key的Codex Responses推理。UI密码来自**后台Vault**中独立的`litellm-ui-password`，不是Master Key或证书Vault秘密；用户侧Entra SSO延期，native路径跳过Stage7。Admin WAF当前精确配置3个批准公网IPv4 `/32`及1个IPv6 `/128`。源镜像固定1.104.0，秘密/身份/续期、审计、恢复及各阶段实际检查仍是门禁，不据当前可用性声明完整Stage0–9或production签收。
+
+只读管理面回读确认PostgreSQL 16为`Ready`，`activeDirectoryAuth=Enabled`、`passwordAuth=Disabled`且公网禁用；Redis为`Microsoft.Cache/redisEnterprise Balanced_B0`，default数据库`accessKeysAuthentication=Disabled`、`clientProtocol=Encrypted`、端口10000。Redis集群`publicNetworkAccess=null`不是公网启用或禁用的证据，不能省略私网/访问控制验证。ACR Premium禁用admin账号及公网，后台与证书Vault均启用RBAC并禁用公网；这些状态不替代实际Pod数据面权限、TLS和续期测试。
+
+本文同时保留migration、Entra和production替代路径；示例只用通用占位符，不把当前新建测试环境当作所有客户的唯一部署模式。
 
 ## 1. 执行边界
 
@@ -14,7 +24,7 @@
 - 本地操作者负责在命令前取得变更批准，命令输出不等于Stage验收通过。
 - 镜像使用客户自管Cosign密钥签名；Actions仍使用GitHub OIDC keyless签名，两种信任路径不混用。
 
-Stage9支持在旧系统保持运行时发布独立新域名做并行canary：新系统以已验收备份的恢复结果为数据基线，完成发布报告后可启用新Front Door route并新增DNS CNAME，不要求旧系统停写或替换旧域名。新旧数据库只在备份时点一致，之后不会持续同步，试点须使用新环境单独签发的virtual key。最终停写、最终增量同步和旧环境退役仍没有自动按钮；只有客户以后要求无损承接备份后的旧系统新增数据时，才进入可选最终迁移流程。
+Stage9支持在旧系统保持运行时发布独立新域名做并行canary：migration以已验收备份的恢复结果为数据基线，greenfield使用初始化的新库/新密钥；完成发布报告后可启用新Front Door route并新增DNS CNAME，不要求旧系统停写或替换旧域名。migration新旧数据库只在备份时点一致，之后不会持续同步，试点须使用新环境单独签发的virtual key。最终停写、最终增量同步和旧环境退役仍没有自动按钮；只有客户以后要求无损承接备份后的旧系统新增数据时，才进入可选最终迁移流程。
 
 ## 2. Azure登录方式
 
@@ -59,7 +69,7 @@ az account set --subscription "REPLACE_SUBSCRIPTION_ID"
 }
 ```
 
-所有未单独配置的profile会自动回退到这个身份。当前默认`entraMode=deferred`，因此这一个UAMI足以完成Stage2–6、可选Stage8观测基础设施，以及Stage9禁流量的origin/edge准备。
+所有未单独配置的profile会自动回退到这个身份。默认`entraMode=deferred`且未选native-auth时，这一个UAMI可用于Stage2–6、可选Stage8观测基础设施，以及Stage9禁流量的origin/edge准备。显式native-auth路径不部署Stage7代理，可按本文继续原生Stage8/9；所需Azure、AKS及数据库权限仍逐项核验，身份数量少不等于自动获权。
 
 ### 2.3 创建单一验证UAMI
 
@@ -181,7 +191,7 @@ az vm identity remove --ids "$RUNNER_VM_RESOURCE_ID" \
 
 1. `entraMode=enabled`：确认Free + Security Defaults满足本次范围，或先取得所需P1/P2能力，然后按Stage7执行。
 2. `entraMode=deferred`：先完成Stage2–6。执行器会阻止Stage7身份/代理、Stage8应用发布、Stage9 edge绑定、启流量和DNS变更；仍可创建Stage8观测基础设施，以及Stage9禁流量的origin/edge资源。
-3. Stage6选择`--option native-auth`：客户无法批准或验证Graph应用权限时，显式改用LiteLLM原生管理员登录和virtual key。该路径保留AKS、Workload Identity、Entra-only PG/Redis、Key Vault、API/Admin双LB、Front Door和原生Spend Logs，但删除用户侧Entra代理、MFA、Conditional Access、代理guardrail和增强L3。Stage6先从批准私网验收Admin；Stage9后日常Admin入口改为独立Front Door，先由WAF Prevention限制批准公网出口CIDR，再输入原生用户名/密码。API只允许固定推理路径；不能把它写成与Entra路径等价。原生管理员使用独立`litellm-ui-password`，不复用或分发Master Key。
+3. Stage6选择`--option native-auth`：客户无法批准或验证Graph应用权限时，显式改用LiteLLM原生管理员登录和virtual key。该路径保留AKS、Workload Identity、Entra-only PG/Redis、Key Vault、API/Admin双LB、Front Door和原生Spend Logs，但不部署用户侧Entra代理，也不提供用户Entra MFA、Conditional Access、代理guardrail或增强L3；不得自动删除已有安全能力。Stage6先从批准私网验收Admin；Stage9后日常Admin入口改为独立Front Door，先由WAF Prevention限制批准公网IPv4 `/32`及IPv6 `/128`，再输入原生用户名/密码。API只允许固定推理路径；不能把它写成与Entra路径等价。原生管理员使用后台Vault中独立的`litellm-ui-password`，不复用或分发Master Key，也不使用证书Vault。
 
 配置示例默认使用保守值：
 
@@ -739,6 +749,8 @@ kubectl --kubeconfig "$VERIFY_KUBECONFIG" get pods,service \
 
 #### 私有AKS自动停机后的启动复核
 
+绑定、rollout和入口检查期间保持AKS为`Running/Succeeded`，不要在操作尚未完成时自动停机。集群停止时私有API的DNS A记录可能不存在；这是先核对电源状态的信号，不是临时开放公网、添加公网DNS或改用admin凭据的理由。
+
 客户Policy夜间执行AKS stop/start时，通常不需要重跑Stage3–5部署。Private Link模式的AKS会在启动时重建由AKS管理的API Server Private Endpoint，其私网IP可能变化；用户另行创建且目标指向该AKS的Private Endpoint则不由AKS恢复，需要网络Owner删除后重建。ACR、证书Vault、PostgreSQL和Redis各自的Private Endpoint不属于“目标指向AKS”的PE，不因该提示删除。
 
 每次启动后先等待管理面完全恢复；`power=Running`但`state=Starting`仍不能继续：
@@ -968,7 +980,7 @@ kubectl --kubeconfig "$LEGACY_RUNTIME_KUBECONFIG" -n "$LEGACY_NAMESPACE" \
   | jq '{hasMaster:(.data|has("LITELLM_MASTER_KEY")),hasSalt:(.data|has("LITELLM_SALT_KEY"))}'
 ```
 
-若`auth can-i`不是`yes`，由旧AKS管理员按[主手册Stage5旧Secret读取步骤](../docs/customer-migration-guide-zh.md#5-migration模式核对旧aks-secret读取)授予精确读取权；不要把Secret正文复制到customer.json或终端日志。
+若`auth can-i`不是`yes`，由旧AKS管理员按[主手册Stage5身份与旧Secret读取步骤](../docs/customer-migration-guide-zh.md#5-a-stage5开始前由客户人工准备的身份与权限)中第5项授予精确读取权；不要把Secret正文复制到customer.json或终端日志。
 
 若旧Secret没有`LITELLM_SALT_KEY`，不要修改旧Secret或生成随机Salt。本项目已批准路径A的环境把`localExecution.runtimeInputs.legacySaltSource`设置为`master-key`；执行器只在确认旧Salt键确实不存在后，才在内存中复用旧Master Key并把该非秘密来源写入plan。其他客户必须先完成自己的兼容性验证与批准；默认`secret`会继续拒绝缺失Salt。
 
@@ -1092,7 +1104,7 @@ az cognitiveservices account deployment list \
   --approved-plan-sha256 "REPLACE_STAGE4_PRIVATE_INGRESS_PLAN_SHA256"
 ```
 
-新计划必须把两套Traefik上游改为`litellm.litellm.svc.cluster.local:4000`；API只允许六个固定POST推理路径和`GET /readyz`，admin保留私网UI。此时后端尚未发布，execute只验证TLS、双平面Host隔离、私有LB和源地址策略，并记录`backendRoutesVerified=false`。不得手工删除代理、改NetworkPolicy或复用旧Stage4哈希。Entra路径无需在此重复Stage4。
+新计划必须把两套Traefik上游改为`litellm.litellm.svc.cluster.local:4000`；API只允许六个固定POST推理路径（`/responses`、`/chat/completions`、`/embeddings`及其`/v1`形式）和私有健康检查`GET /readyz`，**不允许`/v1/models`**；admin保留私网UI。此时后端尚未发布，execute只验证TLS、双平面Host隔离、私有LB和源地址策略，并记录`backendRoutesVerified=false`。不得手工删除代理、改NetworkPolicy或复用旧Stage4哈希。Entra路径无需在此重复Stage4。
 
 3. 计划并发布后端：
 
@@ -1125,7 +1137,7 @@ rm -f "$VERIFY_KUBECONFIG"
 
 通过条件：Ready副本等于Desired且至少2个；镜像是批准digest；Pod重建后会话/Redis行为正常；应用身份只能DML不能DDL；新版没有连接旧PG。
 
-5. native路径从批准私网浏览`https://llm-admin.<baseDomain>/fallback/login`，使用Stage6配置的用户名和客户密码库中的独立UI密码登录。登录后创建限定模型、预算和有效期的virtual key；API调用只使用该virtual key：
+5. native路径从批准私网浏览`https://llm-admin.<baseDomain>/fallback/login`，使用Stage6配置的用户名和客户密码库中的独立UI密码登录。登录后创建限定模型、预算和有效期的virtual key；API调用只使用该virtual key。客户端API base为`https://<api-domain>/v1`，请求`model`必须使用LiteLLM `model_name`别名（本配置的`modelGroup`），不是Azure deployment name；下例`coding`须替换成客户实际批准别名。Codex使用固定Responses路径，不能依赖被拒绝的`/v1/models`自动发现：
 
 ```bash
 BASE_DOMAIN="$(jq -er '.baseDomain' local_execution/customer.json)"
@@ -1144,7 +1156,7 @@ curl --fail-with-body --silent --show-error \
 unset LITELLM_VIRTUAL_KEY
 ```
 
-通过条件：错误密码拒绝；admin UI只从批准私网可达；virtual key正常调用且不能创建其他Key；缺Key、错误Key、管理路径和非批准API路径均拒绝。native路径随后跳过整个Stage7，直接进入Stage8；Entra路径继续下一节。
+通过条件：错误密码拒绝；Stage9发布前admin UI只从批准私网可达，发布后日常入口仅经独立Front Door和精确WAF批准来源；virtual key正常调用且不能创建其他Key；缺Key、错误Key、管理路径和非批准API路径均拒绝。native路径随后跳过整个Stage7，直接进入Stage8；Entra路径继续下一节。当前用户确认的登录/Responses结果仅覆盖其实际客户端与请求，不替代全部协议或生产验收。
 
 ## 6. Stage7启用或延期
 
@@ -1451,7 +1463,7 @@ rm -f "$VERIFY_KUBECONFIG"
 
 Stage9分为“禁流量准备”“独立新域名并行canary”和“可选最终迁移/退役”三个阶段。**执行身份：deploy创建双PLS和双endpoint edge，runtime核验API/Admin绑定；只有Azure DNS自动路径才由runtime修改DNS。** Entra路径的`stage9-edge-bind`绑定Stage7两个代理；native路径核验受管API/Admin Traefik的业务路由、健康改写、私有LB和后端目标。普通Entra延期且未选择native-auth时只能准备origin和禁流量edge。
 
-禁流量准备创建API/Admin两条Private Link Service，以及默认Disabled的两个Front Door endpoint/route，不会形成可访问的新网关。Admin custom domain关联固定Prevention的独立WAF，白名单外来源由`SocketAddr`规则阻断；canary release和两条新域名DNS CNAME发布前仍不作为日常入口。普通`entraMode=deferred`时代理尚未部署；native路径可继续完成双平面edge-bind，但在canary release前route同样不承载请求。
+禁流量准备创建API/Admin两条Private Link Service，以及默认Disabled的两个Front Door endpoint/route，不会形成可访问的新网关。Admin custom domain关联固定Prevention的独立WAF，以`SocketAddr`、`IPMatch`、`negateCondition=true`阻断白名单外来源；canary release和两条新域名DNS CNAME发布前仍不作为日常入口。普通`entraMode=deferred`且未选择native-auth时代理尚未部署；native路径可继续完成双平面edge-bind，但在canary release前route同样不承载请求。当前网关已完成canary发布，不要把以下禁流量准备作为已发布入口的普通更新动作。
 
 ### 8.1 禁流量准备
 
@@ -1466,7 +1478,7 @@ Stage9分为“禁流量准备”“独立新域名并行canary”和“可选�
   --values local_execution/stage-9-values.local.json
 ```
 
-两个`privateLinkServiceId`和两组LB名称可保留模板中的`auto`。Stage9 values还必须填写`adminAllowedCidrs`和独立的Front Door Private Link受支持区域；CIDR是管理员浏览器实际使用路径的稳定公网出口，不是Laptop私网地址。单个IPv4出口使用`/32`，多个企业代理/VPN出口逐项填写。Admin Traefik源站证书仍须为Front Door信任的公有链，但不再需要客户端CA Vault、客户端证书或Preview API。
+两个`privateLinkServiceId`和两组LB名称可保留模板中的`auto`。Stage9 values还必须填写`adminAllowedCidrs`和独立的Front Door Private Link受支持区域；地址是管理员浏览器实际使用路径的稳定公网出口，不是Laptop私网地址。IPv4逐项使用`/32`、IPv6逐项使用`/128`，分别确认两类实际出口并批准，不从公司/VPN名称推断宽CIDR；当前运行环境两类均已配置。Admin Traefik源站证书仍须为Front Door信任的公有链，但不再需要客户端CA Vault、客户端证书或Preview API。
 2. 创建两条Private Link Service源站：
 
 ```bash
@@ -1655,7 +1667,7 @@ Azure DNS动作在同一检查点中新增或更新`llm-api`和`llm-admin`两条
 
 可重复`--add-cidr`添加多个精确地址；双人审批需重复`--approved-by`。plan不修改Azure、客户配置或正式报告。命令要求当前双平面入口已开启、live资源和原配置一致、审批符合现有策略，只允许客户配置中的Admin CIDR增加，不允许移除已有地址或同时修改其他字段。命令从已核验的live Admin WAF生成单资源模板，完整保留现有策略设置、managed rules、其他custom rules和服务默认值，仅替换来源IP匹配值；不重新部署域名、证书、诊断、endpoint、route或API WAF。What-if展开Azure嵌套数组差异，只允许Admin WAF首条来源IP规则`matchValue`叶节点变更，拒绝规则整体替换、action及其他字段变更。原edge部署输出和参数保留，新输出仅更新CIDR，以供后续报告及绑定校验。保留原流量状态，不执行DNS动作；粗粒度或不明差异仍停止，不自动放宽校验。
 
-execute会在stderr实时提示基线/What-if检查、WAF部署、配置及报告保存、绑定回执刷新等阶段，stdout保留JSON摘要。临时kubeconfig使用`--overwrite-existing`非交互获取，不需要输入`y`；该覆盖仅针对本次输出目录，不替代计划哈希或人工审批。WAF部署成功后立即更新`allowlist-summary.json`的`deploymentPerformed`，绑定尚未完成时仍为`status: executing`。执行期间须保持AKS运行；API/Admin rollout各最多等待15分钟，阶段提示不代表已完成。
+execute会在stderr实时提示基线/What-if检查、WAF部署、配置及报告保存、绑定回执刷新等阶段，stdout保留JSON摘要。临时kubeconfig使用`--overwrite-existing`非交互获取，不需要输入`y`；该覆盖仅针对本次操作输出目录，不覆盖用户默认kubeconfig，也不替代计划哈希或人工审批。WAF部署成功后立即更新`allowlist-summary.json`的`deploymentPerformed`，保留本次已验证的批准`planSha256`；绑定尚未完成时仍为`status: executing`。执行期间须保持AKS运行；API/Admin rollout各最多等待15分钟，阶段提示不代表已完成。
 
 execute成功后，以0600备份并更新Git-ignored客户配置和发布报告，再刷新edge-bind回执（只允许已有ingress规则及Pod template均不变）。以最终`status: completed`及`bindingRefreshed: true`确认整个操作成功，无需再运行release。新增IP生效仍需WAF边缘传播；从批准出口验证登录页，并从未批准出口验证拒绝，内层密码认证保持不变。家庭公网地址可能变化，下一次变化需单独审核新增，不能为方便扩大CIDR。
 

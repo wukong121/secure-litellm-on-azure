@@ -1,5 +1,7 @@
 # 验证 Codex 通过 WebSocket 调用 LiteLLM 管理的模型
 
+> **历史旧网关/隔离环境WebSocket验证，不是当前入口的协议验收。** 2026-10-09用户已验证West US 3 private native网关的virtual key Codex Responses推理；这不能证明使用WebSocket或HTTP 101。当前API为独立Front Door/PLS及native ingress，不能将本文旧ingress结果当作已开放WS，也不能修改私有源站绕过路由门禁。当前协议、发布与拒绝测试按[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)执行。
+
 ## 验证目标
 
 本文验证以下完整链路：

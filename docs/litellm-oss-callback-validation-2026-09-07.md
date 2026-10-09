@@ -1,10 +1,12 @@
 # LiteLLM OSS回调实测与L3采集接口
 
 > 日期：2026-09-07
-> 状态：固定版本合成实测通过；薄适配器未接入部署，未替换现有Node采集链路
+> 状态：2026-09-07固定版本合成实测历史证据；当时薄适配器未接入部署，未替换Node采集链路
 > 边界：无Azure/Kubernetes部署、DNS或流量变更，无生产原文，无LiteLLM Enterprise依赖
 
 ## 1. 实测范围
+
+当前边界（2026-10-09）：默认为原生 LiteLLM `1.104.0` 私有网关，基础内容审计采用获批的原生 Spend Logs；本文 `1.98.0` CustomLogger 是可选增强分支的历史试验，不是当前镜像或生产采集证明。West US3 新建 dev/test 的独立 API/Admin Front Door/WAF/PLS 与私有入口已形成，用户验证原生 Admin 密码 fallback 登录和 vkey Codex Responses 推理；Entra 企业准入延期，未证明用户 SSO 或生产就绪。当前不默认部署认证代理/Node 全文采集链路；详细边界见[原生审计方案](litellm-content-audit-phase1-customer-brief-zh.md)和[升级验证](litellm-1.104.0-upgrade-validation-2026-10-07.md)。
 
 使用LiteLLM `1.98.0`镜像：
 
@@ -47,7 +49,7 @@ docker.litellm.ai/berriai/litellm@sha256:20b5044b619055374061a6d5b7b08754cad75ae
 
 `traceId`是关联提示，不是授权凭据。`identityBinding=resolve-at-trusted-receiver`明确要求接收器关联入口已认证、已选择采集的持久化意图；不能从客户端metadata或Header决定tenant、subject、Team和是否强制审计。当前没有实现该受信接收器。
 
-## 3. 冻结的后续实现方向
+## 3. 历史增强分支的实现方向（2026-09-07，非默认）
 
 ```text
 认证代理：身份/授权、采集选择、可信意图、入口拒绝与客户端断连事实
@@ -57,9 +59,9 @@ docker.litellm.ai/berriai/litellm@sha256:20b5044b619055374061a6d5b7b08754cad75ae
     -> Azure审计存储：独立查询、审批查看、留存与保全治理
 ```
 
-这是职责方向冻结，不是“生产采集重构完成”。不启用Enterprise `azure_storage`或`generic_api`连接器；不因认证JWT为付费功能而否定OSS内容回调能力。继续保持`store_prompts_in_spend_logs=false`，避免原文散落到普通Spend Logs和PostgreSQL。
+这是职责方向冻结，不是“生产采集重构完成”。不启用Enterprise `azure_storage`或`generic_api`连接器；不因认证JWT为付费功能而否定OSS内容回调能力。该历史增强分支要求`store_prompts_in_spend_logs=false`以避免重复采集；当前原生 Spend Logs 分支可在明确批准后启用正文，不继承此增强分支的禁用前提。
 
-现有Node采集、入口pending准入和查询/留存功能保持不变；新适配器未打包进LiteLLM镜像、未配置到Kustomize，也没有激活原文采集。替换前必须完成：
+2026-09-07当时的Node采集、入口pending准入和查询/留存功能未改变；新适配器未打包进LiteLLM镜像、未配置到Kustomize，也没有激活原文采集。替换前必须完成：
 
 1. 受信身份绑定、去重键和多attempt事件关系；拒绝伪造、跨租户和重放事件。
 2. 模型完成、上游传输结束、客户端接收、持久化完成的独立状态；EOF和断连不得误记完整。
@@ -88,4 +90,4 @@ bash scripts/validate-oss-callbacks.sh
 
 门禁是独立CI任务，不隐式改变现有Stage3至9离线验证的依赖。升级LiteLLM时必须重新跑矩阵；观察到EOF/回调失败行为变化时，应复核契约而非直接放宽断言。
 
-尚未覆盖：重试/fallback多attempt、下游真实断连、Responses断流、流式工具调用、工具结果续轮、WebSocket、Files/MCP、对象归属及加密多轮引用、真实Azure调用、Entra授权、云端存储恢复和性能验收。阶段7当前拒绝的协议继续拒绝。
+尚未覆盖：重试/fallback多attempt、下游真实断连、Responses断流、流式工具调用、工具结果续轮、WebSocket、Files/MCP、对象归属及加密多轮引用、真实Azure调用、Entra授权、云端存储恢复和性能验收。历史企业代理模式拒绝的协议不得仅凭本回调测试开放；当前原生 Codex Responses 功能检查不证明本文未覆盖的协议、对象授权或审计完整性。

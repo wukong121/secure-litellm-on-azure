@@ -1,8 +1,10 @@
 # Azure Monitor告警转发飞书操作指南
 
-> 核对日期：2026-09-17
+> 核对日期：2026-10-09
 >
-> 适用：已经执行Stage1 `monitoring`，希望将`ag-litellm-stage1-owner`收到的Azure Monitor告警转发到飞书群。本流程只使用Azure Portal和飞书客户端，不修改仓库模板。
+> 适用：将已批准的Azure Monitor Action Group告警转发到飞书群。migration执行Stage1 `monitoring`时模板组名为`ag-litellm-stage1-owner`；greenfield使用本环境实际批准的Action Group，不补跑旧环境Stage1。本流程只使用Azure Portal和飞书客户端，不修改仓库模板。
+
+当前运行路径为greenfield native dev/test；Admin登录或Codex Responses推理成功不证明告警规则、Logic App或飞书投递已验收。本文通知集成是可选的独立批准变更，不启用用户Entra SSO，不需要读取Master Key、UI密码或API/Admin源站证书Vault。部署路径与运行门禁见[Stage2–9指南](stage2-9-guide-zh.md)。
 
 ## 1. 方案和边界
 
@@ -10,7 +12,7 @@
 
 ```text
 Azure Monitor告警
-  → Action Group ag-litellm-stage1-owner（Common Alert Schema）
+  → 获批Action Group（Common Alert Schema）
   → Logic App Request触发器
   → HTTP POST转换为飞书消息格式
   → 飞书群自定义机器人
@@ -18,18 +20,18 @@ Azure Monitor告警
 
 不能把飞书机器人Webhook直接配置为Action Group的普通Webhook。Azure发送的是Common Alert Schema，飞书要求`msg_type/content`消息格式；中间使用Logic App转换。
 
-本流程保留原有Email通知。Action Group测试只证明通知链路可调用，不证明某条日志查询真的满足阈值，也不等于Stage1验收完成。
+本流程保留原有Email通知。Action Group测试只证明通知链路可调用，不证明某条日志查询真的满足阈值，也不等于Stage1、greenfield监控或生产验收完成。
 
 ## 2. 准备信息和权限
 
 | 项目 | 从哪里取得 | 怎样核验 |
 | --- | --- | --- |
-| 订阅、旧资源组 | `local_execution/customer.json`中的`azure.subscriptionId`和`legacy.resourceGroup` | 与Portal当前目录/订阅一致 |
-| Action Group | Azure Portal → Monitor → Alerts → Action groups | 名称为`ag-litellm-stage1-owner`，Enabled，位于旧资源组 |
+| 订阅、告警资源组 | `local_execution/customer.json`中的`azure.subscriptionId`；migration Stage1使用`legacy.resourceGroup`，greenfield核对实际告警部署输出 | 与Portal当前目录/订阅和告警规则一致；greenfield不填写legacy |
+| Action Group | Azure Portal → Monitor → Alerts → Action groups | 选实际批准且被告警规则引用的Enabled组；migration Stage1模板组为`ag-litellm-stage1-owner`，greenfield不假定同名或同RG |
 | 飞书Webhook | 飞书目标群 → 设置 → 机器人 → 添加机器人 → 自定义机器人 | 形如`https://open.feishu.cn/open-apis/bot/v2/hook/...`，不得写入Git、工单正文或截图 |
 | Azure权限 | 客户管理员批准 | 至少可创建/编辑Logic App，并可编辑和测试目标Action Group |
 
-Logic App Consumption按触发和动作次数计费。资源组、区域和数据处理位置须由客户批准；通常使用旧监控资源所在区域或客户专用集成资源组。
+Logic App Consumption按触发和动作次数计费。资源组、区域和数据处理位置须由客户批准；通常使用本次监控资源所在区域或客户专用集成资源组。发到飞书的规则名、资源组和description也可能包含敏感标识，须按通知接收范围批准并最小化，不转发客户Prompt/Response、凭据或未经批准的私人标识。
 
 ## 3. 创建飞书自定义机器人
 
@@ -145,7 +147,7 @@ int(coalesce(body('Send_to_Feishu')?['code'], body('Send_to_Feishu')?['StatusCod
 ## 5. 绑定Action Group
 
 1. Azure Portal → **Monitor → Alerts → Action groups**。
-2. 打开`ag-litellm-stage1-owner`，选择 **Edit**。
+2. 打开第2节核对的实际Action Group（migration Stage1模板为`ag-litellm-stage1-owner`），选择 **Edit**。
 3. 保留现有Email notification，不删除。
 4. 进入 **Actions** → **Add action**。
 5. Action type选择 **Logic App**，Action name例如`feishu-alert`。
@@ -153,7 +155,7 @@ int(coalesce(body('Send_to_Feishu')?['code'], body('Send_to_Feishu')?['StatusCod
 7. 将 **Common alert schema** 设为`Yes`。这是每个Action独立的设置，Email已启用不代表Logic App自动启用。
 8. 保存Action Group。
 
-此修改是Portal手工配置。重新执行本仓库的`--step monitoring`会按Bicep定义更新同一个Action Group，可能移除手工添加的Logic App Action。每次重跑monitoring后都必须重新核对、必要时重新绑定并测试；长期生产使用应把集成纳入客户自己的IaC。
+此修改是Portal手工配置。migration重新执行本仓库的`--step monitoring`会按Bicep定义更新同一个Action Group，可能移除手工添加的Logic App Action；greenfield也须检查管理该组的实际IaC更新是否覆盖手工动作。每次重跑对应监控部署后都必须重新核对、必要时重新绑定并测试；长期生产使用应把集成纳入客户自己的IaC。
 
 ## 6. 测试与通过标准
 

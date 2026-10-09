@@ -2,9 +2,13 @@
 
 本目录提供客户安全网关的Bicep模板，不提供旧生产环境的一键原地升级。客户从[项目总览](../README_ZH.md)和[迁移指南](../docs/customer-migration-guide-zh.md)进入，使用Customer staged migration workflow按阶段注入配置、审查What-if，再单独批准部署。
 
+当前West US 3（`westus3`）greenfield测试也可按[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)受控执行。2026-10-09只读管理面显示Private AKS `Running/Succeeded`、Azure CNI overlay、Azure RBAC、禁用Local Accounts、OIDC及Workload Identity启用，System/User各2台`Standard_D4s_v4`。这是当前参考状态，不是模块默认SKU或Kubernetes rollout/应用验收证明。API/Admin分别经Front Door Premium及独立PLS回源；backend与certificate Vault均私有且分离，PostgreSQL/Redis为Entra-only。
+
+当前数据/秘密服务的只读核对：PostgreSQL 16为`Ready`，`activeDirectoryAuth=Enabled`、`passwordAuth=Disabled`、`publicNetworkAccess=Disabled`；Redis为`Microsoft.Cache/redisEnterprise`、`Balanced_B0`，默认数据库`accessKeysAuthentication=Disabled`、`clientProtocol=Encrypted`、端口`10000`。Redis集群`publicNetworkAccess`空值不是公网开关证据，不据此推断。ACR Premium禁用Admin User和公网访问；backend/certificate Vault均启用RBAC并禁用公网访问。Admin WAF当前批准三个精确IPv4 `/32`及一个IPv6 `/128`，不发布实际地址。
+
 ## 目录边界
 
-第一阶段审计方向已改为原生Spend Logs（2026-09-10），获批正文进入私有PostgreSQL。独立audit-foundation/audit-storage/audit-detection按增强需求选用，不是基础版固定BOM；现有模板、配置和阶段门禁并未因文档而改变，原生模式发布与查询仍待适配。既有Blob/HSM Key及保全数据不能自动删除。详见[部署指南](../docs/customer-deployment-workflows-zh.md)及[成本口径](../docs/litellm-bom-cost-comparison-zh.md)。
+第一阶段审计方向为原生Spend Logs，获批正文进入私有PostgreSQL。原生发布/模式化门禁已实现，实际查询权限、留存、容量及恢复仍须验收。独立audit-foundation/audit-storage/audit-detection按增强需求选用，不是基础版固定BOM；既有Blob/HSM Key及保全数据不能自动删除。详见[部署指南](../docs/customer-deployment-workflows-zh.md)及[成本口径](../docs/litellm-bom-cost-comparison-zh.md)。
 
 - `modules/`：可复用Azure资源模块；
 - `environments/`：`dev/test/prod`环境入口与参数；
@@ -14,7 +18,7 @@
 - [audit-detection](audit-detection/main.bicep)：默认禁用的检测规则及响应契约，非已运行的自动响应；
 - [edge](edge/README_ZH.md)及[edge-origin](edge-origin/main.bicep)：阶段9 API/Admin独立Front Door endpoint、Admin WAF来源IP白名单、内层登录及两套Private Link Service。
 
-这些模板和本地验证结果不等于客户资源已部署。提交的环境参数默认关闭资源创建；客户迁移工具只为选定阶段生成显式参数和只读预览，不执行部署。尚未完成的身份、入口、数据认证和观测接线见[收尾台账](../docs/litellm-code-completion-backlog-2026-09-07.md)。
+这些模板和本地验证结果不等于客户资源已部署。提交的环境参数默认关闭资源创建；`customer-migration.yml`只提供指导、检查与只读预览，实际写入由独立部署入口或本地批准plan/execute执行。客户边界见[迁移指南](../docs/customer-migration-guide-zh.md)；[收尾台账](../docs/litellm-code-completion-backlog-2026-09-07.md)中的历史接线缺口不代表当前参考环境仍未接线。
 
 ## ACR模块
 
@@ -30,7 +34,7 @@
 
 ## 参数与Secret
 
-客户workflow使用`CUSTOMER_CONFIG_JSON` Environment variable生成明确的资源名、区域、Owner和组件参数；配置必须与OIDC的订阅/租户一致。阶段验收记录放在`MIGRATION_EVIDENCE_JSON` Environment secret。完整字段和前置条件见[客户配置模板](../config/customer.example.json)及迁移指南。
+客户workflow使用`CUSTOMER_CONFIG_JSON` Environment Secret生成明确的资源名、区域、Owner和组件参数；配置必须与OIDC的订阅/租户一致。`WORKFLOW_ARTIFACT_KEY`是独立Environment Secret，阶段验收账本通过加密artifact传递，不要求手写`MIGRATION_EVIDENCE_JSON`。完整字段和前置条件见[客户配置模板](../config/customer.example.json)及迁移指南。
 
 直接编译环境参数时使用`LITELLM_ACR_SUFFIX`、`AZURE_LOCATION`、`OWNER_EMAIL`和`LOG_ANALYTICS_WORKSPACE_NAME`；`stage3check`、`owner@example.com`等回退只用于离线检查，不是部署默认值。客户入口拒绝占位符，不读取个人本地环境。
 
@@ -98,6 +102,6 @@ Private AKS创建模板保留控制面Diagnostic Settings和Defender，但不在
 
 IaC不会创建任何Key Vault Secret值，也不会接收数据库密码或连接串。PostgreSQL Entra管理员对象信息必须从受保护部署变量注入；默认空值只用于安全编译，不代表可用数据库。数据库应用角色、`DATABASE_URL`、固定Salt和Master Key必须通过受控引导流程写入Key Vault，不能出现在Git、Bicep参数、部署输出或命令日志中。
 
-Stage5 Kustomize组件使用Secrets Store CSI和Workload Identity。由于LiteLLM当前通过环境变量读取Master Key、Salt和数据库URL，组件暂时启用逐项Kubernetes Secret同步作为显式补偿控制；禁止`envFrom`，并要求最小RBAC、etcd加密、轮换和未授权读取测试。Redis使用Entra Token刷新，不保存Access Key。
+静态Stage5 Kustomize组件使用Secrets Store CSI和Workload Identity，并保留逐项Kubernetes Secret同步作为该参考组件的显式补偿控制；禁止`envFrom`，启用该组件前须验证最小RBAC、etcd加密和轮换。当前生成的backend运行路径通过只读CSI文件及启动器加载秘密，不等于直接套用该静态组件。PostgreSQL/Redis采用Entra身份，不能把旧`PG_PASSWORD`/Redis Access Key路径用于当前网关；身份、刷新、私网与未授权读取行为须按当前指南验收。
 
 本地运行`make validate-stage5`执行Stage4回归、Bicep编译、Kustomize渲染和Secret仓库检查。该命令不部署Azure或Kubernetes资源。

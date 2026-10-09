@@ -1,6 +1,8 @@
 # LiteLLM PostgreSQL 扩容与 Spend Logs 保留策略
 
-本文适用于当前 LiteLLM `1.95.0`、AKS 内单副本 PostgreSQL、PVC `pg-data` 的部署。包含两种修复方式：
+> **旧集群内PostgreSQL/PVC修复手册，不是当前数据服务维护入口。** 当前West US 3使用Entra-only PostgreSQL Flexible Server及LiteLLM `1.104.0`固定源码路径，不存在本文所假定的`pg-data`应用数据库PVC。当前正文批准、留存/备份、容量及恢复按[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)或[客户迁移指南](../docs/customer-migration-guide-zh.md)执行；不要在当前集群执行下文PVC扩容、PG_PASSWORD注入或旧部署脚本重跑。原生发布/模式化门禁已实现，不代表实际日志留存与故障验收完成。
+
+本文适用于旧LiteLLM `1.95.0`、AKS内单副本PostgreSQL、PVC `pg-data`部署。包含两种修复方式：
 
 1. 客户尚未取得新版部署脚本时，通过 `kubectl` 手工修复；
 2. 客户取得新版 `deploy_mi_aks_litellm.py` 后，通过脚本标准化执行。

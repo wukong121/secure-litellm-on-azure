@@ -1,5 +1,7 @@
 > 客户安全增强迁移期间不要执行本文删除步骤。以下资源名与所有权判断为已去标识化的参考案例，不能证明客户资源可删除。先完成[迁移与回退窗口](../docs/customer-migration-guide-zh.md)，再另行批准退役并重新盘点所有权。
 
+> **仅描述旧部署脚本资源，不是当前West US 3 greenfield清理清单。** 当前私有AKS、Front Door双平面/PLS、Workload Identity、Entra-only PG/Redis及backend/certificate Vault不按本文旧VMSS身份/PVC流程退役。“可以删除”等判断只属于下述历史示例，不能授权删除当前资源；当前变更/回退边界见[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)。
+
 # 删除 LiteLLM 部署资源并验证清理完成
 
 本文用于删除 [`deploy_mi_aks_litellm.py`](./deploy_mi_aks_litellm.py) 创建或修改的 Azure 与 Kubernetes 资源，并验证不存在残留计费资源、权限和 DNS 指向。
@@ -33,9 +35,9 @@
 
 DNS 记录和 ACR 可能由其他操作指南单独创建，只能在确认不再使用后人工删除。
 
-## 2. 当前环境的重要警告
+## 2. 历史参考环境的重要警告
 
-当前配置使用：
+历史示例配置使用（不是当前West US 3资源）：
 
 ```text
 Deployment Resource Group : rg-example-legacy
@@ -53,7 +55,7 @@ Kubernetes Namespace      : litellm
 
 > **不要在 AKS 仍存在时直接删除 `MC_...` 节点 Resource Group 或其中的单个资源。** 这会破坏仍被 Azure 控制面管理的集群，并可能留下不一致状态。正确顺序是先删除 `litellm-mi-aks`，等待 Azure 自动删除整个节点 Resource Group；只有 AKS 已不存在但节点 RG 异常残留时，才人工删除残留的 `MC_...` Resource Group。
 
-### 当前截图中的删除清单
+### 历史参考截图中的删除清单
 
 | Portal 中的资源 | 是否可删 | 判断依据 |
 |---|---|---|

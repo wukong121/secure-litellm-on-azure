@@ -1,21 +1,21 @@
 # LiteLLM 网关安全增强推荐改造路径
 
-> 文档状态：实施路线建议稿  
-> 编制日期：2026-09-01  
+> 文档状态：生产门禁建议与历史迁移顺序；不是所有阶段验收报告
+> 原始编制日期：2026-09-01；现状对齐：2026-10-09
 > 输入文档：`docs/litellm-azure-security-hardening-zh.md`、`docs/litellm-security-hardening-change-list-zh.md`、`docs/litellm-bom-cost-comparison-zh.md`  
-> 当前基线：LiteLLM `1.95.0`、公网 ingress-nginx、节点级 Managed Identity、AKS 内单副本 PostgreSQL  
+> 历史迁移源：LiteLLM `1.95.0`、公网 ingress-nginx、节点级 Managed Identity、AKS 内单副本 PostgreSQL；不是当前参考环境
 > 目标：在不破坏当前已验证业务能力的前提下，通过新建安全生产环境、数据迁移和灰度切流完成企业级安全增强  
 > 明确边界：本路线不引入 Azure API Management（APIM）
 
-## 当前完成度澄清（2026-09-07）
+## 当前完成度澄清（2026-10-09）
 
-客户执行入口为[分阶段迁移指南](customer-migration-guide-zh.md)及Customer staged migration workflow；真实配置从客户GitHub Environment注入。以下阶段记录已去标识化，只是参考实施证据，不是客户已完成的准备或部署状态。
+客户执行入口为[迁移指南](customer-migration-guide-zh.md)、[部署指南](customer-deployment-workflows-zh.md)及 Customer staged migration workflow；真实配置从客户 GitHub Environment 注入。运行时 Stage0–9 CLI/workflow 编号保持不变；本文工程门禁不是独立阶段记录文件的索引。
 
-阶段0至9已有阶段性交付，**全部编码、IaC集成和生产验收尚未完成**。阶段9仍为切流准备，不是已切流；模板存在或离线门禁通过不代表云端接线完成。
+2026-10-09只读管理面核查的 West US3 新建 dev/test 已有 private AKS Running/Succeeded、Azure CNI overlay、Azure RBAC、禁用本地账户、WI/OIDC；System/User 池各 2 台 `Standard_D4s_v4`。API/Admin Front Door Premium 分别经 PLS/内部 LB/私有 Traefik 回源，两侧 WAF Prevention；Admin 否定 SocketAddr IPMatch 白名单含三个 IPv4 `/32` 和一个 IPv6 `/128` 精确出口。模型使用 WI，PG/Managed Redis 私网 Entra-only，后端 Vault 与证书 Vault 分离，ACR 私有，Firewall 路由出站。
 
-2026-09-10审计范围已调整为原生Spend Logs基础版，自建L3可靠交付仅作为可选增强分支；[原收尾台账](litellm-code-completion-backlog-2026-09-07.md)中的L3默认前提不再普遍适用，其他身份/协议/数据/入口验收不取消。固定LiteLLM `1.98.0`的[OSS回调实测](litellm-oss-callback-validation-2026-09-07.md)保留为增强分支历史证据，不代替原生正文落库测试。基础版尚需生成配置、受控查询、容量/清理/备份和模式化阶段门禁，详见[部署指南](customer-deployment-workflows-zh.md)。
+默认是原生 LiteLLM `1.104.0` 网关，入口不经过 Entra 代理；用户验证了 Admin 密码 fallback 登录和 vkey Codex Responses 推理，不是 Entra 用户 SSO、全部协议或生产验收。Entra 企业准入和生产门禁延期；无 APIM、App Service 或单一共享代理。不能把管理面状态、模板/离线测试或用户功能检查扩展为 Stage0–9 全部通过、迁移切流完成或旧环境可退役。
 
-本轮未部署、未改DNS/生产流量、未采集生产原文、未提交Git；不使用LiteLLM Enterprise或APIM。
+2026-09-10起第一阶段采用原生 Spend Logs，自建 L3 为可选增强。[原收尾台账](litellm-code-completion-backlog-2026-09-07.md)及 `1.98.0` [OSS回调实测](litellm-oss-callback-validation-2026-09-07.md)保留历史判断。原生配置发布、受控读取与隔离落库已有代码/测试；客户采集授权、容量、清理、备份、故障及云端权限仍须验收。本文仅对齐文档，未执行云端写入或开启正文采集。
 
 ## 1. 文档目的
 
@@ -54,8 +54,9 @@ Kubernetes 平台与应用层
 LiteLLM 逻辑配置层
   Models / Router / Team / Budget / OSS Guardrail / Logging
 
-独立身份与策略层
-  客户自有 Entra 认证代理 / App Roles / Team 映射 / 管理路径隔离
+入口与身份层
+  默认：分离的私有 Traefik -> 原生 LiteLLM vkey / Admin 登录
+  延期企业模式：客户自有 Entra 准入 / App Roles / 管理路径隔离
 ```
 
 ### 2.3 门禁式推进
@@ -89,7 +90,7 @@ flowchart LR
     E --> G[模型服务私网化]
     F --> H[阶段 6：LiteLLM 双副本安全基线]
     G --> H
-    H --> I[阶段 7：Entra认证代理与管理面分离]
+    H --> I[阶段 7：原生入口与管理面分离 / 可选Entra门禁]
     H --> J[阶段 8：可观测性、Guardrail 与审计]
     I --> K[阶段 9：WAF、灰度切流与回退窗口]
     J --> K
@@ -182,7 +183,7 @@ flowchart LR
 **关联工作包**：SEC-01、SEC-05、SEC-07、SEC-08、SEC-09、SEC-13、SEC-15、SEC-16、SEC-21  
 **目标**：在创建生产资源前关闭会影响总体架构的未决问题，并证明关键技术兼容性。
 
-> 2026-09-03更新：LiteLLM原生JWT已确认属于Enterprise付费能力，正式排除出本方案。数据面Entra认证改由客户自有、部署在AKS中的独立认证代理实现；方案不得依赖LiteLLM Enterprise许可证。阶段2原始Spike结论保留为排除该能力的证据。
+> 历史决策（2026-09-03）：排除 LiteLLM Enterprise 原生 JWT，企业 Entra 认证由客户自有 AKS 代理实现。当前原生默认网关不部署该代理；企业准入延期，仍不得依赖 Enterprise 许可证。
 
 ### 6.1 必须冻结的架构决策
 
@@ -191,22 +192,22 @@ flowchart LR
 | 公网或内网入口 | 按真实客户端位置选择，不同时建设两套主入口 |
 | 互联网入口 | Azure Front Door Premium + WAF + Private Link 私有源站 |
 | 纯内网入口 | 内部 Application Gateway WAF v2 |
-| Admin UI | 独立内网域名 |
-| 数据面身份 | 客户自有Entra认证代理验证JWT；后端使用按身份映射的受限Virtual Key，不启用LiteLLM原生JWT |
+| Admin UI | 独立 Admin Front Door/WAF、来源白名单及私有源站；生产 Entra 策略另验 |
+| 数据面身份 | 默认原生 vkey；延期 Entra 模式要求企业 Token + 客户端 vkey，模型权限仍由 LiteLLM 执行 |
 | 模型配置事实源 | 生产模型、Router 和安全基线优先 Git；Team、Key、预算使用数据库；Secret 使用 Key Vault |
 | IaC | Bicep 或 Terraform 二选一，并成为 Azure 资源唯一事实源 |
 | Prompt/Response 落盘 | 默认禁止，例外按治理审批 |
-| PG/Redis 认证 | 优先 Entra，兼容性不满足时使用 Key Vault 托管凭据 |
+| PG/Redis 认证 | 当前 Entra-only；密码补偿不是当前路径，变更须另批准且同步修改资源、轮换与应用配置 |
 | Guardrail 故障策略 | 按数据分类；高敏请求 fail-closed |
 | RTO/RPO | 由客户业务 Owner 批准 |
 | 迁移方式 | 推荐新集群迁移，不做大规模原地改造 |
-| 内容留痕与增强审计 | 基础版原生Spend Logs经批准后启用，明确PG容量/留存/备份/读取者；独立L3存储与审批按需选择，代码门禁待适配 |
+| 内容留痕与增强审计 | 原生发布/读取已有代码与隔离验证；云端启用须批准PG容量/留存/备份/读取者；独立L3按需选择 |
 | LiteLLM 版本 | 固定精确版本与 digest，不使用浮动 `latest` |
 
 ### 6.2 LiteLLM 版本策略
 
-- 当前生产/回退环境继续固定 `1.95.0`；
-- 非生产候选环境优先验证 `1.98.0`；
+- 当前托管网关镜像源固定 `1.104.0`，见[升级验证](litellm-1.104.0-upgrade-validation-2026-10-07.md)；
+- `1.95.0` 是历史迁移源，`1.98.0` 是历史候选/回调试验版本，不能当成当前发布或自动回退目标；
 - 设计冻结时选择通过全部门禁的精确版本；
 - 不自动追随最新版本，不使用浮动 Tag；
 - 升级前必须验证数据库 schema、Prisma、密文、协议、Router、管理SSO、OSS Guardrail 和 callback；
@@ -214,7 +215,7 @@ flowchart LR
 
 ### 6.3 优先技术 Spike
 
-1. LiteLLM `1.98.0` 与当前数据库对象、密文和 Prisma schema 的兼容性；
+1. LiteLLM `1.104.0` 与客户实际数据库对象、密文和 Prisma schema 的兼容性；隔离合成升级证明不代替客户迁移/恢复演练；
 2. Flexible Server `sslmode=verify-full`、TLS CA、连接池和 schema migration；
 3. PostgreSQL 密码认证和 Entra token 认证的实际兼容性；
 4. Azure Managed Redis TLS、证书、端口、Entra token 首次认证与刷新；
@@ -237,7 +238,7 @@ flowchart LR
 **关联工作包**：SEC-02、SEC-17、SEC-20  
 **目标**：建立可审查、可重复、可追溯的生产交付机制。
 
-> 2026-09-03 状态：阶段3代码、本地验证和默认无变更What-if已完成，详见 `docs/litellm-stage3-iac-cicd-supply-chain-2026-09-03.md`。GitHub Environment、OIDC、分支保护、云端workflow首跑和Premium ACR实际部署尚待仓库/阶段4网络配置。
+> 历史状态（2026-09-03）：当时仅代码、本地门禁与默认无变更 What-if 完成。当前 ACR 私有化及精确版本 pin 已更新，供应链与客户发布证据仍按[部署指南](customer-deployment-workflows-zh.md)和[升级验证](litellm-1.104.0-upgrade-validation-2026-10-07.md)执行。
 
 ### 7.1 推荐实施顺序
 
@@ -285,7 +286,7 @@ scripts/
 **关联工作包**：SEC-06、SEC-10、SEC-11、SEC-12、SEC-17  
 **目标**：建立私有、最小权限、受控出站的运行边界。
 
-> 2026-09-03 状态：阶段4设计、IaC、NetworkPolicy组件、静态门禁和启用场景What-if已完成，详见 `docs/litellm-stage4-private-network-aks-identity-2026-09-03.md`。所有环境`deployStage4=false`，尚未创建Private AKS、Firewall、ACR或模型Private Endpoint；等待网络/区域/仓库治理和跨订阅权限Gate。
+> 历史状态（2026-09-03）：当时为设计/IaC/静态门禁，尚未部署。当前 private AKS、WI/OIDC、私有 ACR 与 Firewall 路由已由只读管理核查确认；实际 Pod 身份、DNS、NetworkPolicy 负向与受控出站仍按[迁移指南](customer-migration-guide-zh.md)验收，不以资源 Succeeded 代替。
 
 ### 8.1 网络基础
 
@@ -349,7 +350,7 @@ scripts/
 **关联工作包**：SEC-07、SEC-08、SEC-09、SEC-14、SEC-19  
 **目标**：建立可轮换、可恢复、支持多副本的安全状态服务。
 
-> 2026-09-03状态：Key Vault、PostgreSQL Flexible Server、Azure Managed Redis、Private Endpoint/DNS、Workload Identity、CSI和验证代码已完成；所有环境`deployStage5=false`，云资源、Secret、Kubernetes清单和数据迁移均未部署。详细记录见`litellm-stage5-keyvault-postgresql-redis-2026-09-03.md`。
+> 历史状态（2026-09-03）：当时仅有模板/验证代码。当前后端 Vault、PG/Managed Redis 私网 Entra-only 已形成新建环境；密码补偿不是当前路径。令牌长期刷新、CSI 轮换、备份/PITR 和客户数据迁移仍须[部署指南](customer-deployment-workflows-zh.md)要求的运行证据。
 
 ### 9.1 Key Vault
 
@@ -399,7 +400,7 @@ scripts/
 **关联工作包**：SEC-05、SEC-10、SEC-13、SEC-14  
 **目标**：先构建安全且接近当前功能的应用基线，再逐项引入新的路由能力。
 
-> 2026-09-03状态：双副本安全基线、CPU/内存HPA、Git配置事实源以及`simple-shuffle + affinity + Redis`目标组件和静态门禁已完成；Stage6未加入环境overlay，未部署或切流，真实Redis/PG故障、HPA和WebSocket/SSE滚动行为仍待新Private AKS验证。详细记录见`litellm-stage6-ha-routing-2026-09-03.md`。
+> 历史状态（2026-09-03）：当时为双副本/路由组件与静态门禁。当前用户已验证 vkey Codex Responses 推理；这不证明 Redis/PG 故障、HPA、WebSocket/SSE 滚动和生产容量。版本隔离证据见[升级验证](litellm-1.104.0-upgrade-validation-2026-10-07.md)，实际门禁见[部署指南](customer-deployment-workflows-zh.md)。
 
 ### 10.1 最小安全部署
 
@@ -487,14 +488,16 @@ usage-based-routing-v2 + 模型组 affinity + Redis
 - PG/Redis 短暂故障行为符合审批的 fail-open/fail-closed 策略；
 - 新路由只有在 A/B 门禁通过后才能启用。
 
-## 11. 阶段 7：Entra认证代理与管理面分离
+## 11. 阶段 7：原生入口与管理面分离；可选 Entra 企业门禁
 
 **关联工作包**：SEC-04、SEC-05、SEC-14  
 **目标**：每次访问可归因，普通推理调用不能访问管理能力。
 
-> 2026-09-07：子域固定为`llm-api.<客户域>`和`llm-admin.<客户域>`。独立OSS Entra代理、OIDC/Token校验、API/管理路由白名单和proxy-only后端网络策略已完成第一轮代码及离线测试。未部署、未切流；原生UI、WebSocket和带对象引用/加密上下文的多轮协议默认关闭，不能替换现有Codex入口。详见[阶段7实施记录](litellm-stage7-entra-proxy-domains-2026-09-07.md)。
+> 历史状态（2026-09-07）：当时独立 OSS Entra 代理仅有第一轮离线测试，原生 UI 与若干协议关闭。当前默认原生路径已接通 Admin 密码 fallback 登录及 Codex Responses；企业 Entra 门禁仍延期。API/Admin 使用独立 Front Door、WAF、PLS 与私有入口，详见[入口设计](litellm-ingress-tls-certificate-design-zh.md)及[部署指南](customer-deployment-workflows-zh.md)。
 
 ### 11.1 推荐实施顺序
+
+当前原生模式先验证双入口、API 管理路径拒绝、Admin 来源白名单/登录与 Key 权限。以下 Entra 顺序仅适用于另获批准的企业模式；不作为当前原生运行链路描述。
 
 1. 为Admin UI和数据面API分别建立Entra App Registration/Enterprise Application；
 2. 定义 `proxy_admin`、`proxy_admin_viewer`、`internal_user` 等 App Roles；
@@ -505,12 +508,14 @@ usage-based-routing-v2 + 模型组 affinity + Redis
 7. 2026-09-10采用双凭据方案：不再维护API身份到内部Key/模型ACL的映射，由LiteLLM统一管理Team、用户、vkey、模型权限和预算；实际企业主体与Key指纹分别关联。管理凭据映射不变，迁移和兼容边界见[当前代理说明](../auth-proxy/README_ZH.md)；
 8. 后台 Agent 使用独立应用身份或 Managed Identity；
 9. 禁止多人或多个 Agent 共用不可归因的 Virtual Key；
-10. 数据面使用`llm-api.<客户域>`，管理面使用`llm-admin.<客户域>`，管理域名仅接入私有管理入口；
+10. 使用独立 API/Admin 域名与源站；Admin 边缘可公网解析，但 WAF 只接受批准出口，源站仍私有；
 11. 公网数据面只开放批准的推理 API，并明确拒绝管理路径；
 12. `/fallback/login`仅作为受控Break Glass，限制来源并告警；
 13. 禁止配置LiteLLM `enable_jwt_auth`、`litellm_jwtauth`或其他Enterprise认证/RBAC能力。
 
 ### 11.2 阶段门槛
+
+原生模式需证明 vkey 撤销/模型/预算拒绝、API 不可访问管理路径、Admin IPv4/IPv6 来源阻断及内层登录。以下是延期企业模式的附加门槛，不能用原生密码登录填为通过：
 
 - 被禁用 Entra 用户或应用的访问及时失效；
 - 普通用户无法访问 Admin UI 或管理 API；
@@ -535,11 +540,11 @@ usage-based-routing-v2 + 模型组 affinity + Redis
 **关联工作包**：SEC-15、SEC-16、SEC-18、SEC-21  
 **目标**：基础版优先交付原生Spend Logs的受控正文留痕及必要监控，再按明确需要选用增强L3、Trace、Guardrail和Sentinel；普通遥测不复制正文。
 
-> 2026-09-10替代2026-09-07默认范围：第一阶段采用原生Spend Logs，不要求先完成独立Blob/分片/恢复/双审批平台。不是仅改一个布尔值就上线；原生模式的发布、受控查询、留存/备份/容量/故障验收及与旧阶段门禁解耦仍需代码实现。仅选用增强L3时要求下文的独立存储和治理交付。
+> 当前范围：原生 Spend Logs 发布/受控读取已有代码和隔离测试，不要求先完成独立 Blob/分片/恢复/双审批平台。云端采集必须批准范围，并验收权限、留存/备份/容量/故障；仅选用增强 L3 时要求下文的独立存储和治理。
 
 实施顺序：可信身份与Key归因/基础监控 -> 原生正文配置与受控查询 -> 容量/清理/备份及故障验收 -> 模式化阶段证据 -> 按需增强L3/Trace/Guardrail/Sentinel。继续不使用LiteLLM付费能力，不因文档决策自动部署或采集正文。
 
-> 2026-09-07实施状态：L3采集/Blob适配器/索引/独立审批查询/原文查看页/留存删除的首期代码及合成HTTP闭环已完成；另提供手动OTLP、输入Content Safety和禁用的Sentinel规则模板。未部署或采集生产原文。持久化队列、完整协议授权、独立PII预览、真实Azure/租户验收、Container Insights/Prometheus接入和响应Playbook仍未完成。详见[阶段8实施记录](litellm-stage8-l3-audit-observability-2026-09-07.md)。
+> 历史增强分支（2026-09-07）：L3/Blob/审批/留存有首期合成闭环，持久化队列、协议授权、PII、Azure/租户验收与 SOC 接线不足。保留为可选增强，不作为当前默认拓扑；边界见[OSS回调记录](litellm-oss-callback-validation-2026-09-07.md)及[原生审计方案](litellm-content-audit-phase1-customer-brief-zh.md)。
 
 ### 12.1 L1 可观测性优先
 
@@ -619,18 +624,18 @@ Stage7已关闭的WebSocket、Files/MCP、对象引用和加密多轮上下文�
 **关联工作包**：SEC-03、SEC-04、SEC-19、SEC-20  
 **目标**：在新环境内部验证完成后，通过唯一受控入口切换生产流量，并保留可执行回退路径。
 
-> 2026-09-07准备状态：独立Front Door Premium/WAF和PLS模板、Stage9精确API入口/FDID补充检查、发布证据和只读What-if工具已实现。默认关闭；两个入口默认What-if均为Ignore 54、Create/Modify/Delete 0。启用场景、controller、TLS/DNS、阶段7/8协议与审计验收仍待完成；不切流、不退役旧环境。详见[阶段9准备记录](litellm-stage9-edge-cutover-preparation-2026-09-07.md)。
+> 历史准备状态（2026-09-07）：当时仅有默认关闭的模板/What-if。当前双 Front Door/WAF 与私有源站已部署，不能再以默认 Ignore 输出描述实况；仍须按[部署指南](customer-deployment-workflows-zh.md)和[入口设计](litellm-ingress-tls-certificate-design-zh.md)验证长流、FDID/Host 旁路拒绝、来源负向、回退及生产审批。当前 dev/test 功能证明不等于生产切流或旧环境退役。
 
 ### 13.1 推荐实施顺序
 
 1. 根据 D01/D02 部署 Front Door Premium 或内部 Application Gateway WAF v2；
 2. 将源站连接到 Private Link Service 或内部负载均衡器；
 3. 为管理面和数据面配置独立域名、路由、速率和日志策略；
-4. WAF 先使用 Detection 模式；
+4. 新环境 API WAF 可先 Detection 观测再切 Prevention；Admin 固定 Prevention。当前参考环境两侧已为 Prevention；
 5. 使用测试域名验证 Chat、Responses、WebSocket、SSE、Files、长任务和大请求；
 6. 执行小比例或指定客户端灰度；
 7. 分析并调整 WAF 误报；
-8. 将已验证规则切换为 Prevention；
+8. API 观测期结束后切换为 Prevention；不得为灰度关闭 Admin 来源阻断；
 9. 正式 DNS 切流；
 10. 验证直接访问源站失败；
 11. 删除旧公网 LoadBalancer、IP、NodePort 和其他绕过入口；
@@ -642,7 +647,7 @@ Stage7已关闭的WebSocket、Files/MCP、对象引用和加密多轮上下文�
 - WAF 是唯一生产入口；
 - 源站不可直接访问；
 - LiteLLM 和 ingress 不存在公网 LoadBalancer、NodePort 或其他绕过路径；
-- 管理面仅允许批准的内网管理员访问；
+- 管理面只允许批准 IPv4/IPv6 出口经独立 WAF/私有源站进入，并须内层登录；企业模式另验证 Entra/MFA/PIM；
 - VMSS 不再附加 LiteLLM 业务 UAMI；
 - 模型端点仅允许私网 Workload Identity 调用；
 - PG failover、PITR、Redis 故障和 Secret 轮换已经演练；
@@ -668,7 +673,7 @@ Stage7已关闭的WebSocket、Files/MCP、对象引用和加密多轮上下文�
 3. **SEC-20**：建立当前功能、协议、性能、故障和恢复基线；
 4. **SEC-02**：选择 IaC 技术栈并建立新环境仓库骨架；
 5. **SEC-17**：固定镜像 digest，建立 ACR、扫描、SBOM 和签名流程；
-6. **版本 Spike**：在非生产验证 LiteLLM `1.98.0`，当前环境继续保留 `1.95.0`；
+6. **版本门禁**：当前源固定 LiteLLM `1.104.0`；按客户实际库/模型完成回归，回退版本必须与 schema/密文兼容，不自动降级到历史 `1.95.0`/`1.98.0`；
 7. 上述门槛通过后，再启动 SEC-06、SEC-08、SEC-09、SEC-10、SEC-11、SEC-12 的平台建设。
 
 不建议第一批同时启动 WAF Prevention、数据库正式迁移、LiteLLM 升级、路由切换和 L3 原文审计。
@@ -736,4 +741,4 @@ Stage7已关闭的WebSocket、Files/MCP、对象引用和加密多轮上下文�
 
 > 先保住数据、密文和回退能力；再冻结架构决策、LiteLLM 版本和许可证；随后以 IaC 建设私有网络、身份和托管状态服务；在新环境部署双副本 LiteLLM 并完成授权、Guardrail、日志与审计；最后通过 WAF Detection、灰度和 Prevention 完成正式切流。
 
-当前 LiteLLM `1.95.0` 应作为已验证回退基线保留；`1.98.0` 作为非生产升级候选完成技术验证。生产最终使用设计冻结时通过全部门禁的精确版本和镜像 digest，而不是自动追随最新版本。
+当前托管源固定 LiteLLM `1.104.0`。`1.95.0`/`1.98.0` 是历史迁移与试验版本；生产发布/回退必须基于精确 digest、schema/密文兼容及实际运行证据，不自动追随最新版本或把本地隔离测试当成全阶段验收。

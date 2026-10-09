@@ -2,6 +2,8 @@
 
 独立资源组级Bicep入口，不自动纳入阶段4/5编排，不部署Kubernetes。默认`deployEdge=false`、`enableApiTraffic=false`、`enableAdminTraffic=false`。API WAF默认Detection；Admin WAF固定Prevention，确保来源IP白名单不会只记录而不阻断。
 
+当前West US 3 greenfield测试使用本模块的Front Door Premium双平面设计，API/Admin分别通过PLS进入隔离native ingress；原生Admin用户名/密码登录和virtual key的Codex Responses推理已有用户验证，不是Entra SSO。2026-10-09批准出口为三个精确公网IPv4 `/32`及一个IPv6 `/128`，不是仅IPv4策略；资源管理状态不替代未批准来源、错误密码、协议和回退的独立验收。
+
 `main.bicep`创建一个Front Door Premium profile，但API和Admin使用不同endpoint、自定义域、origin group、Private Link origin、route和WAF policy。API route仍只有6个精确推理路径；Admin route为完整UI路径，Admin WAF用`SocketAddr`匹配实际连接源，并阻断不在`adminAllowedCidrs`中的来源，内层继续执行Entra或LiteLLM原生登录。两条route均无缓存、禁用默认`azurefd.net`域路由且仅支持HTTPS。
 
 Admin域不启用客户端证书认证，不创建Front Door Secret或边缘CA信任Vault，也不依赖Preview API。外层IP白名单不是用户身份认证：共享NAT后的所有用户都能通过该门禁，仍必须使用内层登录、强密码、限流和源站FDID绑定。公网出口不稳定时应先选择可控企业代理/VPN出口或其他身份感知边缘方案，而不是放宽CIDR。
@@ -26,7 +28,7 @@ PLS的`visibility=['*']`允许Front Door跨订阅发现，不代表数据访问�
 
 Admin WAF固定包含三条自定义规则：优先级5的`BlockUnapprovedAdminSources`使用`SocketAddr`、`IPMatch`和`negateCondition=true`阻断白名单外来源；优先级10阻断TRACE/TRACK；优先级20执行一分钟限流。使用`SocketAddr`是为了不信任可伪造的`X-Forwarded-For`。部署及release会把实际CIDR、规则、模式和阈值绑定到回执并检查live漂移。
 
-单个固定IPv4出口按`<实际公网出口IPv4>/32`形式填写。Laptop私网地址（如`10.x`、`172.16/12`或`192.168/16`）不会到达Front Door，不能作为白名单值。出口动态变化时，客户必须先确定稳定的企业出口和更新流程；不得为减少维护而扩大到不受控网络。
+固定IPv4出口按`<批准公网IPv4>/32`填写，固定IPv6出口按`<批准公网IPv6>/128`填写。当前路径使用精确地址，表中的`/24`及`/64`只是校验上限，不是建议扩大的网段。双栈浏览器可能使用IPv6，须在实际访问路径核验并分别批准；不能只查询IPv4后假定Admin可用。Laptop私网地址（如`10.x`、`172.16/12`或`192.168/16`）不会到达Front Door，不能作为白名单值。出口动态变化时，先确定稳定企业出口和更新流程，不得扩大到不受控网络。受控更新命令见[本地Stage2–9指南](../../local_execution/stage2-9-guide-zh.md)，不要手改WAF规则造成配置/回执漂移。
 
 ## 只读工具
 
@@ -67,4 +69,4 @@ What-if详细结果和diagnostics以0600权限保存在忽略目录，只输出�
 
 它不证明快照新鲜度、controller端口规则或网络可达性。需要实际维护者补充来源和拒绝路径测试。
 
-完整范围、回退步骤和已知阻塞见[阶段9记录](../../docs/litellm-stage9-edge-cutover-preparation-2026-09-07.md)。
+当前native入口、证书、发布与回退步骤见[本地Stage2–9指南](../../local_execution/stage2-9-guide-zh.md)；Actions发布/验收及增强分支边界见[客户迁移指南](../../docs/customer-migration-guide-zh.md)。模型同步另见[专用runbook](../../docs/litellm-model-sync-runbook-zh.md)，不由edge部署自动完成。

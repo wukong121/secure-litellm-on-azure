@@ -26,6 +26,12 @@ Azure 订阅中选择多个 Foundry/Azure OpenAI 账号，并为每个账号明�
 不使用模型 API Key 或 Master Key，不改变账号公网访问开关、TLS 校验、
 用户认证、Front Door、WAF 白名单、APIM 或数据库 schema。
 
+**现状边界（2026-10-09）：** West US 3已有 greenfield native dev/test 网关运行，
+Admin原生登录和virtual key的Responses调用已由客户验证。只读管理面核对了
+私有AKS运行、Front Door双入口启用、PostgreSQL Entra-only认证、Managed Redis
+访问密钥认证禁用及私有Vault；这不等于production验收或本工具已在客户环境
+执行通过。以下仍是独立的受审批变更流程，不需要重新部署整个网关。
+
 ## 2. JSON 配置结构
 
 完整通用示例见

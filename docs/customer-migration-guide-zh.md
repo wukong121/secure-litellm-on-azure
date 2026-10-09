@@ -1,6 +1,6 @@
-# 客户既有LiteLLM迁移执行手册：架构阶段0与阶段1
+# 客户部署与既有LiteLLM迁移执行手册：Stage0–9
 
-> 核对日期：2026-09-23。本文是按当前workflow输入及控制代码核对的主操作手册，不是客户云上全流程已经验收的证明。
+> 核对日期：2026-10-09。本文是按当前workflow输入及控制代码核对的主操作手册，不是客户云上全流程已经验收的证明。
 >
 > 适用：已有LiteLLM on AKS，先加固旧环境，再并行新建、迁移、验证并通过独立新域名试点；最终迁移和停旧按客户目标另行批准。示例统一使用GitHub Environment `test`；客户实际用`prod`时须整套一致替换，不混用环境。
 >
@@ -10,11 +10,19 @@
 
 阅读顺序：第1节辨认workflow → 第2节准备配置/身份/Runner → 第3节学会plan批准与附件审核 → 第4节逐Stage执行并发布并行canary → 第5节按需最终迁移/退役 → 第6节排错。资源实现细节和可选增强流程见[部署参考](customer-deployment-workflows-zh.md)，机器准备见[Runner指南](customer-private-runner-preparation-zh.md)。客户资源值、日志正文和现场记录只保存在受控位置，不填进本文或公共Git。
 
-客户无法运行GitHub Actions时，不混用本手册的run ID、Environment和artifact步骤；migration与greenfield均可改走独立的[Stage0–9本地手工执行包](../local_execution/README_ZH.md)。本地路径使用自己的plan哈希、UAMI/现有Azure会话及客户Cosign密钥。greenfield跳过旧集群备份/恢复、Stage1和`stage5-restore-target`，但仍须创建新目标网络、初始化新库/密钥并完成Stage2–9门禁。Stage7可延期，但延期期间不能发布Stage8应用或启用Stage9流量。
+客户无法运行GitHub Actions时，不混用本手册的run ID、Environment和artifact步骤；migration与greenfield均可改走独立的[Stage0–9本地手工执行包](../local_execution/README_ZH.md)。本地路径使用自己的plan哈希、UAMI/现有Azure会话及客户Cosign密钥。greenfield跳过旧集群备份/恢复、Stage1和`stage5-restore-target`，但仍须创建新目标网络、初始化新库/密钥并完成适用的Stage2–9门禁。Entra代理路径Stage7延期时不能发布Stage8应用或启用Stage9流量；显式native-auth路径则不执行Stage7，完成Stage6原生认证及入口验证后继续Stage8/9。
+
+## 当前运行状态与路径选择（2026-10-09）
+
+当前实际运行的是**West US 3 greenfield、native-auth、dev/test canary**：Private AKS为`Running/Succeeded`，Azure RBAC、禁用本地账号、WI/OIDC均开启，CNI Overlay，2个system加2个user节点，SKU `Standard_D4s_v4`；API/Admin分别通过Front Door Premium、PLS及私有入口提供服务。用户已确认Admin `/fallback/login`用户名/密码和virtual key的Codex Responses推理可用，用户侧Entra SSO延期。
+
+Admin使用**后台Vault**中独立的`litellm-ui-password`，不是Master Key或证书Vault秘密；WAF当前配置3个逐项批准的公网IPv4 `/32`及1个IPv6 `/128`。只读管理面回读确认PostgreSQL 16 `Ready`、Entra认证启用/密码认证禁用/公网禁用；Redis为`Microsoft.Cache/redisEnterprise Balanced_B0`，default数据库禁用Access Key认证、使用Encrypted协议/端口10000，但集群`publicNetworkAccess=null`不证明公网开启或关闭。ACR Premium禁用admin账号和公网，后台及证书Vault均启用RBAC并禁用公网。源镜像固定1.104.0；秘密、数据面身份、运行、审计和恢复门禁仍有效，不据这些有限实测宣称完整Stage0–9或production签收。
+
+下文既有迁移的备份/旧环境加固/最终数据对账及Entra代理步骤保留，不用于要求当前greenfield补做旧资源操作。当前原生本地执行顺序见[Stage2–9指南](../local_execution/stage2-9-guide-zh.md)；其他环境、migration、Entra和production须按各自配置与批准范围执行，不能复用本次dev/test结果。
 
 ## 1. 迁移原则与入口
 
-采用并行新建、隔离验证和批准客户端试点。旧域名继续指向旧系统，新域名只交给少量获批客户端；旧网关、数据库、密钥/Salt和VMSS业务身份保留到单独批准的退役阶段。不得让1.98新版本自动迁移旧生产数据库；新旧网关各自使用独立数据库，不得共用同一个数据库。若以后要求无损承接备份后的新增数据，再进入可选最终迁移，而不是把它作为canary前置条件。
+采用并行新建、隔离验证和批准客户端试点。旧域名继续指向旧系统，新域名只交给少量获批客户端；旧网关、数据库、密钥/Salt和VMSS业务身份保留到单独批准的退役阶段。不得让1.104.0新版本自动迁移旧生产数据库；新旧网关各自使用独立数据库，不得共用同一个数据库。若以后要求无损承接备份后的新增数据，再进入可选最终迁移，而不是把它作为canary前置条件。
 
 **两种“阶段”不要混淆：** 架构阶段0=本手册Stage0–1（可恢复基线和旧环境加固）；架构阶段1=Stage2–9（决策、隔离新建、迁移与发布）。GitHub表单的`stage`填写仓库编号，不是架构阶段号。每个Stage完成验收后才能执行下一Stage的变更。
 
@@ -411,7 +419,7 @@ postgres@sha256:e17e86066e5ef83e0952a9347f5c792b7ece00972e2aa787a6986f471b3dd3d5
 
 **执行完S0-08不等于完成Stage0验收。** 上表是资源准备与备份操作；旧版顺序表没有列出下面的验收收尾，容易误以为八步绿勾后可直接进入Stage1。不能将这八个步骤号填入`checked_items`，也不能把四项检查ID视为八步自动完成的结果。
 
-四项检查的逐步操作、命令、通过标准及confirm填写方法见[Stage0四项验收操作指南](customer-stage0-acceptance-checklist-zh.md)。S0-10按该指南执行，不需要另外寻找四个对应的workflow。
+四项检查的覆盖范围、通过标准及confirm填写方法见本节以下两表和[第3节批准与附件审核](#3-每次运行的填写审核与验收)。S0-10逐项核对，不需要另外寻找四个对应的workflow；不得用已删除的独立Stage验收文档作为另一套运行顺序。
 
 | confirm中的检查ID | S0-01至S0-08实际覆盖 | 确认前还需核对 |
 | --- | --- | --- |
@@ -590,12 +598,27 @@ S1-04之后先验证真实Container Insights日志已到达，再预览依赖这
 
 **阶段验收：** draft/confirm，stage=1；`legacy_health`、`alerts_received`、`rollback_snapshot`，配置legacyAccess后另有`legacy_source_access`。此外，批准的一期旧管理路径、废弃凭据及业务连续性必须实际检查；workflow做不到的必需控制仍须补齐，不能以探针成功代替整套加固。
 
-具体操作、客户值获取、命令/Portal路径、通过标准及确认表单见[Stage1验收操作指南](customer-stage1-acceptance-checklist-zh.md)。**尚未执行S1-08时先按该指南R-1保存原Deployment配置；已执行且未保存时按R-3处理，runtime审核摘要不是完整回退快照。** 未选来源限制且明确获批接受本次演练范围时，可跳过S1-09/10，但仍须完成三项默认验收，不能推广为客户生产豁免。
+**S1-08之前**，在已获准且显式选择旧集群的管理终端保存两个Deployment的完整变更前配置，禁止上传公开artifact或打印环境秘密：
+
+```bash
+set -euo pipefail
+SNAPSHOT_DIR="REPLACE_CONTROLLED_BACKUP_ROOT/stage1-REPLACE_APPROVED_CHANGE_REFERENCE"
+umask 077
+mkdir -m 700 "$SNAPSHOT_DIR"
+kubectl --kubeconfig "$PRIVATE_KUBECONFIG" -n "$LEGACY_NAMESPACE" \
+  get deployment postgres litellm-mi-proxy -o json \
+  > "$SNAPSHOT_DIR/deployments-before.json"
+sha256sum "$SNAPSHOT_DIR/deployments-before.json" > "$SNAPSHOT_DIR/SHA256SUMS"
+```
+
+备份根目录选客户批准的仓库外受控位置，已存在且仅保管人可访问；本次子目录必须不已存在，不提交Git。核对旧namespace、镜像、完整spec、原密钥/依赖引用及保管人可取回，并由Owner审核恢复清单及并发变更处理；原始导出不能未经审核直接apply。已执行且未保存时，从可信变更前导出、受控备份或部署历史重建，经Owner审核后明确记录来源，不能把当前配置称为变更前快照。ReplicaSet仅可辅助还原Pod template，`rollout undo`不恢复完整Deployment策略；无法证明原状态则`rollback_snapshot`继续待核验。runtime审核摘要不是完整快照，Stage0数据库备份也不替代Deployment配置。
+
+验收时检查两个Deployment Ready、PG PVC Bound及实际旧客户端/管理操作无回归；在旧Workspace核对真实日志、告警规则与Action Group实际收件（飞书另见[通知指南](../local_execution/feishu-alert-notification-zh.md)）。Action Group样本测试不证明真实告警规则触发；需规则端到端证据时先批准无业务影响的测试。未选来源限制且明确获批接受本次演练范围时，可跳过S1-09/10，但仍须完成三项默认验收，不能推广为客户生产豁免。
 
 | 步骤 | 执行方式 | operation | reviewed_run_id | checked_items / evidence_notes | confirm_environment |
 | --- | --- | --- | --- | --- | --- |
 | S1-11 | Customer stage acceptance | draft | 留空 | 均留空；main、test、stage=1，查看pending清单 | 留空 |
-| S1-12 | 按Stage1指南完成人工H/A/R项；已配置legacyAccess时另做S项 | - | - | 记录真实结果与证据；不是新增workflow按钮 | - |
+| S1-12 | 按本节核对旧业务健康、告警实际收件、完整回退材料；已配置legacyAccess时另验证来源准入/拒绝 | - | - | 记录真实结果与证据；不是新增workflow按钮 | - |
 | S1-13 | Customer stage acceptance | confirm | S1-11成功且仍有效的draft运行ID | 默认三项全通过填`legacy_health,alerts_received,rollback_snapshot`；已配置来源限制另加`legacy_source_access`，说明逐项真实结果 | test |
 
 当前confirm不支持部分通过；采集/规则已配置不等于邮件已收到，当前Deployment导出不等于变更前快照。没有对应证据的项目保持待核验，不填完整checked_items推进Stage2。
@@ -614,17 +637,17 @@ S1-04之后先验证真实Container Insights日志已到达，再预览依赖这
 }
 ```
 
-此时不必提前提供application/proxy镜像；实际Stage8发布才要求两者齐全。不要同时开启auditRuntime/auditGovernance或L3 audit_reader/auditTeamId。历史已启用L3的环境需要独立迁移批准，不能直接删除其绑定。
+此时不必提前提供application/proxy镜像；实际发布按所选认证路径要求后台镜像，Entra代理路径另需proxy镜像，native-auth不部署proxy。不要同时开启auditRuntime/auditGovernance或L3 audit_reader/auditTeamId。历史已启用L3的环境需要独立迁移批准，不能直接删除其绑定。
 
 运行`Customer staged migration`：branch=main、environment=test、stage=2、mode=config-check、component=none；随后`Customer stage acceptance`的stage=2 draft，完成决策核验后confirm。原生模式检查为`network_capacity`、`identity_owners`、`pg_auth_ha`、`content_audit_policy`、`protocol_scope`；不再把增强L3的旧`l3_policy`当作必选。
 
-逐项检查、客户值获取、通过标准与表单填写见[Stage2客户决策验收指南](customer-stage2-acceptance-checklist-zh.md)。本阶段验收的是获批、可实施的方案及责任分工，不要求提前部署新AKS/PG，也不能把后续HA、恢复或协议测试写成已通过。`contentPolicyAccepted`只确认政策接受，正文读取权限另由管理代理绑定等控制。
+逐项核对本节五项决策，并参考[本地指南Stage2决策范围](../local_execution/stage2-9-guide-zh.md#stage2冻结决策不部署资源)及[部署参考的路径选择](customer-deployment-workflows-zh.md#交付目标与两条路径)。本阶段验收的是获批、可实施的方案及责任分工，不要求提前部署新AKS/PG，也不能把后续HA、恢复或协议测试写成已通过。`contentPolicyAccepted`只确认政策接受，正文读取权限另按原生后台角色或管理代理绑定控制。
 
 | 步骤 | workflow/执行方式 | 输入/操作 | 成功后 |
 | --- | --- | --- | --- |
 | S2-01 | Customer staged migration | main、test、stage=2、mode=config-check、component=none | 配置合法；不代表配额/网络/政策已核验 |
 | S2-02 | Customer stage acceptance | main、test、stage=2、operation=draft；其他确认字段留空 | 取得本Stage pending清单及draft运行ID |
-| S2-03 | 按Stage2指南人工核对五项 | 保存真实决定、批准记录、后续实施节点和阻断条件 | 未决定或不可行项目先解决，不提交部分通过 |
+| S2-03 | 按本节及Stage2决策范围人工核对五项 | 保存真实决定、批准记录、后续实施节点和阻断条件 | 未决定或不可行项目先解决，不提交部分通过 |
 | S2-04 | Customer stage acceptance | operation=confirm；reviewed_run_id填S2-02有效draft ID；confirm_environment=test | 五项全完成后填写`network_capacity,identity_owners,pg_auth_ha,content_audit_policy,protocol_scope`及真实evidence_notes |
 
 更新完整CUSTOMER_CONFIG_JSON Secret后再运行；同完整Git SHA、环境和有效账本要求沿用第3节。Stage2指纹不自动锁定后续parameters.platform的全部决策，部署前须与受控批准记录核对。Stage3/platform首次plan前就要填齐stage4Network/stage4Aks，不等到Stage4再补；当前confirm不支持部分通过。
@@ -644,7 +667,7 @@ S1-04之后先验证真实Container Insights日志已到达，再预览依赖这
 
 **阶段验收：** stage=3 draft/confirm；`oidc_scope`、`source_image_sbom_scan`、`target_isolation`。旧名称`image_signature_sbom`不再是Stage3的清单，具体用draft输出。
 
-三项操作、客户值获取、报告字段/哈希核对及通过标准见[Stage3验收操作指南](customer-stage3-acceptance-checklist-zh.md)。source-image附件是明文，不需要解密；platform计划/部署及验收附件仍使用原WORKFLOW_ARTIFACT_KEY。Stage3的ACR公网关闭但尚未建立本阶段之外的私网连接，不要求提前完成Stage4目标镜像签名/拉取。
+三项操作及通过标准按本节检查ID逐项核对，资源与源镜像检查顺序见[本地指南Stage3](../local_execution/stage2-9-guide-zh.md#stage3供应链检查和目标基础资源)。source-image附件是明文，核对固定1.104.0基线、派生镜像SBOM和扫描策略结果，不需要解密；platform计划/部署及验收附件仍使用原WORKFLOW_ARTIFACT_KEY，按第3节核对当前revision/config及实际资源。Stage3的ACR公网关闭但尚未建立本阶段之外的私网连接，不要求提前完成Stage4目标镜像签名/拉取。
 
 | 步骤 | 执行方式 | operation | reviewed_run_id | checked_items / evidence_notes | confirm_environment |
 | --- | --- | --- | --- | --- | --- |
@@ -1209,7 +1232,7 @@ az keyvault show --subscription "$SUBSCRIPTION_ID" --resource-group "$TARGET_RG"
 
 **Stage4验收前的镜像步骤：** 私有ACR可达后运行`Promote LiteLLM image`，environment=test、acr_name=客户ACR名称、source_image保持仓库固定源digest、target_tag=`litellm-azure:rehearsal-1`（示例，按发布版本命名）、build_azure_runtime=true、build_auth_proxy=false。没有stage/approved_run_id输入。deploy身份需批准的ACR推送权限；Runner需访问源registry、扫描库和Sigstore。记录成功输出的完整`ACR/repository@sha256:...`，并审核加密artifact中的SBOM、`target-image-verification.json`和`target-image-summary.json`；下一阶段应用配置使用该完整镜像引用。扫描、签名或同作业验证失败时，即使已推送也不能作为已批准镜像。
 
-**阶段验收：** stage=4 draft/confirm；`private_dns_egress`、`private_runner`、`target_image_signature_sbom`、`workload_identity`、`private_ingress`。五项全部通过时，`checked_items`填写`private_dns_egress,private_runner,target_image_signature_sbom,workload_identity,private_ingress`。逐步取值、artifact审核、只读命令、通过标准和confirm填写见[Stage4私网、AKS身份与入口验收操作指南](customer-stage4-acceptance-checklist-zh.md)。目标镜像签名/拉取以及WI正反向访问要实际验证，不能用公共源扫描、UAMI存在或静态YAML替代；当前缺少标准WI探针时保持待核验，不能编造通过。Stage4之后不得重放Stage0 backup/network模板覆盖已扩展VNet。
+**阶段验收：** stage=4 draft/confirm；`private_dns_egress`、`private_runner`、`target_image_signature_sbom`、`workload_identity`、`private_ingress`。五项全部通过时，`checked_items`填写`private_dns_egress,private_runner,target_image_signature_sbom,workload_identity,private_ingress`。按本节S4步骤、[本地Stage4取值与验证](../local_execution/stage2-9-guide-zh.md#stage4私网aks证书入口和目标连通性)及第3节附件审核核对：Runner私网DNS/TLS及所需出站、实际私网访问、批准镜像签名/SBOM/拉取、WI允许与拒绝、双入口TLS/Host/来源隔离。目标镜像签名/拉取以及WI正反向访问要实际验证，不能用公共源扫描、UAMI存在或静态YAML替代；当前缺少标准WI探针时保持待核验，不能编造通过。Stage4之后不得重放Stage0 backup/network模板覆盖已扩展VNet。
 
 ### 阶段5：数据服务与迁移演练
 
@@ -1421,7 +1444,7 @@ roleRef:
 
 S5-02之后先确认Runner到新PG/Redis/后台Vault的Private DNS及TLS连接、数据库管理员权限，再执行S5-03。database-roles创建独立llmgw_migrator和llmgw_app并授予应用所需数据权限；backend-secrets从旧litellm-env导入原Master/Salt到新Vault，目标已有不一致值或旧Salt不明确时停止，不生成替代值冒充恢复。
 
-restore-target只恢复到Stage5输出绑定的**空目标库**，不使用手填任意DATABASE_URL；非空/失败残留须由DBA评估，不自动DROP或加`--clean`。schema-migrate之后才可发布新版应用，固定1.95→1.98合成升级已测试，但客户实际历史指纹/扩展/密文必须核对；未知历史不能baseline/reset绕过。
+restore-target只恢复到Stage5输出绑定的**空目标库**，不使用手填任意DATABASE_URL；非空/失败残留须由DBA评估，不自动DROP或加`--clean`。schema-migrate之后才可发布新版应用，固定1.95.0→1.104.0合成升级已测试，但客户实际历史指纹/扩展/密文必须核对；未知历史不能baseline/reset绕过。
 
 **输出/失败：** 后台密钥与schema动作保存ARM操作回执，后续application检查其SHA和配置，不手写这些回执。失败可能已部分创建角色、Vault版本或提交迁移；先检查现场再新plan，禁止删除旧数据或密钥以求重跑成功。
 
@@ -1446,20 +1469,20 @@ restore-target只恢复到Stage5输出绑定的**空目标库**，不使用手�
 }
 ```
 
-`connectionAlias`必须匹配platform.azureOpenAIConnections中的alias，deploymentName是该账号实际部署名，不是模型展示名。不要填写MIGRATION_MANIFEST_YAML；schema/后台密钥/无密码数据库连接与CSI从前序回执生成。
+`connectionAlias`必须匹配platform.azureOpenAIConnections中的alias，deploymentName是该账号实际部署名，不是模型展示名。**客户端**API base使用`https://<api-domain>/v1`，请求`model`使用LiteLLM `model_name`别名（此处`modelGroup`，例如`coding`），不要使用deploymentName。API只开放固定Responses/Chat/Embedding推理路径，不开放`/v1/models`；客户端模型发现被拒绝不等于推理失败。不要填写MIGRATION_MANIFEST_YAML；schema/后台密钥/无密码数据库连接与CSI从前序回执生成。
 
 | 步骤 | workflow显示名称 | stage | component或action | operation | approved_run_id | confirm_environment |
 | --- | --- | --- | --- | --- | --- | --- |
 | S6-01 | Customer private runtime operations | 6 | action=application | plan | 留空 | 留空 |
 | S6-02 | Customer private runtime operations | 6 | action=application | execute | S6-01的plan ID | test |
 
-核对新后台双副本、无DDL应用角色、模型调用、Redis共享状态及真实身份续期。此时API/admin代理还没发布，不能把从外网调API失败误判为后台部署失败，也不开放后台公网临时测试。
+核对新后台双副本、无DDL应用角色、模型调用、Redis共享状态及真实身份续期。Entra路径此时API/admin代理还没发布，不能把从外网调API失败误判为后台部署失败，也不开放后台公网临时测试。显式native-auth使用独立后台Vault UI密码，从批准私网验证Admin `/fallback/login`及virtual key，完成后跳过Stage7并继续Stage8；具体配置及回执刷新见[本地Stage6指南](../local_execution/stage2-9-guide-zh.md#stage6发布新litellm后端)，不是Entra SSO已启用。
 
 **阶段验收：** stage=6 draft/confirm；`replica_failure`、`load_affinity`、`capacity_limits`、`no_legacy_db_writes`。负载、故障与费用测试须批准；确认没有把新版连到旧库。失败修复新环境，不切旧流量。
 
 ### 阶段7：Entra和双域名授权
 
-**开始前：** Stage6已验收；补`AZURE_ENTRA_CLIENT_ID`和`AZURE_ENTRA_ACCESS_CLIENT_ID`两个Environment Variables并完成对应Graph授权，不能以runtime/PG管理员代替。先构建代理镜像，再冻结entra/proxy配置，避免凭据回执因后补digest反复失效。
+**仅Entra代理路径适用，当前native-auth跳过本节。开始前：** Stage6已验收；补`AZURE_ENTRA_CLIENT_ID`和`AZURE_ENTRA_ACCESS_CLIENT_ID`两个Environment Variables并完成对应Graph授权，不能以runtime/PG管理员代替。先构建代理镜像，再冻结entra/proxy配置，避免凭据回执因后补digest反复失效。
 
 运行`Promote LiteLLM image`：environment=test、acr_name=客户ACR、source_image保持固定默认、target_tag=`auth-proxy:rehearsal-1`（示例）、build_auth_proxy=true、build_azure_runtime=false。两个构建选项不能同时勾选，输出代理digest不等于后台digest。
 
@@ -1509,7 +1532,7 @@ proxy-foundation创建身份及Vault，不等于已生成登录凭据；entra-ap
 
 ### 阶段8：原生正文留痕与观测，增强L3可选
 
-**开始前：** Stage7已验收；Stage2已配置并批准contentAudit native、正文留存1–30天、读取者、备份保留和容量/IO预算。一期用途是先按用户/时间统计Token费用，再由授权人员抽查高用量用户的工作内容；不是默认建设独立Blob/HSM或不可变取证平台。
+**开始前：** Entra路径Stage7已验收；native-auth路径Stage6原生入口及认证已验收且跳过Stage7。Stage2已配置并批准contentAudit native、正文留存1–30天、读取者、备份保留和容量/IO预算。一期用途是先按用户/时间统计Token费用，再由授权人员抽查高用量用户的工作内容；不是默认建设独立Blob/HSM或不可变取证平台。
 
 **普通原生路径没有新增GitHub身份或Secret。** 托管application在Stage8生成`store_prompts_in_spend_logs=true`、`disable_spend_logs=false`及留存配置；不需要auditRuntime，也不走旧静态L3 overlay。Stage6/7正文仍默认关闭，不能只配置contentAudit而不发布Stage8就认为已采集。
 
@@ -1534,11 +1557,11 @@ proxy-foundation创建身份及Vault，不等于已生成登录凭据；entra-ap
 
 ### 阶段9：并行试点、可选最终迁移与退役
 
-**开始前：** Stage0–8均已验收；已完成必要客户端、管理操作和日志抽查；客户已验收目标库来自哪个备份时间点，并接受新旧数据库在此后独立写入。并行canary不要求旧系统停写或完成第5节，但须有停止试点方案、独立试点virtual key和获批客户端名单。只有客户要求无损承接备份后的旧系统新增数据时，才把第5节作为后续production/退役前置条件。
+**开始前：** 所选路径适用的Stage0–8均已验收（greenfield无旧库备份/Stage1，native-auth无Stage7）；已完成必要客户端、管理操作和日志抽查。migration须验收目标库来自哪个备份时间点，并接受新旧数据库在此后独立写入；greenfield须确认新库/新密钥初始化。并行canary不要求旧系统停写或完成第5节，但须有停止试点方案、独立试点virtual key和获批客户端名单。只有客户要求无损承接备份后的旧系统新增数据时，才把第5节作为后续production/退役前置条件。
 
 **客户JSON：** origin的VNet/ingress子网沿用目标网络。使用托管privateIngress时，`apiLoadBalancer`和`adminLoadBalancer`的`resourceGroupName/name/frontendName`均可填`auto`；代码从Stage4回执及实际LB分别解析两个前端并拒绝复用。edge的`privateOrigin`和`adminPrivateOrigin`可分别把PLS ID填`auto`，location填批准区域。
 
-`adminAllowedCidrs`必须填写管理员浏览器实际使用路径的稳定公网出口CIDR，不能填写Laptop私网地址或`0.0.0.0/0`。单个IPv4出口使用`/32`；企业代理/VPN有多个批准出口时逐项填写。Admin WAF固定Prevention，并以`SocketAddr`、`IPMatch`、`negateCondition=true`阻断白名单外来源；`adminRateLimitPerMinute`按真实企业NAT/UI基线设置。来源IP只是一层网络门禁，不能替代内层登录、强凭据、审计或FDID源站绑定。
+`adminAllowedCidrs`必须填写管理员浏览器实际使用路径的稳定公网出口，不能填写Laptop私网地址、`0.0.0.0/0`或推断的公司网段。IPv4逐项使用`/32`，IPv6逐项使用`/128`；分别确认浏览器的两类实际出口并取得批准，当前运行环境两类均已配置。Admin WAF固定Prevention，并以`SocketAddr`、`IPMatch`、`negateCondition=true`阻断白名单外来源；`adminRateLimitPerMinute`按真实企业NAT/UI基线设置。来源IP只是一层网络门禁，不能替代内层登录、强凭据、审计或FDID源站绑定。
 
 Admin客户端到Front Door不使用mTLS，不创建边缘CA信任Vault或Front Door Secret，也不依赖Preview API。两份Traefik源站证书仍须链到Microsoft Trusted CA List中的根并匹配各自域名；这是Front Door到私有origin的服务端TLS，不是管理员身份认证。
 
@@ -1552,6 +1575,8 @@ Admin客户端到Front Door不使用mTLS，不创建边缘CA信任Vault或Front 
 | S9-06 | Customer private runtime operations | 9 | action=edge-bind | execute | S9-05的plan ID | test |
 
 origin为API和Admin各创建一条Private Link Service并绑定不同内部LB frontend；edge创建一个Premium profile下的两个独立endpoint/domain/origin/route/WAF，默认两边流量均禁用，API WAF为Detection，Admin WAF固定Prevention，不改DNS。**S9-04成功后、S9-05之前**，Owner须分别审批两条托管Private Endpoint请求并核对profile/origin/PLS/frontend归属，同时确认两个自定义域/边缘证书、两份公有CA源站TLS和Admin来源CIDR。edge-bind会实时要求每条PLS恰有一个Approved且没有Pending连接，再把同一实际Front Door ID绑定到两个受管代理或两个原生Traefik业务router，分别rollout并保存双平面回执；健康router不绑定FDID，本步仍不启流量。
+
+保持AKS `Running/Succeeded`直至绑定、rollout与入口检查结束；停止状态下私有API DNS A记录可能缺失，不代表需要开放公网。获准启动后等待管理面恢复再核验，按[私有AKS启动复核](../local_execution/stage2-9-guide-zh.md#私有aks自动停机后的启动复核)处理，不盲重放平台部署。当前native dev/test已发布后的精确Admin地址新增走[专用批准流程](../local_execution/stage2-9-guide-zh.md#已发布native-devtest-canary新增admin来源ip)，不重跑禁流量edge准备，也不直接在Portal制造漂移。
 
 **独立发布报告：** 实际启用流量前，将获批报告填入Environment Secret `MIGRATION_RELEASE_JSON`。它不是验收账本，也不能直接把acceptance JSON复制进去。字段与检查集由[发布校验器](../scripts/stage9_release.py)定义，主要字段如下：
 

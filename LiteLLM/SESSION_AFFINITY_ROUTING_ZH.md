@@ -1,6 +1,8 @@
 # LiteLLM Responses API 会话亲和路由
 
-本文针对当前架构：同一个 `model_name` 对应多个 Azure OpenAI / Foundry Resource，LiteLLM 使用 `simple-shuffle` 在这些 Deployment 之间选择后端。
+> **路由机制与旧脚本操作参考。** 下文部署脚本重跑/kubectl修改只用于批准的旧环境或隔离实验，不是当前West US 3配置发布入口。当前LiteLLM `1.104.0`、Workload Identity、共享Entra Redis及稳定模型ID由受控生成路径管理；改模型见[专用同步runbook](../docs/litellm-model-sync-runbook-zh.md)，改路由/发布见[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)。用户已验证Codex Responses推理，不代表本文亲和/缓存性能矩阵或WebSocket已在当前入口通过。
+
+本文讨论多后端参考架构：同一个`model_name`对应多个Azure OpenAI/Foundry Resource，LiteLLM使用`simple-shuffle`选择后端；实际启用的模型/后端及配置以客户批准的当前配置为准。
 
 ## 推荐配置
 

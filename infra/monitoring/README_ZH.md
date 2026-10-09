@@ -1,5 +1,7 @@
 # LiteLLM 阶段 1 最小告警集
 
+> **旧环境迁移监控模块/历史参考，不是当前West US 3监控验收报告。** 当前greenfield跳过旧Stage1，并采用Entra-only PostgreSQL Flexible Server，不运行本文集群内PG/PVC告警基线。当前已有Front Door Premium API/Admin双入口，边缘WAF/健康及新数据库监控须按[本地Stage2–9指南](../../local_execution/stage2-9-guide-zh.md)独立接入/验收；Private AKS管理面`Running/Succeeded`不证明Container Insights或告警送达。
+
 > 客户入口：[迁移指南](../../docs/customer-migration-guide-zh.md)阶段1，component=monitoring。
 > aksClusterName、logAnalyticsWorkspaceName、ownerEmail为客户必填参数；模板不提供个人默认值。
 > 下述历史实测仅为参考，客户必须重新验证Container Insights、查询命名约定及通知收件。
@@ -15,11 +17,11 @@
 - AKS管理操作失败；
 - AKS删除操作启动。
 
-这些告警发送到 `ag-litellm-stage1-owner`，当前邮件接收人是项目 Owner，并启用 Azure Common Alert Schema。
+这些参考告警发送到`ag-litellm-stage1-owner`，接收人由客户批准的Owner参数确定，并启用Azure Common Alert Schema；不是当前测试的收件人声明。
 
-## 2. 数据采集
+## 2. 历史参考数据采集
 
-已为现有 AKS启用 Container Insights，使用 Managed Identity认证并关联现有 Log Analytics workspace。
+历史旧环境曾启用Container Insights，使用Managed Identity认证并关联Log Analytics workspace。
 
 已验证：
 
@@ -31,7 +33,7 @@
 
 Container Insights会产生 Log Analytics摄入成本。本阶段未启用 Managed Prometheus或 Grafana。
 
-## 3. 已部署告警
+## 3. 旧环境参考告警
 
 | 告警 | 数据源 | 严重级别 | 条件 |
 | --- | --- | ---: | --- |
@@ -45,7 +47,7 @@ Container Insights会产生 Log Analytics摄入成本。本阶段未启用 Manag
 
 说明：Sev 0表示关键，Sev 1表示错误，Sev 2表示警告。
 
-## 4. 当前基线
+## 4. 历史基线
 
 部署时实际查询结果：
 
@@ -76,9 +78,9 @@ IaC位于 `infra/monitoring/main.bicep`。重新部署前应先运行 Bicep buil
 - 日志采集和 Scheduled Query Alert不是实时系统，通常存在数分钟延迟；
 - “工作负载不可用”基于近期 inventory，不替代外部 HTTP可用性探测；
 - LiteLLM错误规则依赖应用日志格式，升级版本后必须回归；
-- 当前没有 Front Door/WAF，因此尚未覆盖边缘 4xx/5xx和源站健康；
-- 当前没有 Managed Prometheus，因此尚未覆盖更细粒度的 Kubernetes指标；
-- 当前没有自动修复动作，所有通知由 Owner人工判断；
+- 本Stage1模块不覆盖Front Door/WAF的边缘4xx/5xx和源站健康；当前私有网关已有Front Door，须另行验收其监控；
+- 本模块不部署Managed Prometheus，不覆盖其更细粒度的Kubernetes指标；
+- 本模块没有自动修复动作，通知由客户Owner人工判断；
 - 完整 SOC、Sentinel和 SOAR属于后续阶段。
 
 ## 7. 运维响应

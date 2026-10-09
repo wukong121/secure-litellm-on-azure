@@ -1,5 +1,7 @@
 # Codex 0.147 空 `functions.description` 的 LiteLLM 兼容方案
 
+> **特定Codex/旧镜像的兼容参考，不是当前网关补丁安装流程。** 当前West US 3使用LiteLLM `1.104.0`固定源码构建及受控发布，用户已验证virtual key的Codex Responses推理，但不据此推断本文全部工具矩阵通过。不要在当前集群临时注入本文callback、修改ConfigMap或重跑旧脚本；现行版本/补丁边界见[升级验证](../docs/litellm-1.104.0-upgrade-validation-2026-10-07.md)，发布按[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)。
+
 ## 1. 问题概述
 
 Codex 0.147 在 Responses Lite 模式下，会把内置 function/custom tools 合并到 `functions` namespace，并将工具定义放入 `input` 的 `additional_tools` item：

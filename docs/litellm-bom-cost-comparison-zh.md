@@ -1,4 +1,4 @@
-# LiteLLM 网关当前版与安全增强版 BOM 成本对比
+# LiteLLM 网关历史版与安全增强版 BOM 成本对比
 
 > 文档状态：方案审查估算，不是 Azure 报价单
 > 估算日期：2026-08-31
@@ -11,12 +11,22 @@
 > 目标口径：小型生产基线 + Azure Front Door Premium + 用量项只列单价
 > 明确边界：不包含 APIM
 
+## 0. 当前环境与历史估算的区别（2026-10-09）
+
+本文“当前版”是 2026-08-31 的旧 PoC 对照，“安全增强版”也是同日设计估算；`westus` 价格不能作为 West US3 账单或当前报价。本文未重新询价。
+
+只读管理面核查的当前参考环境是 West US3 新建 dev/test：Private AKS Running/Succeeded，Azure CNI overlay、Azure RBAC、禁用本地账户、WI/OIDC；System/User 池各 2 台 `Standard_D4s_v4`，不是下面的 2 台 D2s_v3 或 3 台 D2s_v5。独立 API/Admin Front Door Premium 经各自 PLS/内部 LB/私有 Traefik 回源，两侧 WAF Prevention；Admin 否定 SocketAddr IPMatch 白名单包含三个 IPv4 `/32` 和一个 IPv6 `/128` 精确出口。PG/Managed Redis 私网 Entra-only，后端 Vault 与证书 Vault 分离，ACR 私有，Firewall 路由出站。当前无 APIM、App Service 或单一共享代理。
+
+默认原生 LiteLLM `1.104.0` 网关已由用户验证 Admin 密码 fallback 登录及 vkey Codex Responses 推理，不是 Entra 用户 SSO 或生产验收。企业准入、HA、容量、恢复、监控仍须验证。重新报价应按实际节点池、双入口/PLS/LB、两类 Vault、PE/DNS、数据库与备份规格及 West US3 单价核算，不把历史合计或模板数量当成实时证据。
+
+补充实况选型：PG 16 Ready，Entra 认证启用/密码认证禁用、公共访问禁用；Managed Redis 为 `Microsoft.Cache/redisEnterprise`、`Balanced_B0`，数据库禁用访问密钥、使用 Encrypted 协议与 `10000` 端口。Redis 集群 `publicNetworkAccess=null` 不是公网开关证据。ACR Premium 禁用 admin user/公共访问，两类 Key Vault 均启用 RBAC/禁用公共访问；数量、容量及价格仍须按实际账单重新核算。
+
 ## 1. 执行摘要
 
-按本文假设，当前 LiteLLM 网关基础设施固定成本约为：
+按历史假设，旧 PoC 基础设施固定成本约为：
 
 ```text
-当前版：约 $319/月
+历史 PoC 对照：约 $319/月（非当前 West US3 成本）
 ```
 
 原安全增强版基础设施估算有两个成本场景，均未包含正文采集的实际容量与处理费用，不能作为当前基础版的最终报价：
@@ -46,13 +56,13 @@
 
 **并非这四项服务都必须无条件选 Premium。** 在保持本方案“Front Door 私有源站 + 微软托管 WAF 规则”和“ACR Private Link”要求时，Front Door 与 ACR 的 Premium 是功能门槛；Firewall Premium 则取决于是否需要 IDPS、TLS 检查或完整 URL 过滤；Key Vault 仅存业务 Secret 时 Standard 即可，使用 HSM 保护的 Key 才有 Premium 门槛。仅做受控出站时，应优先评估复用合规 Hub Firewall，其次评估 Standard，详见第 4.2 节。本文的专属 Premium 场景不是客户必须购买的最低配置。
 
-**当前第一阶段已选择[原生内容审计方案](litellm-content-audit-phase1-customer-brief-zh.md)：获批的 Prompt/Response 写入 LiteLLM Spend Logs，正文保存在私有 PostgreSQL。** 不默认部署自建 L3 采集、正文 Blob、独立 HSM 密钥库、恢复及双审批/保全服务；这些只在客户明确要求增强取证能力时另立 BOM。原表未计入 L3 正文容量，不能以“不上 L3”从合计中扣出虚构节省。现有资源数量、PostgreSQL/备份容量和按量费用仍须重算，第 6 节给出新口径；实现门禁尚待适配，不代表本轮已开启正文记录。
+**当前第一阶段已选择[原生内容审计方案](litellm-content-audit-phase1-customer-brief-zh.md)：获批的 Prompt/Response 写入 LiteLLM Spend Logs，正文保存在私有 PostgreSQL。** 不默认部署自建 L3 采集、正文 Blob、独立 HSM 密钥库、恢复及双审批/保全服务；这些只在客户明确要求增强取证能力时另立 BOM。原表未计入 L3 正文容量，不能以“不上 L3”从合计中扣出虚构节省。现有资源数量、PostgreSQL/备份容量和按量费用仍须重算，第 6 节给出新口径；原生发布/受控读取已有代码及隔离验证；云端采集授权、容量/留存/恢复仍须验收，不代表当前正文采集已开启。
 
 ## 2. 估算假设
 
-### 2.1 当前版 BOM 假设
+### 2.1 历史 PoC BOM 假设
 
-根据仓库、handoff 和已验证环境，当前版采用：
+根据 2026-08-31 的旧仓库/handoff 假设，历史“当前版”采用：
 
 - AKS Standard tier；
 - 2 台 `Standard_D2s_v3` Linux 节点；
@@ -66,7 +76,7 @@
 - cert-manager 与 Let's Encrypt 无单独 Azure 资源月费；
 - 节点级 UAMI、Kubernetes ConfigMap/Secret 无单独资源费。
 
-注意：部署脚本默认节点数仍可配置为 1。本文按 handoff 中已运行的 2 节点状态估算；若实际客户环境只有 1 台节点，当前版固定成本约减少 `$85.41/月`。
+注意：部署脚本默认节点数仍可配置为 1。本文按历史 handoff 中的 2 节点状态估算；若实际客户环境只有 1 台节点，当前版固定成本约减少 `$85.41/月`。
 
 ### 2.2 安全增强版 BOM 假设
 
@@ -93,7 +103,7 @@
 
 上述是审查基线，不代表最终生产 sizing。节点、数据库、Redis、Private Endpoint 和日志量应在压测及客户 RTO/RPO 确认后调整。
 
-## 3. 当前版 BOM 与固定成本
+## 3. 历史 PoC BOM 与固定成本
 
 | 组件 | SKU/数量 | Azure Retail 单价 | 月估算 | 说明 |
 | --- | --- | ---: | ---: | --- |
@@ -281,7 +291,7 @@ Premium 的 HSM Key 用于在硬件保护边界内执行密码运算；把普通
 | --- | --- | --- |
 | 调用元数据及批准的正文 | 私有 PostgreSQL 的 Spend Logs | 计算、在线存储、实际 IO、索引及空间维护；与 Key/预算控制数据共库的负载影响 |
 | WAL、HA 与数据库备份/PITR | 原数据库配套能力 | 写入变化、复制、备份增长及超额备份费用；不能只计算消息文本大小 |
-| 查询与清理 | 受控原生 UI/API 或经验证的受控查询路径 | 查询负载、清理调度及失败告警；现有管理入口尚未开放原生查询，接线需要实现 |
+| 查询与清理 | 受控原生 UI/API 或经验证的受控查询路径 | 查询负载、清理调度及失败告警；原生受控读取已有代码与隔离测试；云端读者/字段权限与负载仍须验收 |
 | 基础监控 | 现有运维平台或 Azure Monitor | 健康、容量、写入异常及清理元数据；不把正文同时摄入高价日志平台 |
 | 自建 L3、Blob/HSM、恢复与治理 | 基础版不默认部署 | 明确选择增强方案后单独估算；不能沿用基础版费用宣称已包含强取证 |
 
@@ -301,7 +311,7 @@ $$
 
 ### 6.3 启用、留存与回退边界
 
-- 方案目标是获批后显式启用原生正文记录；**当前默认配置仍关闭，生成器、静态门禁和阶段证据尚待适配**。本节不是直接执行`true`即可上线的操作指令，更不能删除强审计binding或伪造passed绕过现有门禁。
+- 方案目标是获批后显式启用原生正文记录；**静态默认配置仍关闭，原生发布/静态门禁已有实现；云端启用须批准采集范围并完成实际验收**。本节不是直接执行`true`即可上线的操作指令，更不能删除强审计binding或伪造passed绕过现有门禁。
 - 启用前验证配置优先级、环境变量、客户端no-log等覆盖路径和实际日志字段；禁止原生与自建L3无意重复落正文，普通日志/Trace/artifact不得复制正文或凭据。
 - 在线留存可先评估7天，最终由客户政策决定；原生行级清理可能连同费用明细删除，不能假定正文与元数据可以各自设置独立期限。备份保留另定，在线删除不会清除旧备份，恢复后须重新检查留存及访问权限。
 - PG设置容量趋势、增长率、写入和清理失败告警，70%/85%仅是待验证的阈值起点；预留扩容与维护时间。关闭正文采集通常只影响新记录，不删除历史，不应破坏Key、预算或控制数据。
@@ -397,5 +407,5 @@ $$
 | Private DNS Zone | 6 个 | 是否复用企业中心 DNS Zone |
 | 日志/Sentinel | 只列单价 | 预计 GB/月和留存期 |
 | AI Guardrail | 只列成本驱动 | 月交易量、文本块和目标 SKU |
-| 基础版内容留痕 | 原生Spend Logs；启用与阶段门禁待适配 | 批准范围、实际主体/Key归因、查询权限、PG容量、清理、备份与故障策略 |
+| 基础版内容留痕 | 原生Spend Logs；发布/读取已有隔离证据，云端采集与生产验收另行批准 | 批准范围、实际主体/Key归因、查询权限、PG容量、清理、备份与故障策略 |
 | 自建L3增强审计 | 非基础版默认项，另行批准报价 | 是否需要独立存储、可靠交付、原文双审批或保全；既有数据的保留和退役要求 |

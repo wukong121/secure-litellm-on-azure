@@ -1,8 +1,10 @@
-# 给 AKS 上的 LiteLLM 配置阿里云域名（操作教程）
+# 旧网关参考：给 AKS 上的 LiteLLM 配置阿里云域名
+
+> **仅限已批准的旧环境维护/隔离参考，不是当前West US 3路径。** 当前为私有AKS、独立API/Admin Front Door Premium endpoint及PLS native ingress，不使用公网LoadBalancer A记录或单共享入口。当前域名、两层TLS、分离certificate/backend Vault及发布/回退按[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)或[客户迁移指南](../docs/customer-migration-guide-zh.md)执行。不要为了HTTP-01签发开放当前私有源站；边缘托管证书不是ingress源站证书。
 
 本教程教你把「已经部署在 AKS 上的 LiteLLM 服务」绑定到一个你从阿里云购买的域名上，并启用 HTTPS。
 
-> 当前部署现状（本仓库默认）：
+> 下文旧脚本参考拓扑（不是当前部署）：
 > - 命名空间：`litellm`
 > - 服务：`litellm-mi-proxy`，类型 `LoadBalancer`，端口 `4000`，**纯 HTTP**
 > - 客户端目前通过 `http://<公网IP>:4000` 访问
@@ -79,9 +81,9 @@ litellm-mi-proxy    LoadBalancer   10.0.x.x       20.x.x.x         4000:xxxxx/TC
 | 是否加密 | 否（明文，API Key 会暴露在网络中） | 是（TLS 加密） |
 | 端口 | 非标准 4000 | 标准 443 |
 | 复杂度 | 低 | 中 |
-| 适合场景 | 临时测试 | 生产 / 长期使用 |
+| 适合场景 | 隔离环境无凭据连通性检查 | 经批准的旧环境维护/参考 |
 
-**强烈建议使用方案 B**：LiteLLM 的请求里带有 Virtual Key（相当于密码），走明文 HTTP 会被中间网络截获。方案 A 仅用于临时验证域名解析是否生效。
+旧环境需要传输凭据时必须使用TLS：明文HTTP会暴露Virtual Key。方案A仅用于隔离环境的无凭据DNS/健康检查，不发送Key或业务正文；当前网关两种旧方案均不适用。
 
 ---
 

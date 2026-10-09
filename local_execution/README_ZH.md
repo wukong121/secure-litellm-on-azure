@@ -1,6 +1,6 @@
 # Stage0–9 本地手工执行包
 
-> 核对日期：2026-10-07
+> 核对日期：2026-10-09
 >
 > 适用：客户无法运行GitHub Actions，但已取得本仓库受审核代码，需要从本地完成migration或greenfield的Stage0–9。本文件详细覆盖Stage0–1及两种模式边界；后续按[Stage2–9本地手工部署指南](stage2-9-guide-zh.md)执行。
 
@@ -27,7 +27,9 @@ make validate-local-execution
 
 它不读取GitHub Environment Variables/Secrets，不需要run ID、artifact或evidence ledger。已验证的Stage0–1继续在同一命令中预览并执行；Stage2–9默认只生成plan，审核后须用plan SHA256另行execute。底层继续复用仓库现有Azure/Kubernetes实现，以保持资源范围、私网目标、恢复校验和幂等行为一致。
 
-Stage2–9入口已提供，但不会自动签发人工验收、最终停写、最终数据对账或停旧。Stage9默认禁止启流量；Entra延期时禁止Stage7、Stage8应用发布及全部Stage9流量动作。
+Stage2–9入口已提供，但不会自动签发人工验收、最终停写、最终数据对账或停旧。Stage9默认禁止启流量。只延期Entra而未选择已实现的原生认证分支时，不能发布依赖Entra的Stage7/8应用或启用Stage9流量；显式Stage6 `--option native-auth`有独立原生发布/验收路径，按[Stage2–9指南](stage2-9-guide-zh.md)执行，不跳过发布报告和来源/协议门禁。
+
+**当前参考环境**是West US 3（`westus3`）greenfield测试：Private AKS、Azure CNI overlay、Azure RBAC、禁用本地账号、OIDC/Workload Identity启用，System/User各2台`Standard_D4s_v4`；管理面为`Running/Succeeded`。LiteLLM `1.104.0`固定源码构建使用Workload Identity访问Azure模型，PG/Redis为Entra-only，backend/certificate Vault分离且私有。Front Door Premium的独立API/Admin endpoint分别经PLS进入隔离native ingress；Admin WAF Prevention按否定`SocketAddr`规则限制批准的精确公网IPv4 `/32`和IPv6 `/128`。Admin是原生用户名/密码fallback登录，不是用户Entra SSO。用户已验证登录和virtual key的Codex Responses推理，但这些证据不能替代全部rollout、故障/拒绝矩阵或模型同步验收。模型同步使用[项目总览中的专用runbook入口](../README_ZH.md#仓库导航)，不要改用`LiteLLM/deploy_mi_aks_litellm.py`。
 
 ## 1. 执行拓扑
 

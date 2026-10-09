@@ -15,7 +15,7 @@ FORBIDDEN_CONFIG = {
 }
 REQUIRED_POLICY_DOCS = (
     ROOT / "docs/litellm-security-hardening-implementation-roadmap-zh.md",
-    ROOT / "docs/litellm-stage2-decisions-and-spikes-2026-09-02.md",
+    ROOT / "docs/litellm-azure-security-hardening-zh.md",
 )
 
 
