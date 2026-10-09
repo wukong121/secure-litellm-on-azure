@@ -73,6 +73,32 @@ def identity_context(config, azure):
     return {"identity": identity, "aks": {"id": aks["id"], "issuer": issuer}, "federation": valid[0]}
 
 
+def autoscaler(kube):
+    document = json.loads(command(kube, ["get", "hpa", "-o", "json"]))
+    require(isinstance(document, dict) and isinstance(document.get("items"), list),
+            "Unexpected HorizontalPodAutoscaler list response")
+    require(all(isinstance(item, dict) for item in document["items"]),
+            "Unexpected HorizontalPodAutoscaler object")
+    selected = [item for item in document["items"]
+                if item.get("spec", {}).get("scaleTargetRef", {}).get("kind") == "Deployment"
+                and item.get("spec", {}).get("scaleTargetRef", {}).get("name") == "litellm"]
+    require(len(selected) <= 1, "Multiple HorizontalPodAutoscalers target the backend")
+    if not selected:
+        return None
+    item = selected[0]
+    spec, metadata = item["spec"], item.get("metadata", {})
+    require(spec["scaleTargetRef"].get("apiVersion") == "apps/v1"
+            and metadata.get("namespace") == "litellm"
+            and isinstance(metadata.get("name"), str) and bool(metadata["name"])
+            and isinstance(metadata.get("uid"), str) and bool(metadata["uid"])
+            and not metadata.get("deletionTimestamp"),
+            "Backend HorizontalPodAutoscaler identity/target is unsupported")
+    minimum, maximum = spec.get("minReplicas", 1), spec.get("maxReplicas")
+    require(type(minimum) is int and type(maximum) is int and 1 <= minimum <= maximum,
+            "Backend HorizontalPodAutoscaler replica bounds are invalid")
+    return {"name": metadata["name"], "namespace": metadata["namespace"], "uid": metadata["uid"], "spec": spec}
+
+
 def baseline(config, identity, kube):
     deployment = json.loads(command(kube, ["get", "deployment", "litellm", "-o", "json"]))
     pod = deployment["spec"]["template"]
@@ -122,7 +148,7 @@ def baseline(config, identity, kube):
             "serviceAccountSha256": fingerprint({"annotations": account["metadata"].get("annotations"), "spec": account.get("spec")}),
             "configMapUid": config_map["metadata"]["uid"], "configMapName": config_map["metadata"]["name"],
             "configMapSha256": fingerprint(config_map["data"]), "volumeIndex": volume_index,
-            "runtime": runtime, "deployment": deployment}
+            "runtime": runtime, "deployment": deployment, "autoscaler": autoscaler(kube)}
 
 
 def render(desired, current):
@@ -177,13 +203,33 @@ def network_probe(kube, account, ips):
     require(output.strip() == "private-dns-tls-ok", "In-cluster private DNS/TLS check did not complete")
 
 
+def verify_deployment(kube, deployment, current, wanted_name):
+    require(deployment["metadata"]["uid"] == current["deploymentUid"],
+            "Post-rollout Deployment UID differs from the approved baseline")
+    require("autoscaler" in current, "Approval lacks autoscaler evidence; replan or use separately approved recovery")
+    approved = current["autoscaler"]
+    require(autoscaler(kube) == approved, "Post-rollout autoscaler differs from the approved baseline")
+    expected = copy.deepcopy(current["deployment"]["spec"])
+    expected["template"]["spec"]["volumes"][current["volumeIndex"]]["configMap"]["name"] = wanted_name
+    replicas = deployment["spec"].get("replicas")
+    if approved is not None:
+        spec = approved["spec"]
+        require(type(replicas) is int and spec.get("minReplicas", 1) <= replicas <= spec["maxReplicas"],
+                "Post-rollout replicas are outside the approved autoscaler bounds")
+        expected["replicas"] = replicas
+    require(deployment["spec"] == expected, "Post-rollout Deployment differs from the exact model-only patch")
+
+
 def apply(kube, payload, current, directory, record):
+    require("autoscaler" in current, "Approval lacks autoscaler evidence; replan or use separately approved recovery")
     if payload["modelChanged"]:
         fresh = json.loads(command(kube, ["get", "deployment", "litellm", "-o", "json"]))
         require(fresh["metadata"]["uid"] == current["deploymentUid"]
                 and fresh["metadata"]["resourceVersion"] == current["deploymentResourceVersion"]
                 and fingerprint(fresh["spec"]) == current["deploymentSpecSha256"],
                 "Deployment drifted after approval; no application writes performed")
+        require(autoscaler(kube) == current["autoscaler"],
+                "Autoscaler drifted after approval; no application writes performed")
         command(kube, ["apply", "--server-side", "--field-manager=llmgw-migration",
                        "-f", str(directory / "configmap.json")])
         record["phase"] = "configmap-created"
@@ -195,11 +241,8 @@ def apply(kube, payload, current, directory, record):
         private_write(directory / "model-sync-state.json", json.dumps(record, indent=2))
     command(kube, ["rollout", "status", "deployment/litellm", "--timeout=900s"], timeout=930)
     deployment = json.loads(command(kube, ["get", "deployment", "litellm", "-o", "json"]))
-    expected = copy.deepcopy(current["deployment"]["spec"])
     wanted_name = payload["configMap"]["metadata"]["name"] if payload["modelChanged"] else current["configMapName"]
-    expected["template"]["spec"]["volumes"][current["volumeIndex"]]["configMap"]["name"] = wanted_name
-    require(deployment["metadata"]["uid"] == current["deploymentUid"] and deployment["spec"] == expected,
-            "Post-rollout Deployment differs from the exact model-only patch")
+    verify_deployment(kube, deployment, current, wanted_name)
     config_map = json.loads(command(kube, ["get", "configmap", wanted_name, "-o", "json"]))
     require(fingerprint(yaml.safe_load(config_map["data"]["config.yaml"])) == payload["runtimeSha256"],
             "Post-rollout ConfigMap differs from desired exact model mapping")
