@@ -10,6 +10,10 @@ The delivery target covers both staged migration of existing gateways and greenf
 
 ## Target Architecture
 
+![LiteLLM Azure security architecture](images/litellm-azure-security-architecture.png)
+
+The diagram includes optional and production enhancement paths, not a claim that every component is deployed or accepted. See the [architecture design](docs/litellm-azure-security-hardening-zh.md) for scope and validation boundaries.
+
 **Phase-one audit decision (2026-09-10):** use native Spend Logs for approved prompt/response retention in private PostgreSQL. Native configuration rendering and mode-specific publishing/evidence checks are implemented; static base manifests still disable body logging. Actual retention, access, cleanup, capacity and failure acceptance require separate evidence. Custom L3 capture, Blob/HSM and recovery/governance services are optional enhancements, not a universal launch requirement. See the [phase-one brief](docs/litellm-content-audit-phase1-customer-brief-zh.md) and [deployment guide](docs/customer-deployment-workflows-zh.md). Do not skip gates to enable logging.
 
 ```text
@@ -74,6 +78,7 @@ Keep the old database, gateway, identity and Master/Salt path until rollback cri
 | [LiteLLM](LiteLLM/README.md) | Legacy gateway reference, operational runbooks and OSS callback adapter |
 | [tests](tests/README.md) | Offline checks, isolated runtime probes and explicitly invoked live tests |
 | [scripts](scripts/customer_migration.py) | Customer preflight, parameter rendering and validation tools |
+| [images](images/) | Version-controlled architecture diagrams |
 
 For model discovery/synchronization, use the dedicated [model-sync runbook (Chinese)](docs/litellm-model-sync-runbook-zh.md); do not rerun the legacy deployment script or enable UI database model management for the current gateway.
 
