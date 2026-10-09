@@ -64,7 +64,7 @@ def connect_cluster(config, directory, legacy):
     group = config["legacy" if legacy else "target"]["resourceGroup"]
     name = config["legacy"]["aksClusterName"] if legacy else config["parameters"]["platform"]["stage4Aks"]["name"]
     kubeconfig = directory / "kubeconfig"
-    run_command(["az", "aks", "get-credentials", "--subscription", config["azure"]["subscriptionId"], "--resource-group", group, "--name", name, "--file", str(kubeconfig)], directory, "cluster-credentials")
+    run_command(["az", "aks", "get-credentials", "--subscription", config["azure"]["subscriptionId"], "--resource-group", group, "--name", name, "--file", str(kubeconfig), "--overwrite-existing"], directory, "cluster-credentials")
     kubeconfig.chmod(0o600)
     run_command(["kubelogin", "convert-kubeconfig", "--kubeconfig", str(kubeconfig), "-l", "azurecli"], directory, "cluster-login")
     namespace = config["legacy"]["namespace"] if legacy else "litellm"

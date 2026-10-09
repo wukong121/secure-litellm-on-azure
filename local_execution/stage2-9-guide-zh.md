@@ -1655,7 +1655,9 @@ Azure DNS动作在同一检查点中新增或更新`llm-api`和`llm-admin`两条
 
 可重复`--add-cidr`添加多个精确地址；双人审批需重复`--approved-by`。plan不修改Azure、客户配置或正式报告。命令要求当前双平面入口已开启、live资源和原配置一致、审批符合现有策略，只允许客户配置中的Admin CIDR增加，不允许移除已有地址或同时修改其他字段。命令从已核验的live Admin WAF生成单资源模板，完整保留现有策略设置、managed rules、其他custom rules和服务默认值，仅替换来源IP匹配值；不重新部署域名、证书、诊断、endpoint、route或API WAF。What-if展开Azure嵌套数组差异，只允许Admin WAF首条来源IP规则`matchValue`叶节点变更，拒绝规则整体替换、action及其他字段变更。原edge部署输出和参数保留，新输出仅更新CIDR，以供后续报告及绑定校验。保留原流量状态，不执行DNS动作；粗粒度或不明差异仍停止，不自动放宽校验。
 
-execute成功后，以0600备份并更新Git-ignored客户配置和发布报告，再刷新edge-bind回执（只允许已有ingress规则及Pod template均不变）。无需再运行release。新增IP生效仍需WAF边缘传播；从批准出口验证登录页，并从未批准出口验证拒绝，内层密码认证保持不变。家庭公网地址可能变化，下一次变化需单独审核新增，不能为方便扩大CIDR。
+execute会在stderr实时提示基线/What-if检查、WAF部署、配置及报告保存、绑定回执刷新等阶段，stdout保留JSON摘要。临时kubeconfig使用`--overwrite-existing`非交互获取，不需要输入`y`；该覆盖仅针对本次输出目录，不替代计划哈希或人工审批。WAF部署成功后立即更新`allowlist-summary.json`的`deploymentPerformed`，绑定尚未完成时仍为`status: executing`。执行期间须保持AKS运行；API/Admin rollout各最多等待15分钟，阶段提示不代表已完成。
+
+execute成功后，以0600备份并更新Git-ignored客户配置和发布报告，再刷新edge-bind回执（只允许已有ingress规则及Pod template均不变）。以最终`status: completed`及`bindingRefreshed: true`确认整个操作成功，无需再运行release。新增IP生效仍需WAF边缘传播；从批准出口验证登录页，并从未批准出口验证拒绝，内层密码认证保持不变。家庭公网地址可能变化，下一次变化需单独审核新增，不能为方便扩大CIDR。
 
 若Azure已更新但本地写入或回执刷新失败，命令明确失败，并在输出目录保存`allowlist-summary.json`、`desired-customer.json`、`desired-release.json`及旧配置备份。检查实际部署后再恢复本地一致性；配置已更新时可重新执行edge-bind plan/审核/execute刷新回执。不要使用旧哈希盲重试、回滚整个配置或重跑edge-prepare。该命令不支持prod、production、Entra或L3路径，也不代替实际批准及公网验收。
 
