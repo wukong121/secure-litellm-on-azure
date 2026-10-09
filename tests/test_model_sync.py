@@ -113,9 +113,19 @@ def runtime_documents(config):
     return deployment, service, cm
 
 
+def autoscaler_document():
+    return {"metadata": {"name": "litellm", "namespace": "litellm", "uid": "hpa-uid"},
+            "spec": {"scaleTargetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": "litellm"},
+                     "minReplicas": 2, "maxReplicas": 6,
+                     "metrics": [{"type": "Resource", "resource": {"name": "cpu",
+                                 "target": {"type": "Utilization", "averageUtilization": 65}}}]}}
+
+
 def current_baseline(config):
     deployment, service, cm = runtime_documents(config)
-    with patch.object(runtime, "command", side_effect=[json.dumps(deployment), json.dumps(service), json.dumps(cm)]):
+    with patch.object(runtime, "command", side_effect=[
+            json.dumps(deployment), json.dumps(service), json.dumps(cm),
+            json.dumps({"items": [autoscaler_document()]})]):
         return runtime.baseline(config, {"properties": {"clientId": CLIENT}}, ["kubectl"])
 
 
@@ -545,6 +555,143 @@ class ModelSyncInfrastructureTests(unittest.TestCase):
 
 
 class ModelSyncRuntimeTests(unittest.TestCase):
+    def test_autoscaler_binds_backend_identity_and_spec_not_volatile_status(self):
+        hpa = autoscaler_document()
+        unrelated = copy.deepcopy(hpa)
+        unrelated["spec"]["scaleTargetRef"]["name"] = "other"
+        hpa["status"] = {"currentReplicas": 2, "desiredReplicas": 3}
+        with patch.object(runtime, "command", return_value=json.dumps({"items": [unrelated, hpa]})) as cmd:
+            approved = runtime.autoscaler(["kubectl"])
+        cmd.assert_called_once_with(["kubectl"], ["get", "hpa", "-o", "json"])
+        self.assertEqual(approved, {"name": "litellm", "namespace": "litellm", "uid": "hpa-uid", "spec": hpa["spec"]})
+        hpa["status"]["desiredReplicas"] = 4
+        with patch.object(runtime, "command", return_value=json.dumps({"items": [hpa]})):
+            self.assertEqual(runtime.autoscaler(["kubectl"]), approved)
+        hpa["spec"]["metrics"][0]["resource"]["target"]["averageUtilization"] = 80
+        with patch.object(runtime, "command", return_value=json.dumps({"items": [hpa]})):
+            self.assertNotEqual(runtime.autoscaler(["kubectl"]), approved)
+
+    def test_missing_hpa_is_explicit_and_query_failures_are_not_absence(self):
+        with patch.object(runtime, "command", return_value=json.dumps({"items": []})):
+            self.assertIsNone(runtime.autoscaler(["kubectl"]))
+        with patch.object(runtime, "command", side_effect=MigrationError("HPA read denied")), \
+                self.assertRaisesRegex(MigrationError, "read denied"):
+            runtime.autoscaler(["kubectl"])
+
+    def test_invalid_or_ambiguous_autoscaler_blocks_baseline(self):
+        hpa = autoscaler_document()
+        documents = [{"items": [hpa, hpa]}, {"items": None}, {"items": [None]}]
+        for path, value in (
+            (["metadata", "uid"], ""), (["metadata", "namespace"], "other"),
+            (["metadata", "deletionTimestamp"], "2026-10-09T00:00:00Z"),
+            (["spec", "scaleTargetRef", "apiVersion"], "unsupported/v1"),
+            (["spec", "minReplicas"], True), (["spec", "maxReplicas"], "6"),
+            (["spec", "minReplicas"], 0), (["spec", "minReplicas"], 7),
+        ):
+            bad = copy.deepcopy(hpa)
+            target = bad
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            documents.append({"items": [bad]})
+        for document in documents:
+            with self.subTest(document=document), \
+                    patch.object(runtime, "command", return_value=json.dumps(document)), \
+                    self.assertRaises(MigrationError):
+                runtime.autoscaler(["kubectl"])
+
+    def test_post_rollout_allows_only_scaling_with_unchanged_approved_hpa(self):
+        current = current_baseline(customer())
+        for replicas in (2, 3, 6):
+            after = copy.deepcopy(current["deployment"])
+            after["spec"]["replicas"] = replicas
+            after["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"] = "new-config"
+            with self.subTest(replicas=replicas), \
+                    patch.object(runtime, "command", return_value=json.dumps({"items": [autoscaler_document()]})):
+                runtime.verify_deployment(["kubectl"], after, current, "new-config")
+        self.assertEqual(current["deployment"]["spec"]["replicas"], 2)
+        self.assertEqual(current["deployment"]["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"], "old-config")
+
+    def test_post_rollout_hpa_removal_replacement_and_spec_changes_block(self):
+        current = current_baseline(customer())
+        documents = [{"items": []}]
+        for path, value in (
+            (["metadata", "uid"], "replacement"),
+            (["metadata", "name"], "renamed"),
+            (["spec", "maxReplicas"], 7),
+            (["spec", "metrics", 0, "resource", "target", "averageUtilization"], 80),
+            (["spec", "scaleTargetRef", "name"], "other"),
+        ):
+            changed = autoscaler_document()
+            target = changed
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            documents.append({"items": [changed]})
+        for document in documents:
+            with self.subTest(document=document), \
+                    patch.object(runtime, "command", return_value=json.dumps(document)), \
+                    self.assertRaisesRegex(MigrationError, "autoscaler differs"):
+                runtime.verify_deployment(["kubectl"], current["deployment"], current, "old-config")
+
+    def test_post_rollout_without_hpa_keeps_exact_replica_comparison(self):
+        current = current_baseline(customer())
+        current["autoscaler"] = None
+        with patch.object(runtime, "command", return_value=json.dumps({"items": []})):
+            runtime.verify_deployment(["kubectl"], current["deployment"], current, "old-config")
+            changed = copy.deepcopy(current["deployment"])
+            changed["spec"]["replicas"] = 3
+            with self.assertRaisesRegex(MigrationError, "exact model-only"):
+                runtime.verify_deployment(["kubectl"], changed, current, "old-config")
+
+    def test_post_rollout_rejects_out_of_bounds_and_noninteger_replicas(self):
+        current = current_baseline(customer())
+        for replicas in (1, 7, True, 3.0, "3", None):
+            changed = copy.deepcopy(current["deployment"])
+            changed["spec"]["replicas"] = replicas
+            with self.subTest(replicas=replicas), \
+                    patch.object(runtime, "command", return_value=json.dumps({"items": [autoscaler_document()]})), \
+                    self.assertRaisesRegex(MigrationError, "autoscaler bounds"):
+                runtime.verify_deployment(["kubectl"], changed, current, "old-config")
+
+    def test_post_rollout_scaling_cannot_mask_any_other_deployment_drift(self):
+        current = current_baseline(customer())
+        sentinel = "credential-value-must-not-be-logged"
+        for path, value in (
+            (["template", "spec", "containers", 0, "image"], "unapproved"),
+            (["template", "spec", "containers", 0, "env", 0, "value"], sentinel),
+            (["template", "spec", "containers", 0, "args", 0], "--unapproved"),
+            (["template", "spec", "containers", 0, "volumeMounts", 0, "readOnly"], False),
+            (["template", "spec", "volumes", 0, "configMap", "name"], "unapproved"),
+            (["template", "spec", "volumes", 1, "csi", "driver"], "unapproved"),
+            (["template", "spec", "serviceAccountName"], "unapproved"),
+            (["template", "metadata", "labels", "azure.workload.identity/use"], "false"),
+            (["selector", "matchLabels", "app"], "other"),
+        ):
+            changed = copy.deepcopy(current["deployment"])
+            changed["spec"]["replicas"] = 3
+            target = changed["spec"]
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            with self.subTest(path=path), \
+                    patch.object(runtime, "command", return_value=json.dumps({"items": [autoscaler_document()]})), \
+                    self.assertRaisesRegex(MigrationError, "exact model-only") as failure:
+                runtime.verify_deployment(["kubectl"], changed, current, "old-config")
+            self.assertNotIn(sentinel, str(failure.exception))
+
+    def test_post_rollout_rejects_replaced_deployment_and_old_approval(self):
+        current = current_baseline(customer())
+        replaced = copy.deepcopy(current["deployment"])
+        replaced["metadata"]["uid"] = "replacement"
+        with patch.object(runtime, "command") as cmd, self.assertRaisesRegex(MigrationError, "UID"):
+            runtime.verify_deployment(["kubectl"], replaced, current, "old-config")
+        cmd.assert_not_called()
+        del current["autoscaler"]
+        with patch.object(runtime, "command") as cmd, self.assertRaisesRegex(MigrationError, "lacks autoscaler evidence"):
+            runtime.verify_deployment(["kubectl"], current["deployment"], current, "old-config")
+        cmd.assert_not_called()
+
     def test_baseline_mapping_drift_and_inline_credentials_fail(self):
         config = customer()
         for field in ("mapping", "credentials", "identity"):
@@ -607,6 +754,21 @@ class ModelSyncRuntimeTests(unittest.TestCase):
             runtime.apply(["kubectl"], payload, current, Path(destination), {})
         self.assertEqual(cmd.call_count, 1)
 
+    def test_preapply_hpa_drift_means_no_application_writes(self):
+        config = customer()
+        current = current_baseline(config)
+        config["application"]["models"][0]["apiVersion"] = "2024-10-21"
+        payload = runtime.render(config, current)
+        hpa = autoscaler_document()
+        hpa["spec"]["maxReplicas"] = 7
+        outputs = [json.dumps(current["deployment"]), json.dumps({"items": [hpa]})]
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, \
+                patch.object(runtime, "command", side_effect=outputs) as cmd, \
+                self.assertRaisesRegex(MigrationError, "Autoscaler drifted"):
+            runtime.apply(["kubectl"], payload, current, Path(destination), {})
+        self.assertEqual(cmd.call_count, 2)
+        self.assertTrue(all(call.args[1][0] == "get" for call in cmd.call_args_list))
+
     def test_network_probe_no_token_no_http_and_tls_verified(self):
         account = parse_catalog(catalog(), "v1")[0]
         with patch.object(runtime, "command", return_value="private-dns-tls-ok\n") as cmd:
@@ -627,7 +789,9 @@ class ModelSyncRuntimeTests(unittest.TestCase):
         pods = {"items": [{"metadata": {"name": "backend-" + str(i)},
                            "status": {"conditions": [{"type": "Ready", "status": "True"}]}} for i in range(2)]}
         content_hash = hashlib.sha256(payload["configMap"]["data"]["config.yaml"].encode()).hexdigest()
-        outputs = [json.dumps(current["deployment"]), "", "", "rollout complete", json.dumps(after),
+        outputs = [json.dumps(current["deployment"]), json.dumps({"items": [autoscaler_document()]}),
+                   "", "", "rollout complete", json.dumps(after),
+                   json.dumps({"items": [autoscaler_document()]}),
                    json.dumps(payload["configMap"]), json.dumps(pods), content_hash, content_hash]
         record = {}
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, patch.object(runtime, "command", side_effect=outputs) as cmd:
@@ -645,7 +809,8 @@ class ModelSyncRuntimeTests(unittest.TestCase):
                            "status": {"conditions": [{"type": "Ready", "status": "True"}]}} for i in range(2)]}
         cm = runtime_documents(config)[2]
         content_hash = hashlib.sha256(cm["data"]["config.yaml"].encode()).hexdigest()
-        outputs = ["rollout complete", json.dumps(current["deployment"]), json.dumps(cm), json.dumps(pods),
+        outputs = ["rollout complete", json.dumps(current["deployment"]),
+                   json.dumps({"items": [autoscaler_document()]}), json.dumps(cm), json.dumps(pods),
                    content_hash, content_hash]
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, patch.object(runtime, "command", side_effect=outputs) as cmd:
             record = {}
@@ -653,6 +818,43 @@ class ModelSyncRuntimeTests(unittest.TestCase):
         self.assertTrue(record["rolloutVerified"])
         self.assertFalse(record["inferenceVerified"])
         self.assertFalse(any(call.args[1][0] in {"apply", "patch"} for call in cmd.call_args_list))
+
+    def test_scaled_rollout_checks_each_required_replica_mount(self):
+        config = customer()
+        current = current_baseline(config)
+        for model_changed in (False, True):
+            for pod_count in (2, 3):
+                with self.subTest(model_changed=model_changed, pod_count=pod_count):
+                    desired = copy.deepcopy(config)
+                    if model_changed:
+                        desired["application"]["models"][0]["modelInfo"] = {"input_cost_per_token": 0.000003}
+                    payload = runtime.render(desired, current)
+                    after = copy.deepcopy(current["deployment"])
+                    after["spec"]["replicas"] = 3
+                    cm = payload["configMap"] if model_changed else runtime_documents(config)[2]
+                    after["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"] = cm["metadata"]["name"]
+                    pods = {"items": [{"metadata": {"name": "backend-" + str(i)},
+                                      "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+                                     for i in range(pod_count)]}
+                    digest = hashlib.sha256(cm["data"]["config.yaml"].encode()).hexdigest()
+                    outputs = ([json.dumps(current["deployment"]), json.dumps({"items": [autoscaler_document()]}),
+                                "", ""] if model_changed else []) + [
+                        "rollout complete", json.dumps(after), json.dumps({"items": [autoscaler_document()]}),
+                        json.dumps(cm), json.dumps(pods), *([digest] * pod_count),
+                    ]
+                    record = {}
+                    with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, \
+                            patch.object(runtime, "command", side_effect=outputs) as cmd:
+                        if pod_count == 3:
+                            runtime.apply(["kubectl"], payload, current, Path(destination), record)
+                            self.assertTrue(record["rolloutVerified"])
+                            self.assertFalse(record["inferenceVerified"])
+                            self.assertEqual(sum(call.args[1][0] == "exec" for call in cmd.call_args_list), 3)
+                        else:
+                            with self.assertRaisesRegex(MigrationError, "replicas are ready"):
+                                runtime.apply(["kubectl"], payload, current, Path(destination), record)
+                            self.assertNotIn("rolloutVerified", record)
+                        self.assertEqual(any(call.args[1][0] in {"apply", "patch"} for call in cmd.call_args_list), model_changed)
 
     def test_passwords_in_urls_or_redis_fields_are_never_saved(self):
         for value in ({"redis_password": "literal"}, {"database": "postgresql://user:password@database/db"}):

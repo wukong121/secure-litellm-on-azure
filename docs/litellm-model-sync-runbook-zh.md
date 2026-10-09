@@ -636,3 +636,28 @@ Unsupported 或未完整展开的 PE/DNS/角色分配仍然阻断。
 changeType 和 resourceId（诊断输出可能脱敏）；若它不是 `Ignore`，应继续
 受控排查模板与计划，不可按此误判直接放行。更新 Runner 后重新 plan 并审核
 新 hash；此修复不代表整条 Runner 计划或模型推理已经通过。
+
+### 8.5 HPA 扩缩容与 rollout 后的严格校验
+
+若旧版本在 execute 中报
+`Post-rollout Deployment differs from the exact model-only patch`，不要假定
+rollout 失败或尚未写入配置。先核对本次 state、批准快照与 live Deployment。
+旧版本把整个 `Deployment.spec` 与更新前的副本数比较；HPA 在 rollout 期间
+正常扩缩容时，即使只变了 `/spec/replicas`，也会错误阻断后续配置安装。
+镜像、环境变量、挂载、身份等其他字段的差异仍可能是真实 drift，不能一概放行。
+
+修复版本把面向 `apps/v1 Deployment/litellm` 的 HPA 名称、namespace、UID
+和完整 spec 纳入 plan 批准基线。rollout 后重新读取 HPA，要求其身份和配置
+未变且没有重复控制器；仅在该 HPA 存在且 live 副本数为批准 min/max 范围内的
+整数时允许 `/spec/replicas` 变化。没有 HPA 时副本数仍严格相等。
+其余 Deployment spec、UID、新 ConfigMap 内容和每个 Ready Pod 的实际挂载
+仍严格核验；HPA 读取失败、删除/替换/配置变化、越界副本数或其他字段 drift 均阻断。
+plan 需要 namespace 内读取 HPA 的 Kubernetes 权限，不能将权限失败当作“没有 HPA”。
+
+已发生部分执行的情况，先按第 8 节检查：若 `applicationPatched=true`、
+`configInstalled=false`，live 模型配置可能已经更新，而客户配置仍是旧映射。
+不要直接重试 execute/plan、强制把副本数改回旧值、删除 PE/DNS/role，
+也不要手工把失败 state 改成 completed。需单独批准恢复，重新核验期望挂载、
+非模型字段、HPA 与实际配置后完成客户配置一致性，或执行获批的模型级回滚。
+旧 review 未包含 HPA 批准证据，不能套用新校验或沿用旧 hash 假装原执行已验收。
+此修复不自动恢复先前的失败执行，也不替代模型推理或后续 evidence 验收。
