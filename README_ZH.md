@@ -10,6 +10,10 @@
 
 ## 目标架构
 
+![LiteLLM Azure 安全架构图](images/litellm-azure-security-architecture.png)
+
+图中包含可选能力与生产增强路径，不代表所有组件均已部署或验收；范围及验证边界详见[安全架构设计](docs/litellm-azure-security-hardening-zh.md)。
+
 **第一阶段审计决策（2026-09-10）**：采用原生Spend Logs将获批的Prompt/Response保存在私有PostgreSQL。原生配置生成及按模式区分的发布/证据检查已实现；静态Base清单仍关闭正文。实际留存、查询权限、清理、容量及故障验收需独立证据。自建L3采集、正文Blob/HSM及恢复治理服务是可选增强项，不作为所有客户的首发前提。详见[基础版方案](docs/litellm-content-audit-phase1-customer-brief-zh.md)及[部署指南](docs/customer-deployment-workflows-zh.md)，不得跳过门禁启用。
 
 ```text
@@ -74,6 +78,7 @@ API客户端 --------> llm-api.<客户域名>   -> API Front Door endpoint / WAF
 | [LiteLLM](LiteLLM/README_ZH.md) | 旧网关参考实现、运维手册及OSS回调适配器 |
 | [tests](tests/README_ZH.md) | 离线检查、隔离运行时验证及显式执行的真实环境测试 |
 | [scripts](scripts/customer_migration.py) | 客户预检、参数生成和验证工具 |
+| [images](images/) | 纳入版本管理的架构图 |
 
 模型发现/同步统一见[专用模型同步runbook](docs/litellm-model-sync-runbook-zh.md)；当前网关不要重跑旧部署脚本或启用UI数据库模型管理。
 

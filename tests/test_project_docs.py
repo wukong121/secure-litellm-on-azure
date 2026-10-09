@@ -31,6 +31,32 @@ READMES = (
 
 
 class ProjectDocumentationTests(unittest.TestCase):
+    def test_root_architecture_images_are_tracked_and_embedded_in_readmes(self):
+        import subprocess
+
+        images = (
+            "images/litellm-azure-security-architecture.png",
+            "images/litellm-content-audit-phase1-architecture.jpg",
+        )
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", *images], cwd=ROOT,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((ROOT / "docs/images").exists())
+        for path in images:
+            self.assertTrue((ROOT / path).is_file())
+        with (ROOT / images[0]).open("rb") as stream:
+            self.assertEqual(stream.read(8), b"\x89PNG\r\n\x1a\n")
+        with (ROOT / images[1]).open("rb") as stream:
+            self.assertEqual(stream.read(3), b"\xff\xd8\xff")
+        for name in ("README.md", "README_ZH.md"):
+            text = (ROOT / name).read_text()
+            with self.subTest(document=name):
+                self.assertRegex(text, r"!\[[^\]]+\]\(images/litellm-azure-security-architecture\.png\)")
+                self.assertIn("[images](images/)", text)
+                self.assertNotIn("docs/images/", text)
+
     def test_root_readmes_record_bounded_current_native_baseline(self):
         for name in ("README.md", "README_ZH.md"):
             text = (ROOT / name).read_text()
