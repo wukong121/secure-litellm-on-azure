@@ -368,8 +368,39 @@ class ModelSyncInfrastructureTests(unittest.TestCase):
                       "principalType": "ServicePrincipal", "roleDefinitionId": "/subscriptions/" + SUB + "/providers/Microsoft.Authorization/roleDefinitions/" + ROLE}
         azure = Mock(run=Mock(return_value=[assignment]))
         self.assertFalse(role_state(account, {"properties": {"principalId": PRINCIPAL}}, "", azure)["createRole"])
+        azure.run.assert_called_once_with([
+            "role", "assignment", "list", "--scope", account["accountResourceId"],
+            "--subscription", account["subscriptionId"],
+            "--fill-principal-name", "false", "--fill-role-definition-name", "false",
+        ])
         assignment["condition"] = "restricted"
         with self.assertRaisesRegex(MigrationError, "conditions"):
+            role_state(account, {"properties": {"principalId": PRINCIPAL}}, "", azure)
+
+    def test_role_query_does_not_reuse_other_principals_or_parent_scopes(self):
+        account = parse_catalog(catalog(), "v1")[0]
+        assignment = {
+            "scope": account["accountResourceId"], "principalId": PRINCIPAL,
+            "principalType": "ServicePrincipal",
+            "roleDefinitionId": "/subscriptions/" + SUB + "/providers/Microsoft.Authorization/roleDefinitions/" + ROLE,
+        }
+        for change in ({"principalId": CLIENT}, {"scope": "/subscriptions/" + SUB}):
+            azure = Mock(run=Mock(return_value=[{**assignment, **change}]))
+            with self.subTest(change=change):
+                self.assertTrue(role_state(account, {"properties": {"principalId": PRINCIPAL}}, "", azure)["createRole"])
+
+    def test_scoped_role_query_still_detects_foreign_assignment_name_collision(self):
+        account = parse_catalog(catalog(), "v1")[0]
+        azure = Mock(run=Mock(return_value=[]))
+        expected = role_state(account, {"properties": {"principalId": PRINCIPAL}}, "", azure)["roleId"]
+        azure.run.return_value = [{"id": expected, "principalId": CLIENT, "scope": account["accountResourceId"]}]
+        with self.assertRaisesRegex(MigrationError, "name conflicts"):
+            role_state(account, {"properties": {"principalId": PRINCIPAL}}, "", azure)
+
+    def test_role_list_failure_is_not_treated_as_a_missing_assignment(self):
+        account = parse_catalog(catalog(), "v1")[0]
+        azure = Mock(run=Mock(side_effect=MigrationError("AuthorizationFailed")))
+        with self.assertRaisesRegex(MigrationError, "AuthorizationFailed"):
             role_state(account, {"properties": {"principalId": PRINCIPAL}}, "", azure)
 
     def test_nested_full_payload_what_if_strict_allowlist(self):
