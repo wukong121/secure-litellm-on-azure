@@ -27,7 +27,7 @@ def reconciled(config, document, fallback=None, hostnames=None):
     azure = CatalogAzure(accounts)
     azure.hostnames = {} if hostnames is None else hostnames
     observations, matches = discover(config, accounts, azure)
-    return reconcile(config, matches), observations
+    return reconcile(config, matches, "merge"), observations
 
 
 class NestedCatalogTests(unittest.TestCase):

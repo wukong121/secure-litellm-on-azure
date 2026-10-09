@@ -158,7 +158,11 @@ def render(desired, current):
     if affinities is not None:
         require(isinstance(affinities, dict) and bool(affinities), "Existing model affinity template is required")
         prototype = copy.deepcopy(next(iter(affinities.values())))
-        for name in {m["modelGroup"] for m in desired["application"]["models"]}:
+        wanted_groups = {m["modelGroup"] for m in desired["application"]["models"]}
+        previous_groups = {m["model_name"] for m in current["runtime"].get("model_list", [])}
+        for name in previous_groups - wanted_groups:
+            affinities.pop(name, None)
+        for name in sorted(wanted_groups):
             affinities.setdefault(name, copy.deepcopy(prototype))
     text = yaml.safe_dump(runtime, sort_keys=False)
     name = "litellm-config-" + hashlib.sha256(text.encode()).hexdigest()[:12]

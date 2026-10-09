@@ -169,7 +169,9 @@ def discover(config, accounts, azure):
     return observations, matches
 
 
-def reconcile(config, matches):
+def reconcile(config, matches, model_policy="replace"):
+    require(model_policy in {"merge", "replace"}, "Model policy must be merge or replace")
+    require(matches, "Model synchronization requires at least one discovered model")
     application_settings(config)
     desired = copy.deepcopy(config)
     connections = desired["parameters"]["platform"]["azureOpenAIConnections"]
@@ -182,6 +184,7 @@ def reconcile(config, matches):
         require(account_id(connection["subscriptionId"], connection["resourceGroupName"], connection["accountName"]).lower()
                 == connection["accountResourceId"].lower(), "Existing connection identity is inconsistent")
     mappings = desired["application"]["models"]
+    selected = set()
     require(len({(m["modelGroup"], m["connectionAlias"], m["deploymentName"]) for m in mappings}) == len(mappings),
             "Existing model mapping identities are duplicated")
     for account, target in matches:
@@ -195,6 +198,7 @@ def reconcile(config, matches):
         elif connection_endpoint(connection) != account["endpoint"]:
             connection["endpoint"] = account["endpoint"]
         alias = connection["alias"]
+        selected.add((target["modelGroup"], alias, target["deploymentName"]))
         exact = next((m for m in mappings if (m["modelGroup"], m["connectionAlias"], m["deploymentName"]) ==
                       (target["modelGroup"], alias, target["deploymentName"])), None)
         if exact is None:
@@ -214,6 +218,11 @@ def reconcile(config, matches):
             if target[key]:
                 exact.setdefault(key, {}).update(copy.deepcopy(target[key]))
         validate_options(exact.get("litellmParams", {}), exact.get("modelInfo", {}))
+    if model_policy == "replace":
+        desired["application"]["models"] = [
+            mapping for mapping in mappings
+            if (mapping["modelGroup"], mapping["connectionAlias"], mapping["deploymentName"]) in selected
+        ]
     application_settings(desired)
     return desired
 

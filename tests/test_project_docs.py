@@ -90,6 +90,9 @@ class ProjectDocumentationTests(unittest.TestCase):
                     self.assertNotIn("account_name", resource)
         self.assertIn("预期值核验", runbook)
         self.assertIn("不把手填 endpoint 当作绕过发现的兜底", runbook)
+        self.assertIn("默认策略是 `replace`：`MODEL_CATALOG` 是整个网关的完整模型清单", runbook)
+        self.assertIn("## 7. 按需执行：下游回执重验证", runbook)
+        self.assertIn("本节不是模型发布生效或 UI 显示更新的前提", runbook)
 
     def test_model_sync_runbook_uses_matching_explicit_v1_fallback(self):
         import shlex
@@ -105,6 +108,7 @@ class ProjectDocumentationTests(unittest.TestCase):
                 args = shlex.split(source.split(command, 1)[1])
                 operation = args[args.index("--operation") + 1]
                 versions[operation] = args[args.index("--api-version") + 1]
+                self.assertEqual(args[args.index("--model-policy") + 1], "replace")
         self.assertEqual(versions, {"plan": "v1", "execute": "v1"})
         catalogs = [
             json.loads(source) for source in re.findall(r"```json\n(.*?)\n```", runbook, re.S)
