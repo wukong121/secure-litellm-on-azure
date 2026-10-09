@@ -23,20 +23,30 @@ def command(kube, arguments, timeout=120):
     return result.stdout
 
 
-def safe_settings(value):
+IDENTITY_SWITCH_PATHS = frozenset({
+    ("litellm_settings", "enable_azure_ad_token_refresh"),
+    ("router_settings", "cache_kwargs", "azure_redis_ad_token"),
+})
+
+
+def safe_settings(value, path=()):
     if isinstance(value, dict):
         for key, item in value.items():
+            location = (*path, str(key))
             sensitive = re.search(r"(?:^|_)(?:api_key|master_key|password|token|secret)(?:$|_)", str(key).lower())
-            if key in COST_FIELDS:
+            if location in IDENTITY_SWITCH_PATHS:
+                require(item is True, "Live runtime identity authentication switch must be true: "
+                        + ".".join(location))
+            elif key in COST_FIELDS:
                 finite_number(item)
-            elif sensitive and key != "enable_azure_ad_token_refresh":
+            elif sensitive:
                 require(isinstance(item, str) and item.startswith("os.environ/"),
                         "Live runtime configuration contains a credential literal or unsupported credential source")
             else:
-                safe_settings(item)
+                safe_settings(item, location)
     elif isinstance(value, list):
-        for item in value:
-            safe_settings(item)
+        for index, item in enumerate(value):
+            safe_settings(item, (*path, str(index)))
     elif isinstance(value, str) and "://" in value:
         require(urlsplit(value).password is None, "Live runtime configuration contains a credential-bearing URL")
 

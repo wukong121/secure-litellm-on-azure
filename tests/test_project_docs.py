@@ -91,6 +91,29 @@ class ProjectDocumentationTests(unittest.TestCase):
         self.assertIn("预期值核验", runbook)
         self.assertIn("不把手填 endpoint 当作绕过发现的兜底", runbook)
 
+    def test_model_sync_runbook_uses_matching_explicit_v1_fallback(self):
+        import shlex
+        from scripts.model_sync_catalog import parse_catalog
+
+        runbook = (ROOT / "docs/litellm-model-sync-runbook-zh.md").read_text()
+        self.assertIn("### 2.6 确认推理 API version：v1 与日期版本", runbook)
+        self.assertIn("不等于具体 deployment 已完成真实推理验证", runbook)
+        versions = {}
+        for source in re.findall(r"```bash\n(.*?)\n```", runbook, re.S):
+            command = ".venv/bin/python -m local_execution.model_sync "
+            if command in source:
+                args = shlex.split(source.split(command, 1)[1])
+                operation = args[args.index("--operation") + 1]
+                versions[operation] = args[args.index("--api-version") + 1]
+        self.assertEqual(versions, {"plan": "v1", "execute": "v1"})
+        catalogs = [
+            json.loads(source) for source in re.findall(r"```json\n(.*?)\n```", runbook, re.S)
+            if '"schema_version"' in source
+        ]
+        self.assertEqual(len(catalogs), 2)
+        for catalog in catalogs:
+            parse_catalog(catalog, api_version="v1")
+
     def test_runtime_kubernetes_authorization_is_identity_and_scope_specific(self):
         import subprocess
 
