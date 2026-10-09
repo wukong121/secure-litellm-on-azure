@@ -1,14 +1,26 @@
 # LiteLLM 网关 Azure 安全增强方案
 
 > 文档用途：作为安全架构评审和 PPT 制作的内容底稿
-> 适用范围：当前基于 AKS、LiteLLM、Azure OpenAI / Microsoft Foundry、PostgreSQL、ingress-nginx 和 Managed Identity 的网关方案
-> 文档日期：2026-08-17
+> 适用范围：Private AKS、LiteLLM、Azure 模型、托管 PostgreSQL/Redis 与私有源站网关；旧部署仅作历史风险对照
+> 原始评估日期：2026-08-17；现状对齐：2026-10-09
 > 方案原则：保留 LiteLLM 的模型路由、会话亲和、Virtual Key、预算和多端点能力，通过 Azure 原生安全产品建立纵深防御
 > 明确边界：本方案不引入 Azure API Management（APIM）
 
 ## 1. 执行摘要
 
-当前 LiteLLM 网关已经具备一组有价值的安全基础：
+2026-10-09只读 Azure 管理面核查的参考环境为 West US3 新建 dev/test，不是已验收生产环境。AKS 为 private、Running/Succeeded，Azure CNI overlay、Azure RBAC、禁用本地账户、Workload Identity/OIDC 已启用；System/User 池各 2 台 `Standard_D4s_v4`。入口为独立 API/Admin Azure Front Door Premium，经各自 PLS 和隔离的私有 Traefik 回源。两侧 WAF 为 Prevention；Admin 用否定 `SocketAddr IPMatch` 阻断白名单外来源，已配置三个 IPv4 `/32` 和一个 IPv6 `/128` 精确出口，不公开真实地址。
+
+当前默认是**原生 LiteLLM 网关**：私有入口直接转发到 LiteLLM，不经过 Entra 认证代理。用户另行验证了原生 Admin 密码 fallback 登录与 Virtual Key 的 Codex Responses 推理；这不是 Entra 用户 SSO、所有协议或生产验收。模型使用 Workload Identity；PostgreSQL 与 Managed Redis 使用 Entra-only 认证；后端 Key Vault 与证书 Key Vault 分离，ACR/后端私有化，出站经过 Firewall 路由。镜像源固定 LiteLLM `1.104.0`，见[升级验证](litellm-1.104.0-upgrade-validation-2026-10-07.md)。
+
+Entra 企业准入、MFA/PIM、灾备/容量、Guardrail/SOC 等生产控制仍是待批准和验证的门禁。当前没有 APIM、App Service 或单一共享认证代理运行路径。以下保留的风险与生产设计可复用于其他区域；部署、迁移和证据以[部署指南](customer-deployment-workflows-zh.md)及[迁移指南](customer-migration-guide-zh.md)为准，不将模板或阶段编号等同于验收。
+
+补充管理核查：PostgreSQL 16 为 Ready，`activeDirectoryAuth=Enabled`、`passwordAuth=Disabled`、`publicNetworkAccess=Disabled`。Redis 为 `Microsoft.Cache/redisEnterprise`、`Balanced_B0`，默认数据库 `accessKeysAuthentication=Disabled`、`clientProtocol=Encrypted`、端口 `10000`；集群 `publicNetworkAccess` 返回 null，**不能据此判断公网启用或禁用**。ACR Premium 的 `adminUserEnabled=false`、`publicNetworkAccess=Disabled`；后端和证书 Key Vault 均启用 RBAC、禁用公共网络访问。上述配置不是令牌续期、数据恢复或生产负载验收。
+
+产品边界：**不采购 LiteLLM Enterprise**，不依赖其原生 JWT/RBAC 或付费审计连接器。若后续批准企业准入，使用客户自有认证代理实现，并单独验证身份、协议与负向权限；它不是当前原生网关的必经跳点。
+
+当前两侧 Front Door 自定义域均为 Approved/Succeeded，使用 ManagedCertificate/TLS12；两条 route 为 Enabled、HttpsOnly 并启用 HTTPS redirect，`linkToDefaultDomain=Disabled`。API 只匹配六条固定路径：`/chat/completions`、`/v1/chat/completions`、`/responses`、`/v1/responses`、`/embeddings`、`/v1/embeddings`；不开放 `/v1/models` 或通配 `/v1/*`。Admin route 为 `/*`，仍受独立 WAF/来源白名单和内层登录约束。这些管理面状态不代替每条路由的真实客户端和旁路负向测试。
+
+历史方案已经具备一组有价值的安全基础：
 
 - 客户端通过 LiteLLM 访问模型，不直接获得 Azure OpenAI / Foundry 凭据；
 - LiteLLM 到 Azure OpenAI 使用 Managed Identity 和资源级 RBAC；
@@ -16,7 +28,7 @@
 - 支持跨资源路由、失败重试、会话亲和和统一日志入口；
 - 真实的本地配置与密钥文件不提交到 Git。
 
-但从企业生产安全基线看，当前实现仍更接近 PoC：公网入口直接到 ingress-nginx，缺少 WAF 和来源限制；Managed Identity 挂载在整个 AKS 节点 VMSS 上，身份边界不是 Pod 级；Master Key、数据库密码和连接串写入 Kubernetes Secret；PostgreSQL 为集群内单副本且未启用 TLS；AKS 工作负载缺少 NetworkPolicy、Pod 安全上下文、镜像摘要锁定、准入策略和完整的威胁检测；Prompt、Response 和 Spend Logs 尚未形成明确的数据分类、脱敏、留存和 SOC 响应闭环。
+2026-08-17 的 PoC 风险评估包括：公网 ingress-nginx 无 WAF；VMSS 节点级共享身份；静态数据库密码和连接串进入 Secret；集群内单副本 PostgreSQL 无 TLS；工作负载与供应链缺少治理。它们解释改造动机，**不再描述当前 West US3 参考环境**。Prompt、Response 与 Spend Logs 的批准范围、访问权限、留存和 SOC 闭环仍须独立验收。
 
 建议采用六层纵深防御：
 
@@ -33,7 +45,7 @@
 
 ### 2.1 目标
 
-1. 将公网攻击面从 AKS ingress 收敛到受 WAF 保护的单一入口。
+1. 将公网攻击面收敛到分别受 WAF 保护的 API/Admin 边缘入口，禁止公网源站旁路。
 2. 实现客户端、管理员、LiteLLM Pod 和 Azure 模型端点之间的零信任身份链路。
 3. 消除节点级共享身份、静态上游 API Key 和明文数据库连接。
 4. 防止 Prompt Injection、敏感数据外泄、凭据泄漏、越权模型访问和异常自动化流量。
@@ -49,9 +61,9 @@
 - 不默认记录所有 Prompt 和 Response 原文。完整内容日志应按业务、数据分类和审批结果选择性启用。
 - 不以 WAF 替代身份认证，也不以 Private Link 替代应用层授权。
 
-## 3. 当前方案安全基线
+## 3. 历史 PoC 安全基线（2026-08-17）
 
-以下判断以仓库中的 `LiteLLM/deploy_mi_aks_litellm.py`、LiteLLM 配置和运维文档为准。实际生产环境如已单独加固，应以现场核查结果更新。
+以下判断针对旧 `LiteLLM/deploy_mi_aks_litellm.py` 路径，不是当前私有网关差距清单。R01-R15 保留为风险追踪编号；当前环境事实见第 1 节，生产关闭项仍须提供对应证据。
 
 ### 3.1 已具备的控制
 
@@ -66,9 +78,9 @@
 | 流量治理 | 重试、冷却、会话亲和、多端点路由 | 降低故障和配额压力造成的业务中断 |
 | 基础资源限制 | PostgreSQL 容器设置 CPU/内存 request 与 limit | 降低单容器异常占用全部节点资源的风险 |
 
-### 3.2 当前主要缺口
+### 3.2 历史主要缺口
 
-| 编号 | 风险点 | 仓库中的当前表现 | 可能影响 | 风险等级 |
+| 编号 | 风险点 | 旧路径表现 | 可能影响 | 历史风险等级 |
 | --- | --- | --- | --- | --- |
 | R01 | 公网入口缺少边缘防护 | ingress-nginx 的公网 LoadBalancer 直接接受流量；非域名模式直接暴露 4000 端口 | 扫描、DDoS、Bot、暴力枚举、恶意大请求、已知 Web 攻击 | 严重 |
 | R02 | 管理面与数据面共用入口 | `/ui`、管理 API 和推理 API 使用同一 Host 与 Master Key | Master Key 泄漏后获得高权限；管理接口被公网探测 | 严重 |
@@ -101,13 +113,13 @@
 ### 4.3 默认私有、显式开放
 
 - AKS API Server、ACR、Key Vault、PostgreSQL 和 Foundry / Azure OpenAI 默认通过私网访问。
-- 公网只暴露 WAF 入口，不直接暴露 AKS LoadBalancer、NodePort、数据库或管理 UI。
+- 公网只暴露独立的 WAF 边缘入口，不直接暴露 AKS LoadBalancer、NodePort 或数据库；Admin 边缘先限制批准来源，再执行内层登录。
 - 出站访问采用 allowlist，不允许工作负载自由访问互联网。
 
 ### 4.4 管理面与数据面分离
 
 - 推理 API 和 Admin UI 使用不同域名、路由、身份策略和网络入口。
-- 管理面只允许管理员通过私网、PIM 和强 MFA 访问。
+- 当前 Admin 经来源白名单和私有源站访问；生产企业身份目标仍要求批准设备、PIM 和强 MFA，尚未由原生密码登录证明。
 - Master Key 仅用于受控的 Break Glass 或自动化管理，不作为普通推理凭据。
 
 ### 4.5 数据最小化
@@ -124,40 +136,42 @@
 
 ### 5.1 推荐架构图
 
+实线为当前原生路径，虚线为待验证的生产增强；Azure CNI overlay 不自动证明 Cilium 或全部 NetworkPolicy 验收。
+
 ```mermaid
 flowchart TB
-    U[开发者 / 应用 / Agent] --> EID[Microsoft Entra ID<br/>用户、服务主体、条件访问]
-    U --> AFD[Azure Front Door Premium<br/>WAF、Bot、防 DDoS、速率限制]
-
-    AFD -->|Private Link| PLS[Azure Private Link Service<br/>私有源站连接]
-    PLS --> ILB[AKS Internal Load Balancer<br/>Ingress Controller]
+    U[开发者 / 应用 / Agent] --> AFD[API Front Door Premium<br/>WAF Prevention]
+    ADMIN[批准来源管理员] --> AFDADMIN[Admin Front Door Premium<br/>WAF Prevention / IPv4与IPv6白名单]
+    AFD -->|Private Link| PLS[API PLS / Internal LB]
+    AFDADMIN -->|独立 Private Link| PLSADMIN[Admin PLS / Internal LB]
 
     subgraph AKS[Private AKS Cluster]
-        ILB --> AUTH[客户自有 Entra 认证代理<br/>JWT验证、App Roles、Header反伪造]
-        AUTH --> LLM[LiteLLM Pods<br/>Virtual Key、Team、预算、模型 ACL]
-        LLM --> GUARD[AI 安全 Guardrail<br/>Prompt Shields、PII、内容策略]
-        NP[Azure CNI powered by Cilium<br/>NetworkPolicy] -.隔离.-> LLM
+        PLS --> APIING[隔离 API Traefik]
+        PLSADMIN --> ADMING[隔离 Admin Traefik]
+        APIING --> LLM[原生 LiteLLM<br/>Virtual Key / Team / 预算 / 模型 ACL<br/>Admin 原生密码登录]
+        ADMING --> LLM
+        AUTH[可选 Entra 企业准入<br/>延期 / 待验证] -.替代入口接线.-> LLM
+        LLM -.生产增强.-> GUARD[Prompt Shields / PII / 内容策略]
+        NP[Azure CNI overlay<br/>NetworkPolicy] -.隔离.-> LLM
         WI[AKS Workload Identity] --> LLM
         CSI[Key Vault CSI Driver] --> LLM
     end
 
     LLM -->|Private Endpoint + Entra Token| AOAI[Azure OpenAI / Microsoft Foundry<br/>禁用公网、禁用 Local Auth]
-    LLM -->|TLS + Private Endpoint| PG[Azure Database for PostgreSQL<br/>Flexible Server HA]
-    LLM -->|Private Endpoint| REDIS[Azure Managed Redis<br/>共享限流与路由状态]
-    LLM -->|受控出站| FW[Azure Firewall Premium<br/>FQDN allowlist、威胁情报]
+    LLM -->|TLS / 私网 / Entra-only| PG[PostgreSQL Flexible Server<br/>生产 HA / PITR 待验收]
+    LLM -->|私网 / Entra-only| REDIS[Azure Managed Redis<br/>共享限流与路由状态]
+    LLM -->|受控出站路由| FW[Azure Firewall<br/>生产策略待验收]
 
-    KV[Azure Key Vault Premium<br/>Secret、证书、CMK] --> CSI
+    KV[私有后端 Key Vault<br/>应用 Secret] --> CSI
+    CERTKV[独立证书 Key Vault] --> APIING
+    CERTKV --> ADMING
     ACR[Azure Container Registry Premium<br/>私有镜像、摘要锁定] --> AKS
 
-    LLM --> OTEL[OpenTelemetry / Azure Monitor]
-    AKS --> MON[Container Insights<br/>Managed Prometheus]
-    AOAI --> LA[Log Analytics Workspace]
-    PG --> LA
-    KV --> LA
-    AFD --> LA
-    MON --> LA
-    LA --> SENT[Microsoft Sentinel<br/>检测、调查、SOAR]
-    DEF[Microsoft Defender for Cloud<br/>CSPM、Containers、Servers、Databases] --> SENT
+    LLM -.按需接线.-> OTEL[OpenTelemetry / Azure Monitor]
+    AKS -.生产观测目标.-> MON[Container Insights / Managed Prometheus]
+    MON -.待验收.-> LA[Log Analytics Workspace]
+    LA -.待验收.-> SENT[Microsoft Sentinel<br/>检测、调查、SOAR]
+    DEF[Microsoft Defender for Cloud] -.待验收.-> SENT
     PUR[Microsoft Purview<br/>分类、DLP、留存与审计] -.治理.-> LA
 ```
 
@@ -171,6 +185,17 @@ flowchart TB
 推荐默认采用互联网访问模式，但必须确保 Front Door 到 AKS 源站使用 Private Link，AKS ingress 不保留可从互联网直接访问的公网 IP。若客户要求仅内网访问，则采用内部 Application Gateway WAF v2，不部署公网 Front Door。
 
 ### 5.3 请求信任链
+
+当前原生路径：
+
+```text
+API 客户端 vkey -> API Front Door/WAF -> API PLS/私有 Traefik
+  -> LiteLLM 原生 Key / Team / 模型 / 预算校验 -> WI / 私网模型
+管理员 -> Admin Front Door/WAF 来源白名单 -> 独立 PLS/私有 Traefik
+  -> LiteLLM 原生 Admin 密码登录（不是 Entra SSO）
+```
+
+以下是延期的 Entra 企业准入设计，不是当前默认链路：
 
 ```text
 用户/应用身份
@@ -186,14 +211,14 @@ flowchart TB
   -> 全链路写入不含敏感原文的审计元数据
 ```
 
-WAF不能替代身份认证。本方案明确不使用LiteLLM Enterprise原生JWT能力。2026-09-10起在ingress后部署的客户自有Entra认证代理只负责企业准入；API同时要求Authorization中的企业access token与X-LiteLLM-API-Key中的vkey，不允许仅凭Key进入。代理不复制API模型ACL，不映射或保存用户内部Key；实际调用者user归因由已验签的tid/oid生成，不覆盖LiteLLM的Key所有者或Team。客户端伪造的其他身份/路由Header不转发，模型与预算继续由LiteLLM管理。当前不强制企业身份与vkey归属相同，不承诺防止内部借Key或同时泄露两种凭据；网络必须阻止直达后台的旁路。详见[当前认证契约](../auth-proxy/README_ZH.md)。代理代码、镜像、配置和运维责任归客户所有，不引入LiteLLM付费许可证依赖。
+延期的 Entra 模式下，API同时要求Authorization中的企业access token与X-LiteLLM-API-Key中的vkey，不允许仅凭Key进入。代理不复制API模型ACL，不映射或保存用户内部Key；实际调用者user归因由已验签的tid/oid生成，不覆盖LiteLLM的Key所有者或Team。客户端伪造的其他身份/路由Header不转发，模型与预算继续由LiteLLM管理。当前不强制企业身份与vkey归属相同，不承诺防止内部借Key或同时泄露两种凭据；网络必须阻止直达后台的旁路。详见[当前认证契约](../auth-proxy/README_ZH.md)。代理代码、镜像、配置和运维责任归客户所有，不引入LiteLLM付费许可证依赖。
 
 ## 6. 风险点与 Azure 产品映射
 
 | 风险点 | 首选 Azure 产品/能力 | LiteLLM / AKS 配套控制 | 预期效果 | 优先级 |
 | --- | --- | --- | --- | --- |
 | 公网扫描、DDoS、Bot、恶意请求 | Azure Front Door Premium、WAF Managed Rules、Bot Protection、Rate Limiting | ingress 仅接受 Front Door 私网来源；限制 body、header、连接数 | 公网攻击在到达 AKS 前被阻断 | P0 |
-| 管理 UI 暴露 | Entra ID、Conditional Access、PIM、Private DNS、Application Gateway WAF | 独立管理域名；只允许私网管理员；禁用普通用户访问管理 API | 管理面爆炸半径大幅缩小 | P0 |
+| 管理 UI 暴露 | 独立 Admin Front Door/WAF；生产 Entra、Conditional Access、PIM | 来源白名单及私有源站；内层登录；禁用普通用户访问管理 API | 管理面爆炸半径大幅缩小 | P0 |
 | Virtual Key 泄漏与共享 | Entra ID App Registration、OAuth 2.0、Managed Identity、Conditional Access | 一人/一应用/一 Key；短周期、模型白名单、预算、并发限制、自动轮换 | 用户和应用可归因，泄漏后快速吊销 | P0 |
 | 节点级 Managed Identity | AKS Workload Identity、Federated Identity Credential | LiteLLM 专用 ServiceAccount；Pod 标签与注解绑定 UAMI | 只有 LiteLLM Pod 能获取上游 Token | P0 |
 | Kubernetes Secret 泄漏 | Azure Key Vault Premium、Secrets Store CSI Driver、Workload Identity | 不通过 `env_from` 注入全部 Secret；按文件挂载或按需读取；轮换 | Secret 不再长期存在于部署环境和 Pod Spec | P0 |
@@ -212,18 +237,18 @@ WAF不能替代身份认证。本方案明确不使用LiteLLM Enterprise原生JW
 | 配置漂移和越权变更 | Azure Policy、Deployment Stacks/IaC、Defender CSPM、Resource Graph、Activity Log | GitOps、双人审批、UI 变更审计；生产配置单一事实源 | 防止未审核的网络、镜像和模型配置进入生产 | P2 |
 | 备份被删除或勒索 | Azure Backup、PostgreSQL PITR/Geo Backup、Immutable Blob、Resource Lock | 定期恢复演练；备份身份与生产身份分离 | 遭破坏后仍可恢复控制面和审计证据 | P2 |
 
-## 7. 分层安全设计
+## 7. 分层安全设计（生产目标，不等同于已部署控制）
 
 ### 7.1 边缘、DDoS 与 WAF
 
-#### 当前问题
+#### 历史问题（2026-08-17）
 
-当前 ingress-nginx 的 LoadBalancer 公网 IP 是源站入口，任何互联网客户端都可以直接到达 AKS。TLS 只解决传输机密性，不解决 DDoS、Bot、攻击特征、来源限制和速率滥用。
+旧 ingress-nginx 的 LoadBalancer 公网 IP 是源站入口，任何互联网客户端都可以直接到达 AKS。TLS 只解决传输机密性，不解决 DDoS、Bot、攻击特征、来源限制和速率滥用。
 
 #### 推荐设计
 
 1. 在公网最前方部署 Azure Front Door Premium。
-2. 启用 WAF Prevention 模式，先在 Detection 模式观察误报，再逐步切换。
+2. 当前 API/Admin 已采用 WAF Prevention；新环境 API 可先 Detection 回归再切换，Admin 从创建起固定 Prevention，并以否定 SocketAddr IPMatch 阻断批准 IPv4/IPv6 来源之外的请求。
 3. 启用 Microsoft Managed Default Rule Set、Bot Manager 和自定义 Rate Limit。
 4. 使用 Private Link Service 将 Front Door 私有连接到 AKS Internal Load Balancer。
 5. 删除或禁止访问原 ingress 公网 IP，防止绕过 Front Door。
@@ -273,7 +298,7 @@ Virtual Key 可以继续作为 LiteLLM 内部计量和模型 ACL 的载体，但
 
 ### 7.3 Pod 级身份与 Key Vault
 
-当前将 UAMI 附加到 VMSS 的方式应迁移为 AKS Workload Identity：
+旧路径将 UAMI 附加到 VMSS；当前私有网关已启用 AKS Workload Identity。生产仍须验证 Pod 身份最小权限与令牌续期：
 
 ```text
 LiteLLM Kubernetes ServiceAccount
@@ -561,15 +586,15 @@ Defender for Cloud Regulatory Compliance Dashboard 用于持续展示控制符�
 
 | 项目 | 推理数据面 | 管理面 |
 | --- | --- | --- |
-| 域名 | `llm-api.example.com` | `llm-admin.internal.example.com` |
-| 网络入口 | Front Door WAF 或内网 App Gateway | 仅内网 App Gateway / Private DNS |
-| 身份 | Entra 用户/应用 + LiteLLM ACL | Entra 管理员组 + MFA + PIM |
-| 凭据 | 短周期用户/应用凭据 | 不分发 Master Key；受控自动化或 Break Glass |
-| API | `/v1/*`、批准的模型接口 | `/ui`、`/key/*`、`/team/*`、配置管理接口 |
+| 域名 | 独立 API 域名 | 独立 Admin 域名；公网边缘可解析、源站私有 |
+| 网络入口 | API Front Door/WAF + API PLS/私有 Traefik | 独立 Admin Front Door/WAF + Admin PLS/私有 Traefik |
+| 身份 | 当前原生 vkey + LiteLLM ACL；Entra 企业准入延期 | 当前原生密码登录；企业 Entra/MFA/PIM 门禁延期 |
+| 凭据 | 每用户/应用独立 vkey、预算与轮换；不把 Key 所有者等同实际人员 | 来源白名单后仍需受控管理员登录；Master Key 不作为普通推理凭据 |
+| API | 六条固定 Chat/Responses/Embeddings 路径，不含 `/v1/models` 或 `/v1/*` | 边缘 `/*`；原生 UI/管理接口仍由后端授权，不等于全部路径匿名可达 |
 | 日志 | 调用和安全策略元数据 | 全部管理操作、前后差异和审批单号 |
-| WAF | 流式/WebSocket 优化规则 | 更严格的来源、频率和请求方法限制 |
+| WAF | 当前 Prevention；所需流式/协议逐项回归 | 当前 Prevention；三个 IPv4 `/32` 与一个 IPv6 `/128` 来源白名单 |
 
-如果 LiteLLM 无法原生将管理路径绑定到独立 Listener，应在 ingress 层按 Path 拆分，并确保管理路径只能从内部入口路由。公网 Front Door 对管理路径返回 403，而不是仅依靠页面隐藏。
+LiteLLM 管理与推理可共用后端，但必须在分离的 API/Admin 私有 ingress 层按 Host/Path 隔离。API Front Door 拒绝管理路径；独立 Admin Front Door 先执行来源白名单，再由后端校验登录，不依靠页面隐藏。企业身份生产增强仍须另验。
 
 ## 9. 多租户、模型池与滥用隔离
 
@@ -648,7 +673,7 @@ Defender for Cloud Regulatory Compliance Dashboard 用于持续展示控制符�
 
 ### 11.2 成熟安全增强项
 
-- 客户自有Entra认证代理在边界验证JWT，后端Virtual Key不暴露给客户端；
+- 延期企业模式由客户自有认证代理在边界验证企业 JWT，客户端自带 vkey 由 LiteLLM 执行模型和预算权限，不复制模型 ACL；
 - Prompt Shields、PII 和 Secret 内联检测；
 - Purview 标签驱动的 Prompt/日志策略；
 - 镜像签名、SBOM 和 Admission 验证；
@@ -684,7 +709,7 @@ Defender for Cloud Regulatory Compliance Dashboard 用于持续展示控制符�
 - [ ] SSE 流式响应不中断、不被错误缓存。
 - [ ] 大 Prompt、图片和文件上传符合批准上限。
 - [ ] Rate Limit 不会误伤共享企业 NAT 后的正常用户。
-- [ ] 管理路径从公网入口始终返回 403。
+- [ ] API 边缘拒绝管理路径；Admin 边缘拒绝未批准 IPv4/IPv6 来源，批准来源仍需内层登录；源站旁路失败。
 
 ### 12.4 AI 与数据安全
 
@@ -766,7 +791,7 @@ Defender for Cloud Regulatory Compliance Dashboard 用于持续展示控制符�
 2. **业务背景**：统一模型入口、多端点池化、开发者与 Agent 场景。
 3. **当前架构**：客户端 -> 公网 ingress -> LiteLLM -> 多 Azure OpenAI / Foundry。
 4. **已有安全基础**：MI、RBAC、TLS、Virtual Key、预算与模型 ACL。
-5. **核心结论**：当前仍是 PoC 安全边界，不能让 LiteLLM 单独承担企业安全。
+5. **核心结论**：当前已为新建私有 dev/test 网关，仍不能宣称企业生产就绪，也不能让 LiteLLM 单独承担企业安全。
 6. **Top 8 风险**：公网入口、管理面、共享 Key、节点身份、Secret、数据库、Pod、AI 数据。
 7. **目标原则**：Zero Trust、Private by Default、最小权限、数据最小化、假设泄漏。
 8. **目标安全架构总图**：使用本文 5.1 Mermaid 图。

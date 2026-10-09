@@ -1,0 +1,627 @@
+import copy
+import hashlib
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+import yaml
+
+from local_execution import model_sync
+from scripts.customer_migration import MigrationError, ROOT, fingerprint, stage_fingerprint
+from scripts.model_sync_catalog import account_id, discover, model_list, parse_catalog, reconcile, ROLE
+from scripts.model_sync_infra import assert_what_if, endpoint_state, role_state, infrastructure_plan, execute_infrastructure
+from scripts import model_sync_runtime as runtime
+from tests.test_backend_manifest import backend_customer
+
+
+SUB = "22222222-2222-4222-8222-222222222222"
+OTHER_SUB = "66666666-6666-4666-8666-666666666666"
+TENANT = "11111111-1111-4111-8111-111111111111"
+PRINCIPAL = "44444444-4444-4444-8444-444444444444"
+CLIENT = "33333333-3333-4333-8333-333333333333"
+APPROVERS = [TENANT, SUB]
+
+
+def customer():
+    config = backend_customer()
+    config["parameters"]["platform"]["azureOpenAIConnections"][0].update(
+        subscriptionId=SUB, resourceGroupName="rg-model",
+        accountResourceId=account_id(SUB, "rg-model", "synthetic-model"))
+    config["parameters"]["platform"]["stage4Network"]["privateEndpointSubnetName"] = "snet-pe"
+    return config
+
+
+def catalog(names=("synthetic-chat",), subscriptions=None):
+    entries = {}
+    for i, name in enumerate(names):
+        subscription = (subscriptions or [SUB] * len(names))[i]
+        entries.setdefault(subscription, []).append({"name": name, "resource_group": "rg-model",
+                                                     "models": [{"model_name": "chat", "deployment_name": "existing-chat"}]})
+    return {"schema_version": 1, "subscriptions": [{"subscription_id": key, "resources": resources}
+                                                  for key, resources in entries.items()]}
+
+
+def live_deployment(account, name="existing-chat", model="gpt-4o"):
+    return {"id": account["accountResourceId"] + "/deployments/" + name, "name": name,
+            "properties": {"provisioningState": "Succeeded", "model": {"format": "OpenAI", "name": model, "version": "2024-08-06"},
+                           "versionUpgradeOption": "NoAutoUpgrade"}, "sku": {"name": "GlobalStandard", "capacity": 10}}
+
+
+class CatalogAzure:
+    def __init__(self, accounts):
+        self.accounts = accounts
+        self.tenant = TENANT
+        self.missing = set()
+        self.poison = False
+        self.state = "Succeeded"
+        self.version = "2024-08-06"
+        self.hostname = None
+        self.hostnames = {}
+        self.kind = "OpenAI"
+        self.missing_deployments = set()
+
+    def run(self, arguments):
+        if arguments[:2] == ["account", "show"]:
+            return {"id": arguments[arguments.index("--subscription") + 1], "tenantId": self.tenant}
+        if arguments[:2] == ["resource", "show"]:
+            account = next(a for a in self.accounts if a["accountResourceId"] == arguments[arguments.index("--ids") + 1])
+            hostname = self.hostnames.get(account["accountName"], self.hostname or account["accountName"])
+            endpoint = "https://poison.invalid" if self.poison else "https://" + hostname + ".openai.azure.com/"
+            return {"id": account["accountResourceId"], "name": account["accountName"], "kind": self.kind,
+                    "properties": {"provisioningState": "Succeeded", "customSubDomainName": hostname,
+                                   "endpoint": endpoint if self.kind == "OpenAI" else "https://" + hostname + ".services.ai.azure.com/",
+                                   "endpoints": {"OpenAI": endpoint}}}
+        account = next(a for a in self.accounts if a["accountResourceId"] in arguments[-1])
+        deployments = []
+        for model in account["models"]:
+            if (account["accountName"], model["deploymentName"]) in self.missing_deployments:
+                continue
+            family = "text-embedding-3-large" if "embed" in model["deploymentName"] else (
+                "gpt-4o-mini" if "mini" in model["deploymentName"] else "gpt-4o")
+            deployment = live_deployment(account, model["deploymentName"], family)
+            deployment["properties"]["provisioningState"] = self.state
+            deployment["properties"]["model"]["version"] = self.version
+            if deployment["name"] not in {item["name"] for item in deployments}:
+                deployments.append(deployment)
+        return {"value": [] if account["accountName"] in self.missing else deployments}
+
+
+def runtime_documents(config):
+    runtime_yaml = {"model_list": model_list(config), "general_settings": {"store_model_in_db": False,
+                                                                        "master_key": "os.environ/LITELLM_MASTER_KEY"},
+                    "litellm_settings": {"enable_azure_ad_token_refresh": True},
+                    "router_settings": {"model_group_affinity_config": {"coding": ["region"]}},
+                    "non_model": {"audit": True}}
+    deployment = {"metadata": {"uid": "deployment-uid", "resourceVersion": "42"},
+                  "spec": {"replicas": 2, "selector": {"matchLabels": {"app": "litellm"}},
+                           "template": {"metadata": {"labels": {"azure.workload.identity/use": "true"}},
+                                        "spec": {"serviceAccountName": "litellm",
+                                                 "containers": [{"name": "litellm", "image": config["application"]["backendImage"],
+                                                                 "args": ["--config", "/app/config/config.yaml"],
+                                                                 "env": [{"name": "STORE_MODEL_IN_DB", "value": "false"}],
+                                                                 "volumeMounts": [{"name": "config", "mountPath": "/app/config/config.yaml",
+                                                                                  "subPath": "config.yaml", "readOnly": True}]}],
+                                                 "volumes": [{"name": "config", "configMap": {"name": "old-config"}},
+                                                             {"name": "csi", "csi": {"driver": "secrets-store.csi.k8s.io"}}]}}}}
+    service = {"metadata": {"uid": "sa-uid", "annotations": {"azure.workload.identity/client-id": CLIENT}}}
+    cm = {"metadata": {"uid": "cm-uid", "name": "old-config"}, "data": {"config.yaml": yaml.safe_dump(runtime_yaml)}}
+    return deployment, service, cm
+
+
+def current_baseline(config):
+    deployment, service, cm = runtime_documents(config)
+    with patch.object(runtime, "command", side_effect=[json.dumps(deployment), json.dumps(service), json.dumps(cm)]):
+        return runtime.baseline(config, {"properties": {"clientId": CLIENT}}, ["kubectl"])
+
+
+class ModelSyncCatalogTests(unittest.TestCase):
+    def test_multiple_subscriptions_balance_same_group_keep_coding(self):
+        config = customer()
+        accounts = parse_catalog(catalog(("synthetic-chat", "synthetic-west"), [SUB, OTHER_SUB]), "2024-10-21")
+        observations, matches = discover(config, accounts, CatalogAzure(accounts))
+        desired = reconcile(config, matches)
+        self.assertEqual(desired["application"]["models"][0], config["application"]["models"][0])
+        self.assertEqual([m["modelGroup"] for m in desired["application"]["models"]], ["coding", "chat", "chat"])
+        self.assertEqual({m["baseModel"] for m in desired["application"]["models"][1:]}, {"azure/gpt-4o"})
+        self.assertEqual(len(observations), 2)
+        self.assertEqual(reconcile(desired, matches), desired)
+        self.assertTrue(all(stage_fingerprint(config, s) != stage_fingerprint(desired, s) for s in range(4, 10)))
+
+    def test_missing_specific_account_fails_even_if_target_exists_elsewhere(self):
+        accounts = parse_catalog(catalog(("synthetic-chat", "synthetic-unused")), "v1")
+        azure = CatalogAzure(accounts)
+        azure.missing = {"synthetic-unused"}
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:
+            azure.directory = Path(destination)
+            with self.assertRaisesRegex(MigrationError, "explicitly mapped resource"):
+                discover(customer(), accounts, azure)
+            observations = json.loads((azure.directory / "discovery.json").read_text())
+            self.assertEqual(observations[1]["status"], "missing-explicit-deployment")
+            self.assertEqual(observations[1]["missingDeployments"], ["existing-chat"])
+
+    def test_missing_target_is_explicit_failure(self):
+        accounts = parse_catalog(catalog(), "v1")
+        azure = CatalogAzure(accounts)
+        azure.missing = {"synthetic-chat"}
+        with self.assertRaisesRegex(MigrationError, "explicitly mapped resource"):
+            discover(customer(), accounts, azure)
+
+    def test_live_endpoint_tenant_state_metadata_rejected(self):
+        accounts = parse_catalog(catalog(), "v1")
+        for field, value in (("tenant", OTHER_SUB), ("poison", True), ("state", "Creating"), ("version", "")):
+            azure = CatalogAzure(accounts)
+            setattr(azure, field, value)
+            with self.subTest(field=field), self.assertRaises(MigrationError):
+                discover(customer(), accounts, azure)
+
+    def test_poisoned_catalog_and_unknown_shapes_rejected(self):
+        for endpoint in ("http://synthetic-chat.openai.azure.com", "https://synthetic-chat.openai.azure.com.evil/",
+                         "https://synthetic-chat.openai.azure.com/path", "https://user@synthetic-chat.openai.azure.com/",
+                         "https://synthetic-chat.services.ai.azure.com/"):
+            doc = catalog()
+            doc["subscriptions"][0]["resources"][0]["endpoint"] = endpoint
+            with self.subTest(endpoint=endpoint), self.assertRaises(MigrationError):
+                parse_catalog(doc, "v1")
+        for mutate in (lambda d: d.update(api_key="not-allowed"),
+                       lambda d: d["subscriptions"][0]["resources"][0].update(key="not-allowed"),
+                       lambda d: d["subscriptions"][0]["resources"][0]["models"][0].update(baseModel="fabricated"),
+                       lambda d: d["subscriptions"][0]["resources"][0]["models"].append(d["subscriptions"][0]["resources"][0]["models"][0]),
+                       lambda d: d["subscriptions"][0]["resources"].append(d["subscriptions"][0]["resources"][0])):
+            doc = catalog()
+            mutate(doc)
+            with self.assertRaises(MigrationError):
+                parse_catalog(doc, "v1")
+
+    def test_exact_mapping_update_keeps_identity_and_unlisted_backends_in_same_group(self):
+        accounts = parse_catalog(catalog(), "v1")
+        _, matches = discover(customer(), accounts, CatalogAzure(accounts))
+        desired = reconcile(customer(), matches)
+        mapping = desired["application"]["models"][1]
+        mapping["apiVersion"] = "old"
+        mapping["baseModel"] = "azure/old-family"
+        identifier = mapping["id"]
+        desired["application"]["models"].append({**desired["application"]["models"][0], "modelGroup": "chat", "id": "old-chat"})
+        updated = reconcile(desired, matches)
+        self.assertEqual(len(updated["application"]["models"]), 3)
+        self.assertEqual(updated["application"]["models"][2]["id"], "old-chat")
+        self.assertEqual(updated["application"]["models"][1]["id"], identifier)
+        self.assertEqual(updated["application"]["models"][1]["apiVersion"], "v1")
+
+    def test_duplicate_existing_alias_id_identity_rejected(self):
+        for duplicate in ("alias", "id", "mapping"):
+            config = customer()
+            if duplicate == "alias":
+                config["parameters"]["platform"]["azureOpenAIConnections"].append(
+                    copy.deepcopy(config["parameters"]["platform"]["azureOpenAIConnections"][0]))
+            else:
+                item = copy.deepcopy(config["application"]["models"][0])
+                if duplicate == "mapping":
+                    item["id"] = "another-id"
+                config["application"]["models"].append(item)
+            with self.subTest(duplicate=duplicate), self.assertRaises(MigrationError):
+                reconcile(config, [])
+
+
+class ModelSyncInfrastructureTests(unittest.TestCase):
+    def endpoint_fixture(self):
+        group = "/subscriptions/" + SUB + "/resourceGroups/rg-secure"
+        account = parse_catalog(catalog(), "v1")[0]
+        context = {"subnetId": group + "/providers/Microsoft.Network/virtualNetworks/target/subnets/pe",
+                   "zoneId": group + "/providers/Microsoft.Network/privateDnsZones/privatelink.openai.azure.com",
+                   "prefixes": ["10.30.8.0/24"]}
+        pe = {"id": group + "/providers/Microsoft.Network/privateEndpoints/existing-customer-pe",
+              "name": "existing-customer-pe", "properties": {"provisioningState": "Succeeded",
+                  "subnet": {"id": context["subnetId"]},
+                  "privateLinkServiceConnections": [{"properties": {"privateLinkServiceId": account["accountResourceId"],
+                      "groupIds": ["account"], "privateLinkServiceConnectionState": {"status": "Approved"}}}],
+                  "networkInterfaces": [{"id": group + "/providers/Microsoft.Network/networkInterfaces/existing-nic"}]}}
+        context["endpoints"] = [pe]
+        group_dns = {"id": pe["id"] + "/privateDnsZoneGroups/default", "properties": {"provisioningState": "Succeeded",
+                     "privateDnsZoneConfigs": [{"properties": {"privateDnsZoneId": context["zoneId"]}}]}}
+        record = {"name": account["accountName"], "properties": {"aRecords": [{"ipv4Address": "10.30.8.5"}]}}
+        def run(args):
+            if args[:2] == ["resource", "show"]:
+                return {"properties": {"ipConfigurations": [{"properties": {"privateIPAddress": "10.30.8.5"}}]}}
+            return {"value": [group_dns] if "privateDnsZoneGroups" in args[-1] else [record]}
+        return account, context, pe, Mock(run=Mock(side_effect=run))
+
+    def test_approved_existing_customer_pe_reused_exactly(self):
+        account, context, _, azure = self.endpoint_fixture()
+        state = endpoint_state(account, "new-alias", context, azure)
+        self.assertFalse(state["createEndpoint"])
+        self.assertFalse(state["createDnsBinding"])
+        self.assertEqual(state["endpointName"], "existing-customer-pe")
+        self.assertEqual(state["ips"], ["10.30.8.5"])
+
+    def test_pending_foreign_private_endpoint_blocks(self):
+        account, context, pe, azure = self.endpoint_fixture()
+        pe["properties"]["privateLinkServiceConnections"][0]["properties"]["privateLinkServiceConnectionState"]["status"] = "Pending"
+        with self.assertRaisesRegex(MigrationError, "pending requests"):
+            endpoint_state(account, "alias", context, azure)
+        azure.run.assert_not_called()
+
+    def test_missing_dns_binding_planned_but_conflicting_binding_rejected(self):
+        account, context, _, azure = self.endpoint_fixture()
+        previous = azure.run.side_effect
+        azure.run.side_effect = lambda args: {"value": []} if args[0] == "rest" else previous(args)
+        self.assertTrue(endpoint_state(account, "alias", context, azure)["createDnsBinding"])
+        azure.run.side_effect = lambda args: {"value": [{"properties": {"provisioningState": "Succeeded", "privateDnsZoneConfigs": []}}]} if args[0] == "rest" else previous(args)
+        with self.assertRaises(MigrationError):
+            endpoint_state(account, "alias", context, azure)
+
+    def test_missing_pe_has_exact_target_scope(self):
+        account, context, _, azure = self.endpoint_fixture()
+        context["endpoints"] = []
+        state = endpoint_state(account, "alias", context, azure)
+        self.assertTrue(state["createEndpoint"])
+        self.assertTrue(state["endpointId"].endswith("/pe-alias-account"))
+        azure.run.assert_not_called()
+
+    def test_matching_existing_role_reused_and_conditional_role_rejected(self):
+        account = parse_catalog(catalog(), "v1")[0]
+        assignment = {"id": account["accountResourceId"] + "/providers/Microsoft.Authorization/roleAssignments/customer-existing",
+                      "scope": account["accountResourceId"], "principalId": PRINCIPAL,
+                      "principalType": "ServicePrincipal", "roleDefinitionId": "/subscriptions/" + SUB + "/providers/Microsoft.Authorization/roleDefinitions/" + ROLE}
+        azure = Mock(run=Mock(return_value=[assignment]))
+        self.assertFalse(role_state(account, {"properties": {"principalId": PRINCIPAL}}, "", azure)["createRole"])
+        assignment["condition"] = "restricted"
+        with self.assertRaisesRegex(MigrationError, "conditions"):
+            role_state(account, {"properties": {"principalId": PRINCIPAL}}, "", azure)
+
+    def test_nested_full_payload_what_if_strict_allowlist(self):
+        wrapper, role = "/scope/deployments/role", "/scope/roleAssignments/approved"
+        document = {"status": "Succeeded", "changes": [{"resourceId": wrapper, "changeType": "Modify",
+                     "after": {"properties": {"mode": "Incremental"}},
+                     "resourceChanges": [{"resourceId": role, "changeType": "Create", "after": {"properties": {"principalId": PRINCIPAL}}}]}]}
+        allowed = {wrapper.lower(): "deployment", role.lower(): "required"}
+        assert_what_if(document, allowed)
+        for kind in ("Delete", "Modify", "Unsupported"):
+            bad = copy.deepcopy(document)
+            bad["changes"][0]["resourceChanges"][0]["changeType"] = kind
+            with self.assertRaises(MigrationError):
+                assert_what_if(bad, allowed)
+        bad = copy.deepcopy(document)
+        bad["changes"][0]["resourceChanges"][0]["resourceId"] = "/scope/accounts/unapproved"
+        with self.assertRaisesRegex(MigrationError, "allowlist"):
+            assert_what_if(bad, allowed)
+        with self.assertRaisesRegex(MigrationError, "expand"):
+            assert_what_if({"status": "Succeeded", "changes": document["changes"][:1][0:0]}, allowed)
+
+    def test_failed_what_if_cannot_mask_missing_rights(self):
+        with self.assertRaisesRegex(MigrationError, "permissions"):
+            assert_what_if({"status": "Failed", "error": {"code": "AuthorizationFailed"}}, {})
+
+    def test_cross_subscription_focused_plan_exact_resources_and_one_account_once(self):
+        config = customer()
+        accounts = parse_catalog(catalog(("synthetic-cross",), [OTHER_SUB]), "v1")
+        _, matches = discover(config, accounts, CatalogAzure(accounts))
+        desired = reconcile(config, matches)
+        account = accounts[0]
+        group = "/subscriptions/" + SUB + "/resourceGroups/rg-secure"
+        zone = group + "/providers/Microsoft.Network/privateDnsZones/privatelink.openai.azure.com"
+        alias = desired["parameters"]["platform"]["azureOpenAIConnections"][-1]["alias"]
+        endpoint = group + "/providers/Microsoft.Network/privateEndpoints/pe-" + alias + "-account"
+        role = role_state(account, {"properties": {"principalId": PRINCIPAL}}, "", Mock(run=Mock(return_value=[])))
+        context = {"endpoints": [], "links": [], "zoneId": zone,
+                   "linkId": zone + "/virtualNetworkLinks/model-sync-target-vnet"}
+        role_wrapper = "/subscriptions/" + OTHER_SUB + "/resourceGroups/rg-model/providers/Microsoft.Resources/deployments/model-sync-role-" + alias
+        pe_wrapper = group + "/providers/Microsoft.Resources/deployments/model-sync-pe-" + alias
+        what_if = {"status": "Succeeded", "changes": [
+            {"resourceId": pe_wrapper, "changeType": "Create", "resourceChanges": [
+                {"resourceId": endpoint, "changeType": "Create", "after": {"properties": {"subnet": {"id": "/approved/subnet"}}}},
+                {"resourceId": endpoint + "/privateDnsZoneGroups/default", "changeType": "Create"}]},
+            {"resourceId": role_wrapper, "changeType": "Modify", "resourceChanges": [
+                {"resourceId": role["roleId"], "changeType": "Create", "after": {"properties": {"principalId": PRINCIPAL}}}]},
+            {"resourceId": context["linkId"], "changeType": "Create"}]}
+        azure = Mock(run=Mock(return_value=what_if))
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, \
+                patch("scripts.model_sync_infra.network_context", return_value=context), \
+                patch("scripts.model_sync_infra.role_state", return_value=role):
+            plan = infrastructure_plan(config, desired, matches + matches,
+                                       {"id": "/identity", "properties": {"principalId": PRINCIPAL}},
+                                       Path(destination) / "template.json", Path(destination), azure)
+        self.assertEqual(len(plan["accounts"]), 1)
+        self.assertEqual(plan["accounts"][0]["parameters"]["accountSubscriptionId"], OTHER_SUB)
+        self.assertEqual(plan["accounts"][0]["parameters"]["principalId"], PRINCIPAL)
+        self.assertTrue(plan["accounts"][0]["parameters"]["createEndpoint"])
+        self.assertNotIn(account["accountResourceId"].lower(), plan["accounts"][0]["allowedResources"])
+        self.assertIn("--result-format", azure.run.call_args.args[0])
+        self.assertIn("FullResourcePayloads", azure.run.call_args.args[0])
+
+    def test_execute_records_partial_infra_before_pending_pe_blocks_application(self):
+        account = parse_catalog(catalog(), "v1")[0]
+        plan = {"accounts": [{"account": account, "allowedResources": {"approved": "required"},
+                             "parameters": {"accountAlias": "alias", "principalId": PRINCIPAL,
+                                            "principalSourceResourceId": ""}}]}
+        record = {"infrastructureCompleted": []}
+        azure = Mock(run=Mock(return_value={"properties": {"provisioningState": "Succeeded"}}))
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, \
+                patch("scripts.model_sync_infra.network_context", return_value={"links": [True]}), \
+                patch("scripts.model_sync_infra.endpoint_state", side_effect=MigrationError("Pending approval")), \
+                self.assertRaisesRegex(MigrationError, "Pending"):
+            execute_infrastructure(customer(), plan, Path(destination) / "template.json", Path(destination), azure, record)
+            self.fail("Pending PE must stop")
+        self.assertEqual(record["infrastructureAttempted"], ["alias"])
+        self.assertEqual(record["infrastructureCompleted"], ["alias"])
+
+    def test_execute_azure_auth_failure_records_attempt_without_false_completion(self):
+        plan = {"accounts": [{"allowedResources": {"approved": "required"}, "parameters": {"accountAlias": "alias"}}]}
+        record = {"infrastructureCompleted": []}
+        azure = Mock(run=Mock(side_effect=MigrationError("AuthorizationFailed: roleAssignments/write")))
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, self.assertRaisesRegex(MigrationError, "roleAssignments"):
+            execute_infrastructure(customer(), plan, Path(destination) / "template.json", Path(destination), azure, record)
+            self.fail("Rights failure must stop")
+        self.assertEqual(record["infrastructureAttempted"], ["alias"])
+        self.assertEqual(record["infrastructureCompleted"], [])
+
+    def test_failed_arm_receipt_is_not_recorded_as_completed(self):
+        plan = {"accounts": [{"allowedResources": {"approved": "required"}, "parameters": {"accountAlias": "alias"}}]}
+        record = {"infrastructureCompleted": []}
+        azure = Mock(run=Mock(return_value={"properties": {"provisioningState": "Failed"}}))
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, self.assertRaisesRegex(MigrationError, "did not succeed"):
+            execute_infrastructure(customer(), plan, Path(destination) / "template.json", Path(destination), azure, record)
+        self.assertEqual(record["infrastructureReceipts"], {"alias": "Failed"})
+        self.assertEqual(record["infrastructureCompleted"], [])
+
+
+class ModelSyncRuntimeTests(unittest.TestCase):
+    def test_baseline_mapping_drift_and_inline_credentials_fail(self):
+        config = customer()
+        for field in ("mapping", "credentials", "identity"):
+            deployment, service, cm = runtime_documents(config)
+            if field == "mapping":
+                document = yaml.safe_load(cm["data"]["config.yaml"])
+                document["model_list"][0]["litellm_params"]["api_base"] = "https://poison.invalid"
+                cm["data"]["config.yaml"] = yaml.safe_dump(document)
+            elif field == "credentials":
+                document = yaml.safe_load(cm["data"]["config.yaml"])
+                document["general_settings"]["master_key"] = "literal"
+                cm["data"]["config.yaml"] = yaml.safe_dump(document)
+            else:
+                service["metadata"]["annotations"]["azure.workload.identity/client-id"] = OTHER_SUB
+            with patch.object(runtime, "command", side_effect=[json.dumps(deployment), json.dumps(service), json.dumps(cm)]), self.assertRaises(MigrationError):
+                runtime.baseline(config, {"properties": {"clientId": CLIENT}}, ["kubectl"])
+
+    def test_model_only_render_preserves_every_non_model_field(self):
+        config = customer()
+        current = current_baseline(config)
+        accounts = parse_catalog(catalog(), "v1")
+        _, matches = discover(config, accounts, CatalogAzure(accounts))
+        desired = reconcile(config, matches)
+        payload = runtime.render(desired, current)
+        changed = yaml.safe_load(payload["configMap"]["data"]["config.yaml"])
+        self.assertEqual(changed["non_model"], current["runtime"]["non_model"])
+        self.assertEqual(changed["general_settings"], current["runtime"]["general_settings"])
+        self.assertEqual(changed["litellm_settings"], current["runtime"]["litellm_settings"])
+        self.assertEqual(payload["patch"][-1]["path"], "/spec/template/spec/volumes/0/configMap/name")
+        self.assertTrue(payload["configMap"]["immutable"])
+        self.assertTrue(payload["modelChanged"])
+        self.assertFalse(runtime.render(config, current)["modelChanged"])
+
+    def test_noop_does_not_server_apply_or_patch(self):
+        current = current_baseline(customer())
+        payload = runtime.render(customer(), current)
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, patch.object(runtime, "command") as cmd:
+            runtime.dry_run(["kubectl"], payload, Path(destination))
+            cmd.assert_not_called()
+
+    def test_server_dry_run_rejects_unrelated_pod_mutation(self):
+        current = current_baseline(customer())
+        config = customer()
+        config["application"]["models"][0]["apiVersion"] = "2024-10-21"
+        payload = runtime.render(config, current)
+        payload.update(_baselineSpec=current["deployment"]["spec"], _volumeIndex=0)
+        modified = copy.deepcopy(current["deployment"])
+        modified["spec"]["template"]["spec"]["containers"][0]["image"] = "unapproved"
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, patch.object(runtime, "command", side_effect=["{}", json.dumps(modified)]), self.assertRaisesRegex(MigrationError, "more than"):
+            runtime.dry_run(["kubectl"], payload, Path(destination))
+
+    def test_preapply_resource_version_drift_means_no_writes(self):
+        current = current_baseline(customer())
+        config = customer()
+        config["application"]["models"][0]["apiVersion"] = "2024-10-21"
+        payload = runtime.render(config, current)
+        fresh = copy.deepcopy(current["deployment"])
+        fresh["metadata"]["resourceVersion"] = "43"
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, patch.object(runtime, "command", return_value=json.dumps(fresh)) as cmd, self.assertRaisesRegex(MigrationError, "drifted"):
+            runtime.apply(["kubectl"], payload, current, Path(destination), {})
+        self.assertEqual(cmd.call_count, 1)
+
+    def test_network_probe_no_token_no_http_and_tls_verified(self):
+        account = parse_catalog(catalog(), "v1")[0]
+        with patch.object(runtime, "command", return_value="private-dns-tls-ok\n") as cmd:
+            runtime.network_probe(["kubectl"], account, ["10.30.8.5"])
+        args = cmd.call_args.args[1]
+        code = args[args.index("-c", args.index("python")) + 1]
+        self.assertIn("ssl.create_default_context()", code)
+        self.assertNotIn("token", code)
+        self.assertNotIn("requests", code)
+
+    def test_cost_only_rollout_postread_and_each_ready_pod_mount_are_verified_not_inference(self):
+        config = customer()
+        current = current_baseline(config)
+        config["application"]["models"][0]["modelInfo"] = {"input_cost_per_token": 0.000003}
+        payload = runtime.render(config, current)
+        after = copy.deepcopy(current["deployment"])
+        after["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"] = payload["configMap"]["metadata"]["name"]
+        pods = {"items": [{"metadata": {"name": "backend-" + str(i)},
+                           "status": {"conditions": [{"type": "Ready", "status": "True"}]}} for i in range(2)]}
+        content_hash = hashlib.sha256(payload["configMap"]["data"]["config.yaml"].encode()).hexdigest()
+        outputs = [json.dumps(current["deployment"]), "", "", "rollout complete", json.dumps(after),
+                   json.dumps(payload["configMap"]), json.dumps(pods), content_hash, content_hash]
+        record = {}
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, patch.object(runtime, "command", side_effect=outputs) as cmd:
+            runtime.apply(["kubectl"], payload, current, Path(destination), record)
+        self.assertTrue(record["applicationPatched"])
+        self.assertTrue(record["rolloutVerified"])
+        self.assertFalse(record["inferenceVerified"])
+        self.assertEqual(sum(call.args[1][0] == "exec" for call in cmd.call_args_list), 2)
+
+    def test_noop_checks_rollout_and_mount_without_apply_or_patch(self):
+        config = customer()
+        current = current_baseline(config)
+        payload = runtime.render(config, current)
+        pods = {"items": [{"metadata": {"name": "backend-" + str(i)},
+                           "status": {"conditions": [{"type": "Ready", "status": "True"}]}} for i in range(2)]}
+        cm = runtime_documents(config)[2]
+        content_hash = hashlib.sha256(cm["data"]["config.yaml"].encode()).hexdigest()
+        outputs = ["rollout complete", json.dumps(current["deployment"]), json.dumps(cm), json.dumps(pods),
+                   content_hash, content_hash]
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination, patch.object(runtime, "command", side_effect=outputs) as cmd:
+            record = {}
+            runtime.apply(["kubectl"], payload, current, Path(destination), record)
+        self.assertTrue(record["rolloutVerified"])
+        self.assertFalse(record["inferenceVerified"])
+        self.assertFalse(any(call.args[1][0] in {"apply", "patch"} for call in cmd.call_args_list))
+
+    def test_passwords_in_urls_or_redis_fields_are_never_saved(self):
+        for value in ({"redis_password": "literal"}, {"database": "postgresql://user:password@database/db"}):
+            with self.assertRaises(MigrationError):
+                runtime.safe_settings(value)
+
+    def test_identity_federation_must_match_actual_aks_issuer_and_serviceaccount(self):
+        config = customer()
+        group = "/subscriptions/" + SUB + "/resourceGroups/rg-secure"
+        identity_id = group + "/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-litellm-workload-test"
+        identity = {"id": identity_id, "properties": {"tenantId": TENANT, "principalId": PRINCIPAL, "clientId": CLIENT}}
+        aks = {"id": group + "/providers/Microsoft.ContainerService/managedClusters/new-aks",
+               "properties": {"oidcIssuerProfile": {"issuerURL": "https://issuer.invalid/"},
+                              "securityProfile": {"workloadIdentity": {"enabled": True}}}}
+        federation = {"properties": {"issuer": "https://issuer.invalid/", "subject": "system:serviceaccount:litellm:litellm",
+                                     "audiences": ["api://AzureADTokenExchange"]}}
+        azure = Mock(run=Mock(side_effect=[identity, aks, {"value": [federation]}]))
+        self.assertEqual(runtime.identity_context(config, azure)["federation"], federation)
+        federation["properties"]["subject"] = "system:serviceaccount:other:litellm"
+        azure.run.side_effect = [identity, aks, {"value": [federation]}]
+        with self.assertRaisesRegex(MigrationError, "federation"):
+            runtime.identity_context(config, azure)
+
+
+class ModelSyncCliTests(unittest.TestCase):
+    def run_sync(self, destination, operation, approved="", failure=None, catalog_document=None):
+        config = customer()
+        config_path, catalog_path = destination / "customer.json", destination / "catalog.json"
+        document = {**config, "localExecution": {"preserved": True}}
+        config_path.write_text(json.dumps(document))
+        document_catalog = catalog() if catalog_document is None else catalog_document
+        catalog_path.write_text(json.dumps(document_catalog))
+        accounts = parse_catalog(document_catalog, "v1")
+        azure = CatalogAzure(accounts)
+        current = current_baseline(config)
+        identity = {"identity": {"id": "/identity", "properties": {"clientId": CLIENT, "principalId": PRINCIPAL}}}
+        infrastructure = {"context": {}, "accounts": []}
+        def compile_template(path):
+            template = path / "model-sync.template.json"
+            template.write_text("{}")
+            return template
+        def prepare(*args):
+            desired = args[2]
+            payload = runtime.render(desired, current)
+            return current, payload, copy.deepcopy(infrastructure)
+        with patch.object(model_sync, "protected_source"), patch.object(model_sync, "load_config", return_value=(config, {})), \
+                patch.object(model_sync, "operation_root", return_value=destination), \
+                patch.object(model_sync, "authenticate_azure"), patch.object(model_sync, "reviewed_revision", return_value="a" * 40), \
+                patch.object(model_sync, "source_fingerprints", return_value={"source": "fixed"}), \
+                patch.object(model_sync, "AzureCommands", return_value=azure), patch.object(runtime, "identity_context", return_value=identity), \
+                patch.object(runtime, "connect_cluster", return_value=["kubectl"]), \
+                patch.object(model_sync, "compile_template", side_effect=compile_template), \
+                patch.object(model_sync, "prepare", side_effect=prepare), \
+                patch.object(model_sync, "execute_infrastructure", side_effect=failure if failure == "infra" else None) as infra, \
+                patch.object(runtime, "baseline", return_value=current), \
+                patch.object(runtime, "apply", side_effect=MigrationError("rollout failed") if failure == "rollout" else None) as apply, \
+                patch.object(model_sync, "install_report", side_effect=OSError("write failed") if failure == "config" else None) as install:
+            result = model_sync.sync(config_path, catalog_path, "v1", operation, approved, "CHG-real", APPROVERS)
+            return result, infra, apply, install
+
+    def test_plan_no_writes_stdout_result_private_review(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:
+            path = Path(destination)
+            result, infra, apply, install = self.run_sync(path, "plan")
+            self.assertEqual(result["status"], "planned")
+            infra.assert_not_called()
+            apply.assert_not_called()
+            install.assert_not_called()
+            self.assertEqual((path / "model-sync-review.json").stat().st_mode & 0o777, 0o600)
+
+    def test_stale_approval_no_writes(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:
+            path = Path(destination)
+            with patch.object(model_sync, "execute_infrastructure") as writes, self.assertRaisesRegex(MigrationError, "no writes"):
+                self.run_sync(path, "execute", "0" * 64)
+            writes.assert_not_called()
+            self.assertFalse((path / "previous-customer.json").exists())
+
+    def test_changed_pricing_stales_approved_hash_before_any_writes(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:
+            path = Path(destination)
+            planned, _, _, _ = self.run_sync(path, "plan")
+            changed = catalog()
+            changed["subscriptions"][0]["resources"][0]["models"][0]["model_info"] = {
+                "input_cost_per_token": 0.000003, "output_cost_per_token": 0.000004}
+            with self.assertRaisesRegex(MigrationError, "no writes"):
+                self.run_sync(path, "execute", planned["planSha256"], catalog_document=changed)
+            state = json.loads((path / "model-sync-state.json").read_text())
+            self.assertEqual(state["infrastructureCompleted"], [])
+            self.assertFalse(state["applicationPatched"])
+            self.assertFalse(state["configInstalled"])
+            self.assertFalse((path / "previous-customer.json").exists())
+
+    def test_matching_optional_endpoint_input_stales_prior_approval_hash(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:
+            path = Path(destination)
+            planned, _, _, _ = self.run_sync(path, "plan")
+            changed = catalog()
+            changed["subscriptions"][0]["resources"][0]["endpoint"] = "HTTPS://SYNTHETIC-CHAT.OPENAI.AZURE.COM:443/"
+            with self.assertRaisesRegex(MigrationError, "no writes"):
+                self.run_sync(path, "execute", planned["planSha256"], catalog_document=changed)
+            state = json.loads((path / "model-sync-state.json").read_text())
+            self.assertEqual(state["infrastructureCompleted"], [])
+            self.assertFalse(state["applicationPatched"])
+            self.assertFalse(state["configInstalled"])
+            self.assertFalse((path / "previous-customer.json").exists())
+
+    def test_execute_backup_and_preserve_local_settings(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:
+            path = Path(destination)
+            planned, _, _, _ = self.run_sync(path, "plan")
+            completed, infra, apply, install = self.run_sync(path, "execute", planned["planSha256"])
+            self.assertEqual(completed["status"], "completed")
+            self.assertTrue(completed["configInstalled"])
+            infra.assert_called_once()
+            apply.assert_called_once()
+            self.assertEqual(install.call_args.args[0]["localExecution"], {"preserved": True})
+            self.assertTrue((path / "previous-customer.json").exists())
+            self.assertTrue((path / "recovery-rollback-patch.json").exists())
+
+    def test_rollout_and_config_install_failures_persist_recovery_state(self):
+        for failure in ("rollout", "config"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:
+                path = Path(destination)
+                planned, _, _, _ = self.run_sync(path, "plan")
+                with self.assertRaises((MigrationError, OSError)):
+                    self.run_sync(path, "execute", planned["planSha256"], failure=failure)
+                state = json.loads((path / "model-sync-state.json").read_text())
+                self.assertEqual(state["status"], "failed")
+                self.assertFalse(state["configInstalled"])
+                self.assertTrue(state["applicationPatchAttempted"])
+                self.assertIn("independently reviewed", state["recovery"])
+                self.assertTrue((path / "desired-customer.json").exists())
+                self.assertTrue((path / "previous-customer.json").exists())
+
+    def test_actual_approval_policy_not_fabricated(self):
+        config = customer()
+        with self.assertRaises(MigrationError):
+            model_sync.approvals(config, "", APPROVERS)
+        with self.assertRaises(MigrationError):
+            model_sync.approvals(config, "CHG-real", [TENANT, TENANT])
+        config["governance"] = {"approvalMode": "single-operator", "approverObjectIds": [TENANT],
+                                "singleOperatorRiskAccepted": True}
+        self.assertEqual(model_sync.approvals(config, "CHG-real", [TENANT])["approvedBy"], [TENANT])
+        with self.assertRaises(MigrationError):
+            model_sync.approvals(config, "CHG-real", [SUB])
+
+
+if __name__ == "__main__":
+    unittest.main()

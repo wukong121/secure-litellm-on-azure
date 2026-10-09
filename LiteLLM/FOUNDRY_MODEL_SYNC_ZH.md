@@ -1,6 +1,8 @@
-# Foundry 新模型部署同步到 LiteLLM
+# 旧部署脚本参考：Foundry模型更新
 
-本文说明：在 Azure AI Foundry 中为 Azure OpenAI Resource 新增模型 deployment 后，如何把它同步到本项目的 LiteLLM Proxy。
+> **当前同步请只使用[专用模型同步runbook](../docs/litellm-model-sync-runbook-zh.md)。** 下文保留旧`azure-openai.loc.json`/部署脚本的交叉组合与UI模型管理说明，不是当前West US 3 native私有网关的操作步骤。当前LiteLLM `1.104.0`固定源码路径禁用数据库模型存储，由受控配置管理模型；不要启用`STORE_MODEL_IN_DB`、重跑旧脚本或按旧VMSS身份授权方式绕过当前Workload Identity/私网校验。功能存在不代表当前环境已执行或通过模型同步验收。
+
+本文历史说明：在Azure AI Foundry中为Azure OpenAI Resource新增deployment后，如何更新旧脚本部署的LiteLLM Proxy；全文“当前脚本/配置”均指该旧实现，不指当前客户网关。
 
 ## 1. 先确认你部署的类型
 

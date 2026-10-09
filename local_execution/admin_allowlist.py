@@ -6,6 +6,7 @@ import ipaddress
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 from local_execution.release_report import generate_report, install_report, report_path
 from local_execution.runner import (
@@ -15,6 +16,10 @@ from scripts.customer_migration import ROOT, MigrationError, admin_source_cidrs,
 from scripts.edge_binding import bind_edge
 from scripts.migration_deploy import AzureCommands, deploy_component
 from scripts.workflow_diagnostics import diagnostic_exit
+
+
+def progress(message):
+    print(f"Admin allowlist: {message}", file=sys.stderr, flush=True)
 
 
 def desired_configuration(config, additions):
@@ -34,6 +39,7 @@ def desired_configuration(config, additions):
 
 def refresh_binding(config, revision, directory, azure):
     directory.mkdir(mode=0o700)
+    progress("Checking existing ingress bindings; no route or Pod template changes are allowed.")
     preview = bind_edge(config, "plan", revision, directory, "", azure=azure)
     document = json.loads((directory / "runtime-review.json").read_text())
     require(document.get("bindingMode") == "native-private-ingress", "Native binding required")
@@ -42,6 +48,7 @@ def refresh_binding(config, revision, directory, azure):
         require(state["currentRouteConfigSha256"] == state["desiredRouteConfigSha256"]
                 and state["currentPodTemplateSha256"] == state["desiredPodTemplateSha256"],
                 "Allowlist receipt refresh must not change live ingress bindings")
+    progress("Verifying API/Admin ingress rollouts and saving the binding receipt; each rollout may wait up to 15 minutes.")
     return bind_edge(config, "execute", revision, directory, preview["planSha256"], azure=azure)
 
 
@@ -59,6 +66,7 @@ def update(config_path, additions, ticket, approvers, operation, approved):
     revision = reviewed_revision()
     desired = desired_configuration(config, additions)
     directory = operation_root(ROOT / "temp/local-stage09", "stage9-admin-allowlist")
+    progress(f"Validating Azure identity, live baseline and What-if. Output: {directory.relative_to(ROOT)}")
     authenticate_azure(config, settings, "deploy", directory)
     azure = AzureCommands(config, directory)
     report = generate_report(config, settings, revision, ticket, approvers, azure)
@@ -74,7 +82,7 @@ def update(config_path, additions, ticket, approvers, operation, approved):
     summary = {"planSha256": plan["planSha256"], "outputDirectory": str(directory.relative_to(ROOT)),
                "adminAllowedCidrs": report["adminAllowedCidrs"], "deploymentPerformed": False,
                "bindingRefreshed": False, "status": "planned"}
-    print(json.dumps(summary))
+    print(json.dumps(summary), flush=True)
     if operation == "plan":
         return summary
     require(plan["planSha256"] == approved, "Allowlist plan changed or was not approved; replan")
@@ -84,10 +92,14 @@ def update(config_path, additions, ticket, approvers, operation, approved):
     summary["status"] = "executing"
     private_write(directory / "allowlist-summary.json", json.dumps(summary, indent=2) + "\n")
     try:
+        progress("Approved plan verified. Deploying Admin WAF; waiting for Azure. No terminal confirmation is required.")
         execute_infrastructure_plan(desired, 9, "edge", plan, plan_directory, directory / "execute")
         summary["deploymentPerformed"] = True
+        private_write(directory / "allowlist-summary.json", json.dumps(summary, indent=2) + "\n")
+        progress("Admin WAF deployment succeeded. Saving customer configuration and release report.")
         install_report(document, config_path, directory / "execute", replace=True)
         install_report(report, target, directory, replace=True)
+        progress("Configuration and report saved. Refreshing the binding receipt; temporary kubeconfig overwrite is automatic.")
         refresh_binding(desired, revision, directory / "binding", azure)
         summary["bindingRefreshed"] = True
         summary["status"] = "completed"
@@ -96,7 +108,8 @@ def update(config_path, additions, ticket, approvers, operation, approved):
         raise
     finally:
         private_write(directory / "allowlist-summary.json", json.dumps(summary, indent=2) + "\n")
-    print(json.dumps(summary))
+    progress("Completed. Allow time for WAF edge propagation before public access verification.")
+    print(json.dumps(summary), flush=True)
     return summary
 
 

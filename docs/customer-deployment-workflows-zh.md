@@ -4,7 +4,21 @@
 
 本指南适用于客户自己的公开fork或私有仓库，以及经批准的旧网关迁移。主要迁移workflow只允许手动运行受保护的默认分支，客户配置从Environment Secret读取，计划和结果加密后上传。代码包含实际写入Azure/Kubernetes的入口；只有配置并授权了本仓库自己的执行环境后才能运行。作业成功不代表迁移验收完成，业务与安全检查仍需实测。
 
+## 当前运行状态与路径边界（2026-10-09）
+
+当前已运行的是**West US 3的greenfield原生认证dev/test网关**，不是既有客户迁移或生产全阶段签收：Private AKS为`Running/Succeeded`，Azure RBAC、禁用本地账号、Workload Identity/OIDC均开启，使用Azure CNI Overlay、2个system节点和2个user节点，节点SKU为`Standard_D4s_v4`。这是本次验证的配置，不是其他区域、配额或生产容量的默认保证。
+
+API/Admin通过Azure Front Door Premium分别连接两条PLS和两个私有入口。用户已确认Admin `/fallback/login`用户名/密码登录及virtual key的Codex Responses推理可用。Admin密码是**后台Vault**中独立的`litellm-ui-password`，不是Master Key，也不在证书Vault；用户侧Entra SSO仍延期。Admin WAF使用`SocketAddr`、`IPMatch`、`negateCondition=true`的阻断规则，当前已配置3个批准公网IPv4 `/32`及1个IPv6 `/128`，不推断或扩成公司网段。
+
+只读管理面回读另确认：PostgreSQL 16为`Ready`，`activeDirectoryAuth=Enabled`、`passwordAuth=Disabled`、`publicNetworkAccess=Disabled`；Redis为`Microsoft.Cache/redisEnterprise`、`Balanced_B0`，default数据库`accessKeysAuthentication=Disabled`、`clientProtocol=Encrypted`、端口10000。Redis集群的`publicNetworkAccess`返回null，**不能据此推断公网已启用或已禁用**，私网与访问控制仍须分别核验。ACR为Premium、`adminUserEnabled=false`且公网禁用；后台及证书Key Vault均启用RBAC且公网禁用。这些管理面状态不替代Pod数据面身份、TLS、续期和运行验证。
+
+客户端API base为`https://<api-domain>/v1`，`model`填写LiteLLM `model_name`别名（托管映射中的`modelGroup`），不是Azure deployment name。入口仅开放固定Responses/Chat/Embedding推理路径，**不开放`/v1/models`**；不能把模型列表请求被拒绝当作推理不可用。
+
+源镜像固定为**1.104.0**；派生镜像digest、秘密版本、身份权限、续期、真实运行与审计/恢复验证仍是门禁。上述有限实测不证明所有UI、客户端协议、生产容量、迁移数据或Stage0–9已签收。迁移、Entra代理和production路径保留各自批准及验收要求；当前greenfield native执行顺序见[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)，不需要为此补做旧环境备份、Stage1或Stage7。
+
 ## 先开始演练
+
+以下点击顺序针对`deploymentMode=migration`；greenfield按后文“两条路径”跳过旧资源操作，不能为满足此表虚构`legacy`配置。
 
 1. fork本仓库并启用Actions，保留公开仓库即可；为默认分支设置有效的branch protection/ruleset。工作流检查`GITHUB_REF_PROTECTED=true`，不允许选未保护的分支执行。PR验证作业只使用GitHub托管runner，不指向客户私网runner。
 2. 创建选定的Environment（例如test），部署分支限制到保护分支；按下文配置`CUSTOMER_CONFIG_JSON`及`WORKFLOW_ARTIFACT_KEY`两个Environment Secrets，以及Azure OIDC变量。单人运维在governance中配置本人Entra Object ID和GitHub login。
@@ -53,7 +67,7 @@
 | 运维遥测 | 必要监控保留，collector按需，不复制正文 | 原生模式的observability不再依赖auditRuntime；已有遥测/guardrail/L3不能被原生发布静默关闭 |
 | 旧环境与回退 | 保留旧库、Key/Salt、备份及获批审计数据 | 不自动删除Blob/HSM Key/保全登记；关闭后续正文不删除历史，恢复可能使已清理正文重新出现 |
 
-**配置、发布接线和合成落库测试通过，不是原生模式已上线。** 不跳过Stage8进入Stage9，不将L3未执行项伪造为passed，也不删除已有强制审计binding来绕过失败关闭。下文`audit-foundation`、`audit`、`auditRuntime`、`auditGovernance`及audit-pause/recover/resume的操作说明仅适用于可选增强L3，不是基础版默认执行顺序。实现及检查应由项目代码与workflow完成，不要求客户手改YAML/SQL或编写检查脚本。
+**当前原生dev/test网关已运行，但配置、发布接线、合成落库或一次推理成功均不等于审计/生产签收。** 不跳过Stage8进入Stage9，不将L3未执行项伪造为passed，也不删除已有强制审计binding来绕过失败关闭。下文`audit-foundation`、`audit`、`auditRuntime`、`auditGovernance`及audit-pause/recover/resume的操作说明仅适用于可选增强L3，不是基础版默认执行顺序。实现及检查应由项目代码与workflow完成，不要求客户手改YAML/SQL或编写检查脚本。
 
 #### 原生模式配置与剩余验收
 
@@ -75,11 +89,11 @@ Stage8要求`native_spend_logs`、`native_audit_access`、`native_retention_reco
 
 固定镜像的隔离PostgreSQL测试已验证Chat JSON/SSE的请求正文位于`proxy_server_request`、响应位于`response`，`end_user`保存请求主体哈希、`api_key`保存vkey哈希。测试调用了日志队列刷新入口，因此**不证明生产写入时延、进程故障无丢失、所有协议或真实Azure身份**。原生UI/API受控查询核心已实测；一期高用量用户抽查采用原生Logs优先、获批私网PG只读查询补充，不要求完整UI或独立L3平台。客户实际需要的管理操作、正常正文落库、授权查询、留存/备份及真实客户端仍须验收，PG审计授权不会自动具备。
 
-原生查看需显式设置`proxy.nativeUi=true`，并仅对获准管理binding设置`nativeAuditRead=true`。该批准允许对应代理管理员按其后台角色读取全局日志，不是逐Team授权或L3双审批。OIDC仍在代理完成，HttpOnly加密会话保留；UI可读的`token`Cookie只含短期会话校验值与展示信息，不含真实后台Key。UI请求必须经过会话/角色检查，代理再换成挂载的管理Key。
+**Entra代理路径的原生UI查看**需显式设置`proxy.nativeUi=true`，并仅对获准管理binding设置`nativeAuditRead=true`。该批准允许对应代理管理员按其后台角色读取全局日志，不是逐Team授权或L3双审批。OIDC仍在代理完成，HttpOnly加密会话保留；UI可读的`token`Cookie只含短期会话校验值与展示信息，不含真实后台Key。UI请求必须经过会话/角色检查，代理再换成挂载的管理Key。当前native-auth路径不部署此代理，使用独立UI用户名/密码；正文读取权限仍需按原生后台角色及批准范围实测，不能套用代理binding证明。
 
 读取白名单由[共享路由契约](../auth-proxy/native-ui-routes.json)同时约束代理与后台Key。列表分页最多100项，正文详情及会话查询另需读取批准；`/v2/key/info`的只读POST只接受有界哈希列表。新决策改变管理凭据合同，已有Key不会静默扩权：现有初始化器会拒绝旧合同，需另行完成批准的凭据迁移，不能删除旧Key/Vault状态后冒充首次安装。
 
-**不是完整原生UI兼容交付**：核心Logs列表/详情通过真实浏览器测试，仍有未开放辅助端点引发的提示；移动端详情布局未验收；Key/User/Team创建和预算修改等管理写入尚未支持。原生`/login`、`/sso`登录和Master Key登录不开放。客户要求完整管理UI时，这些缺口继续阻断迁移，不能擅自改为只读交付。
+**Entra代理不等于完整原生UI兼容交付**：核心Logs列表/详情通过真实浏览器测试，仍有未开放辅助端点引发的提示；移动端详情布局未验收；代理路由白名单尚未支持Key/User/Team创建和预算修改等管理写入。该代理不开放后台原生`/login`、`/sso`或Master Key登录。当前native-auth路径的Admin `/fallback/login`和virtual key推理已由用户确认，不受上述代理登录限制；仍不分发Master Key，也不据此声称所有管理功能已验收。客户必需能力缺失时继续阻断迁移，不能擅自改为只读交付。
 
 #### 源镜像与目标ACR检查分阶段
 
@@ -207,7 +221,7 @@ Runner工程状态补记（2026-09-13）：[注册生命周期模块](../scripts
 | 6 | Promote LiteLLM image选择build_azure_runtime；runtime: application（plan → execute），配置application后自动生成 | 提供批准的派生镜像digest和模型部署映射；不填整份YAML。schema/密钥回执及签名自动验证，负载/故障/Redis/亲和仍需实测 |
 | 7 | infrastructure: proxy-foundation；runtime: entra-apps → entra-access → admin-credentials → proxy-credentials → application，均先plan再批准执行 | 提供分离的Entra初始化/授权身份、客户端及准入主体；只有管理绑定填写模型权限。API客户端自带vkey，模型/预算在LiteLLM管理；自动建立精确角色分配和单用户同意，真实登录及双凭据续期仍待验收 |
 | 8 | 基础版contentAudit → application；按需observability；只有增强L3才执行audit-foundation/audit | 原生正文/身份、读取、清理/备份及故障仍须实际验证，不能将增强模式旧检查填假通过 |
-| 9 | infrastructure: origin → edge（不启流量）；runtime: edge-bind；实际验证和发布报告后edge + release=true | edge-bind只绑定API并等待rollout，不启流量；PLS、TLS、请求校验及最终数据同步另验 |
+| 9 | infrastructure: origin → edge（不启流量）；runtime: edge-bind；实际验证和发布报告后edge + release=true | edge-bind核验并绑定API/Admin双平面、等待rollout，不启流量；PLS、TLS、请求校验另验；最终数据同步仅迁移路径按需批准 |
 
 ### 阶段0从零启动
 
@@ -486,7 +500,7 @@ restore-target 从成功的 Stage5平台部署获取新服务器名称，读取�
 | 新AKS节点RG | 自动读取实际AKS nodeResourceGroup | origin支持auto；自定义短名放stage4Aks.nodeResourceGroupName，创建后不可更改 |
 | LB/frontend | private-ingress创建并验证，或客户自管入口提供 | 托管路径从Stage4回执分别读取API/Admin前端并核对真实LB；两者不得复用 |
 | API/Admin PLS Resource ID | origin成功部署的两个输出 | `privateOrigin`和`adminPrivateOrigin`的ID设`auto`可自动读取；两者不得相同 |
-| Admin批准公网出口CIDR | 客户网络与安全负责人 | 在管理员实际公司网络/VPN/代理路径查询稳定公网出口；按显式CIDR填入`adminAllowedCidrs`并核对WAF live规则，不使用Laptop私网地址 |
+| Admin批准公网出口CIDR | 客户网络与安全负责人 | 从实际浏览器网络/VPN/代理路径确认公网IPv4 `/32`及IPv6 `/128`，逐项批准并填入`adminAllowedCidrs`，核对WAF live规则；不使用Laptop私网地址，也不推断公司CIDR |
 | 审计Vault/Key | audit配置中预定名称，由audit-foundation创建 | purge保护、HSM RSA key、PE及受信Azure Storage访问；重用企业CMK时跳过foundation并独立审查 |
 | 审计writer/reader/retention/recovery | audit-foundation自动创建四个不同UAMI | 对应PrincipalId设auto；recovery权限需显式配置后部署audit；不能合并身份或用同一用户替代 |
 | Entra API/admin应用、角色与策略 | 租户管理员批准创建 | 客户认证策略，不自动赋予全租户权限 |
@@ -523,7 +537,7 @@ Stage9 `release=true`只控制Front Door流量与WAF，不自动改任意DNS，�
 
 > 本节及后续第8–10节保留早期工程台账和实现参考，不能作为当前逐步运行清单或全部必选采购/自动化需求。当前顺序、一期审计范围、已接通的原生发布及仍未完成的最终迁移检查点统一以[主执行手册](customer-migration-guide-zh.md)为准；历史“待接线”描述不代表要重复建设已有能力。
 
-已交付部署/运行/证据自动化入口不等于完整生产方案验收。private-ingress已实现双平面私有TLS网关及Stage9输出传递，database-roles实现Entra角色映射与分权授权；schema-migrate和专用Azure应用入口已通过本地真实PG/TLS迁移、启动和换池测试。仍需完成PKI/DNS生命周期、runner/入口实际连通、API/admin应用和Vault接线、真实Azure身份/续期与客户旧版本升级验收、原生Spend Logs发布/查询/清理/故障和阶段证据适配，以及Codex协议/对象授权；仅选择增强方案才要求可靠L3专项交付。上游原镜像仍是RDS IAM路径，只有经过测试的派生入口安装了本项目Azure适配。未在客户Azure环境部署或执行客户数据库备份。
+已交付部署/运行/证据自动化入口不等于完整生产方案验收。private-ingress已实现双平面私有TLS网关及Stage9输出传递，database-roles实现Entra角色映射与分权授权；schema-migrate和专用Azure应用入口已通过本地真实PG/TLS迁移、启动和换池测试。当前Azure greenfield native dev/test已运行，Admin登录和Codex Responses推理已有用户确认，不能继续把这些接线列为一概未部署。PKI/DNS生命周期、秘密/真实身份与续期、客户旧版本升级、原生Spend Logs授权查询/清理/故障及所选协议/对象授权仍须分别验收；仅选择增强方案才要求可靠L3专项交付。上游原镜像仍是RDS IAM路径，只有经过测试的派生入口安装了本项目Azure适配；不据当前新建环境实测宣称已执行客户旧库备份或迁移。
 
 ### 后续实现顺序与完成标准
 
@@ -598,7 +612,7 @@ Stage9 `release=true`只控制Front Door流量与WAF，不自动改任意DNS，�
 
 ## 10. 本轮代码Plan与实际状态
 
-本节保留前批代码进展。2026-09-10已选择原生Spend Logs基础版，下列自建L3治理/可靠性是可选增强进展，不再作为所有客户的必做项；原生模式尚待接线，不能把“未选增强项”与“未完成基础版”混为一谈。
+本节保留前批代码进展。2026-09-10已选择原生Spend Logs基础版，下列自建L3治理/可靠性是可选增强进展，不再作为所有客户的必做项；原生发布已有接线且当前native dev/test网关已运行，审计验收仍独立进行，不能把“未选增强项”与“未完成基础版”混为一谈。
 
 本节更新前文台账中collector、治理发布和账本传递的状态；八项并未全部完成。确认的首发范围：一次管理员Azure登录后由安装器配置后续环境；域名可注册在阿里云、DNS采用Azure DNS；API公共CA证书、管理入口企业Key Vault证书；支持普通模型API与Codex客户端，不在网关内开发Agent规划或MCP工具执行。
 

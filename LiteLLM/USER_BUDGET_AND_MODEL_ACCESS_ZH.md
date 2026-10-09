@@ -2,6 +2,8 @@
 
 本文说明如何在已部署的 LiteLLM Proxy 中，为不同用户设置预算、限制可用模型，并让用户通过 OpenAI 兼容 API 选择模型。
 
+> **当前与旧环境边界（2026-10-09）**：West US 3 greenfield测试的Admin为独立Front Door/PLS native入口，批准公网IPv4 `/32`及IPv6 `/128`先通过WAF Prevention，再用LiteLLM原生用户名/密码fallback登录；不是用户Entra SSO。用户已验证登录及virtual key的Codex Responses推理，不代表所有管理API/预算拒绝场景均已验收。部署、密码交付/轮换、管理写入及拒绝矩阵按[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)执行。当前模型同步唯一操作说明是[专用runbook](../docs/litellm-model-sync-runbook-zh.md)，不重跑旧脚本或启用数据库模型管理。
+
 ## 1. 核心概念
 
 LiteLLM 的访问控制通常由以下对象组成：
@@ -28,9 +30,9 @@ Team
 
 对于个人额度，建议每个用户使用一个独立 Virtual Key；对于部门或项目额度，建议使用 Team 共享预算。
 
-## 2. 当前部署可用模型
+## 2. 模型名称与批准范围
 
-模型名称来自 `azure-openai.json` 的 `deployment_list`。当前示例中的模型是：
+当前模型名称来自批准的应用模型配置/同步结果，不从旧`azure-openai.json`推断。下列模型名只是旧脚本`deployment_list`的示例，不代表当前部署或当前Key允许的模型：
 
 ```text
 gpt-5.6-luna
@@ -46,10 +48,10 @@ gpt-4.1
 打开 LiteLLM Admin UI：
 
 ```text
-http://<LOAD_BALANCER_IP>:4000/ui
+https://llm-admin.<客户域名>/ui
 ```
 
-使用管理员账号登录后，推荐按以下顺序配置：
+从批准出口以原生用户名/密码登录；API域不提供Admin UI。以下为对象配置概念与功能参考，操作前核对当前版本页面/路由和授权，不能把按钮显示当作写入成功：
 
 ### 3.1 创建用户
 
@@ -105,11 +107,10 @@ Budget Duration: 30d
 
 ## 4. 通过 Management API 配置
 
-管理员 Key 仅用于管理 API，不要分发给普通用户。以下命令使用 PowerShell 示例：
+管理员Key仅用于经批准的管理API，不分发给普通用户，也不发送到API推理域。以下PowerShell片段是接口参考，不是当前版本所有写入已通过的声明；先核对现行管理路由契约和权限，不为失败接口开放私有源站。由秘密管理系统安全注入进程的`MASTER_KEY`，不要把值写入命令行或历史：
 
 ```powershell
-$env:BASE_URL = "http://<LOAD_BALANCER_IP>:4000"
-$env:MASTER_KEY = "<LITELLM_MASTER_KEY>"
+$env:BASE_URL = "https://llm-admin.<客户域名>"
 
 $headers = @{
     Authorization = "Bearer $env:MASTER_KEY"
@@ -161,7 +162,7 @@ $key = Invoke-RestMethod `
     -Headers $headers `
     -Body $body
 
-$key
+# 不在终端输出含明文Key的响应；交付至批准的秘密管理系统。
 ```
 
 返回结果中的 `key` 是 Alice 调用 API 时使用的凭据。
@@ -185,7 +186,7 @@ $key = Invoke-RestMethod `
     -Headers $headers `
     -Body $body
 
-$key
+# 不在终端输出含明文Key的响应；交付至批准的秘密管理系统。
 ```
 
 这种方式下，多个 Key 的消费会计入同一个 Team 预算。若需要个人独立预算，使用不关联 Team 的用户专属 Key。
@@ -193,6 +194,8 @@ $key
 ## 5. 用户如何选择模型
 
 用户在请求体中填写 `model`：
+
+从秘密管理系统向进程注入受限`LITELLM_API_KEY`，推理请求使用独立API域：
 
 ```powershell
 $userHeaders = @{
@@ -211,7 +214,7 @@ $body = @{
 } | ConvertTo-Json -Depth 5
 
 Invoke-RestMethod `
-    -Uri "http://<LOAD_BALANCER_IP>:4000/v1/chat/completions" `
+    -Uri "https://llm-api.<客户域名>/v1/chat/completions" `
     -Method Post `
     -Headers $userHeaders `
     -Body $body
@@ -242,7 +245,7 @@ Azure OpenAI deployment
 ## 7. 安全注意事项
 
 - 不要把 `LITELLM_MASTER_KEY` 分发给普通用户。
-- 当前服务使用公网 LoadBalancer，生产环境应增加网络访问限制、TLS 和更强的身份认证。
+- 当前服务通过Front Door HTTPS及两个隔离私有源站访问；旧公网LoadBalancer/HTTP IP不是替代路径，Admin来源门禁不代替登录。
 - 不要把真实 Master Key、Virtual Key、数据库密码提交到 Git。
-- 修改 `LITELLM_MASTER_KEY` 后，需要重新运行部署脚本，让 Kubernetes Secret 和 LiteLLM Pod 更新。
+- Master Key、UI密码及应用数据认证必须按现行Vault/轮换流程管理；不重跑旧脚本修改当前网关，也不把模型同步与Key/预算修改混为一体。
 - 预算和用量统计依赖 PostgreSQL；生产环境建议使用高可用数据库和备份策略。

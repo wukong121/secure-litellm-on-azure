@@ -2,6 +2,8 @@
 
 > 核对日期：2026-10-07。本文记录公共镜像、隔离数据库和本地协议验证，不代表客户Azure环境或生产发布已经验收。
 
+> 现状补充（2026-10-09）：只读 Azure 管理核查确认 West US3 新建 dev/test 的 private AKS Running/Succeeded、Azure CNI overlay、Azure RBAC/禁用本地账户、WI/OIDC；System/User 池各 2 台 `Standard_D4s_v4`。双 API/Admin Front Door Premium、独立 PLS/私有入口与 WAF Prevention 已部署；Admin 否定 SocketAddr IPMatch 白名单同时含三个 IPv4 `/32` 和一个 IPv6 `/128` 精确出口。模型 WI、私网 Entra-only PG/Managed Redis、私有 ACR、分离的后端/证书 Vault 和 Firewall 出站构成当前基线。默认原生 LiteLLM 网关；用户已验证 Admin 密码 fallback 登录及 vkey Codex Responses 推理，**不是 Entra 用户 SSO 或生产就绪**。以下 2026-10-07 隔离测试结论不扩展为 Stage0–9 云端全验收。
+
 ## 1. 选择结论
 
 当前受审运行基线从LiteLLM `1.98.0`升级到稳定版`1.104.0`，固定镜像为：
@@ -64,8 +66,8 @@ LiteLLM_SpendLogs_api_key_startTime_idx
 ## 5. 尚未覆盖
 
 - 未在客户Azure OpenAI/Foundry deployment上实际调用GPT-6系列模型；
-- 未完成目标AKS、Workload Identity、Managed Redis和Key Vault CSI云端验收；
+- 截至2026-10-07本文测试未覆盖目标AKS、WI、Managed Redis和Key Vault CSI云端验收；2026-10-09管理核查确认资源配置，但长期令牌刷新、CSI轮换、故障恢复与负向权限仍需运行证据；
 - 未完成客户规模负载、索引在线创建耗时、HA/PITR及生产回退演练；
 - 未批准生产发布或旧环境退役。
 
-因此本次升级只允许继续Stage3供应链检查和后续隔离环境部署，不跳过Stage4至Stage9的真实门禁。
+因此本次隔离升级证据可用于 Stage3 供应链与后续部署门禁，但不能替代 Stage4–9 的真实验收或生产批准。当前路径和执行要求见[部署指南](customer-deployment-workflows-zh.md)及[迁移指南](customer-migration-guide-zh.md)；运行时阶段编号不变。

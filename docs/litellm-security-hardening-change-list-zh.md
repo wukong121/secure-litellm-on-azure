@@ -1,9 +1,9 @@
 # LiteLLM 网关安全增强改造项审查清单
 
-> 文档状态：待方案审查
-> 编制日期：2026-08-31
+> 文档状态：历史风险工作包与生产门禁清单；不是当前资源验收报告
+> 原始编制日期：2026-08-31；现状对齐：2026-10-09
 > 输入方案：`docs/litellm-azure-security-hardening-zh.md`
-> 当前实现：`LiteLLM/deploy_mi_aks_litellm.py`、`LiteLLM/litellm.config.yaml`
+> 历史实现：`LiteLLM/deploy_mi_aks_litellm.py`、`LiteLLM/litellm.config.yaml`；当前托管路径见部署/迁移指南
 > 目标：将现有 PoC 形态改造成可安全运行、可审计、可扩展、可恢复的企业 LiteLLM 网关
 > 明确边界：本方案不引入 Azure API Management（APIM）
 
@@ -21,9 +21,13 @@
 
 ## 2. 当前实现基线
 
-根据当前仓库实现，已有能力和主要差距如下。
+2026-10-09只读 Azure 管理面核查：West US3 新建 dev/test，Private AKS Running/Succeeded，Azure CNI overlay、Azure RBAC、禁用本地账户、WI/OIDC；System/User 池各 2 台 `Standard_D4s_v4`。API/Admin Front Door Premium、PLS/内部 LB/私有 Traefik 分开，两侧 WAF Prevention，Admin 以否定 SocketAddr IPMatch 限制批准的三个 IPv4 `/32`、一个 IPv6 `/128` 出口。模型使用 WI，PG/Managed Redis 私网 Entra-only，后端 Vault 与证书 Vault 分离，ACR 私有，Firewall 路由出站。
 
-| 范围 | 当前实现 | 目标变化 |
+默认原生 LiteLLM `1.104.0` 网关不经过 Entra 代理；用户已验证 Admin 密码 fallback 登录及 vkey Codex Responses 推理，不是 Entra 用户 SSO 或生产就绪。当前无 APIM、App Service 或共享认证代理。Entra 企业准入、协议负向测试、HA/恢复/容量及企业治理仍须独立验收。实际执行和证据见[部署指南](customer-deployment-workflows-zh.md)及[迁移指南](customer-migration-guide-zh.md)；SEC/D 编号保留，不代表完成勾选。
+
+以下表格是 2026-08-31 的旧 PoC 与生产目标对照，不是当前 West US3 资源清单。
+
+| 范围 | 历史实现 | 生产目标变化（仍须验收） |
 | --- | --- | --- |
 | Azure 部署 | 单个 Python 脚本直接创建/修改 Azure 与 Kubernetes 资源 | Azure 基础设施转为可审查、可重复的 IaC；应用部署与平台部署解耦 |
 | AKS | 默认单节点，节点级 UAMI，公网控制面/网络安全能力未完整声明 | Private AKS、Entra/Azure RBAC、Workload Identity、分离节点池、跨可用区 |
@@ -55,8 +59,9 @@ Kubernetes 平台与应用层（Helm/Kustomize 或受控 manifests）
 LiteLLM 逻辑配置层
   Models / Router / OSS Guardrails / SSO / Team / Budget / Spend retention
 
-独立身份与策略层
-  客户自有 Entra 认证代理 / App Roles / Team 映射 / Header反伪造
+入口与身份层
+  默认：双平面私有 Traefik -> 原生 LiteLLM（vkey / 原生 Admin 登录）
+  延期企业增强：独立 Entra 准入 / App Roles / Header反伪造
 ```
 
 由于目标变化同时涉及 Private Cluster、网络插件/策略、节点身份、数据库和入口，建议优先采用“新建安全生产环境 -> 数据迁移 -> 灰度切流”，避免在现有 PoC 集群上一次性原地改造。现有集群可保留为回归和迁移源。
@@ -98,7 +103,7 @@ LiteLLM 逻辑配置层
 - 盘点现有订阅、区域、配额、Policy、VNet、DNS、ExpressRoute/VPN、Azure OpenAI/Foundry 资源和数据驻留要求；
 - 确认公网模式（Front Door Premium）或纯内网模式（Application Gateway WAF v2），不同时建设两套主入口；
 - 明确 API 数据面和 Admin 管理面的域名、访问人群和网络来源；
-- 明确客户端认证目标：客户自有Entra认证代理；仅在代理到LiteLLM的受控内部链路使用受限Virtual Key；
+- 明确原生 vkey 与延期企业 Entra 双凭据模式的边界；企业准入不复制模型 ACL，客户端 vkey 仍由 LiteLLM 执行模型、Team 和预算权限；
 - 核验LiteLLM OSS能力边界，并将所有Enterprise付费能力排除或替换为Azure原生、客户自有组件或OSS方案；
 - 明确 Prompt/Response 是否允许落盘、日志留存和数据出境限制；
 - 明确 RTO、RPO、可用区、跨区域恢复和维护窗口；
@@ -147,7 +152,7 @@ scripts/
 
 - 部署 Azure Front Door Premium；
 - 配置 WAF Managed Rules、Bot Protection、自定义限速、请求大小和方法限制；
-- AKS ingress-nginx 改为 Internal Load Balancer；
+- 托管路径使用分离的 API/Admin Traefik 与 Internal Load Balancer；旧 ingress-nginx 仅作迁移源；
 - 创建 Private Link Service，并将 Front Door origin 通过 Private Link 接入；
 - 删除或封禁现有 ingress 公网 IP，验证源站不可绕过；
 - 单独配置 WebSocket、SSE、长请求和文件上传路由参数；
@@ -170,16 +175,16 @@ scripts/
 
 **改造项**：
 
-- 定义两个域名，例如 `llm-api.example.com` 与 `llm-admin.internal.example.com`；
-- 数据面仅开放 `/v1/*` 和批准的兼容 API；
+- 定义独立 API/Admin 域名；互联网模式分别绑定 Front Door、WAF、PLS 和内部 LB；
+- 数据面仅开放六条固定 Chat/Responses/Embeddings 路径（带 `/v1` 与不带 `/v1`），不开放 `/v1/models` 或通配 `/v1/*`；扩展协议须另行审批、配置与验收；
 - 管理面承载 `/ui`、SSO callback、用户/Key/Team/模型/配置管理 API；
 - 公网数据面入口对管理路径明确返回 403；
-- 管理域名仅允许内网、批准设备和 Entra 管理员组；
+- 当前 Admin 边缘允许批准公网出口，私有回源后执行原生登录；生产企业增强另验批准设备和 Entra 管理员组；
 - Master Key 不分发给普通调用者，仅保留受控自动化和 Break Glass；
 - 为两个入口设置不同 WAF、速率、日志和告警策略；
 - 验证路径匹配不存在 URL 编码、大小写、尾斜杠或备用路由绕过。
 
-**验收**：公网数据面无法访问任何管理功能；管理访问需要 Entra MFA/Conditional Access；Break Glass 使用可告警。
+**验收**：API 数据面无法访问管理功能；Admin IPv4/IPv6 未批准来源被 WAF 拒绝，批准来源仍须内层登录。生产企业增强另须证明 Entra MFA/Conditional Access 和 Break Glass 告警。
 
 ### SEC-05 Entra 用户和应用身份
 
@@ -187,18 +192,18 @@ scripts/
 
 **改造项**：
 
-- 保留并规范当前已验证的 Microsoft SSO；
+- Microsoft SSO 是延期企业准入门禁，当前原生 Admin 密码登录不构成 SSO 验证；
 - 为 Admin UI 建立独立 Entra App Registration/Enterprise Application；
 - 配置精确 Redirect URI、固定 Proxy Base URL 和客户端凭据轮换；
 - 建立 `proxy_admin`、`proxy_admin_viewer`、`internal_user` 等 App Roles；
 - 通过受控安全组分配角色，管理员权限结合 PIM；
 - 配置 Conditional Access、MFA、合规设备、登录风险和会话策略；
-- 设计数据面JWT验证：固定使用客户自有独立认证代理，不启用LiteLLM原生JWT；
+- 可选企业模式使用客户自有独立认证代理，不启用LiteLLM原生JWT；不得将其写成当前原生默认路径；
 - JWT 必须校验 issuer、audience、tenant、signature、expiry、roles/scopes；
 - 后台应用使用 Client Credentials、Managed Identity 或 Workload Identity，不共享用户 Virtual Key；
 - 设计 Entra identity 到 LiteLLM Team、模型 ACL、预算和 Virtual Key 的映射；
 - 定义离职、应用停用、组变更后的访问回收 SLA；
-- 保留 `/fallback/login` 仅作为受控 Break Glass，并限制来源与告警。
+- 当前原生 Admin 通过受限来源的密码 fallback 登录；采用企业模式时再将其约束为受控 Break Glass，并验证告警。
 
 **需先验证**：独立认证代理能否在Responses、WebSocket、Chat、SSE、Embeddings、Files和MCP/Tools等全部目标路由统一执行JWT和授权检查，并正确删除伪造Header、保护后端凭据和保持流式传输。
 
@@ -397,7 +402,9 @@ scripts/
 
 **验收**：单 Pod删除、节点排空、滚动升级、PG/Redis短暂故障和上游限流测试满足 SLO。
 
-#### LiteLLM 1.98.0 企业路由建议
+#### 历史 LiteLLM 1.98.0 路由评估（2026-09-03）
+
+以下源码判断保留为设计依据，不是 `1.104.0` 云端 affinity、缓存或故障切换证明；精确版本和隔离验证见[升级记录](litellm-1.104.0-upgrade-validation-2026-10-07.md)，生产仍须按实际 deployment 重跑容量与协议门禁。
 
 LiteLLM `1.98.0` 官方仍将 `simple-shuffle` 作为低开销生产默认。`usage-based-routing-v2` 并不是所有场景下更优：它按 1 分钟窗口中的 deployment RPM/TPM 使用量选择剩余容量较多的后端，适合多 Foundry Resource 的吞吐与配额均衡，但如果不叠加 affinity，会让相同前缀更容易分散到不同 deployment，降低 Prompt Cache复用。
 
@@ -589,12 +596,12 @@ general_settings:
 
 **目标**：可观测、可审计，同时不把日志变成新的敏感数据池。
 
-2026-09-10：基础版采用原生Spend Logs正文留痕，不把自建L3当作默认实现；正文获批后只进入私有PG，运维日志仅元数据。现有默认false和阶段门禁仍待适配，详见[部署指南](customer-deployment-workflows-zh.md)。
+2026-09-10确定基础版原生 Spend Logs；2026-10-09原生发布/受控读取已有代码与隔离验证。正文获批后只进入私有 PG，运维日志仅元数据；云端字段权限、容量/留存/备份/故障仍须验收，见[部署指南](customer-deployment-workflows-zh.md)。
 
 **改造项**：
 
 - 定义 L1 元数据、L2 脱敏摘要、L3 原文三级日志；
-- 未批准采集前默认仅元数据，`store_prompts_in_spend_logs=false`；基础版获批后通过待适配的发布流程启用原生正文，同时落实读取者、PG清理/容量和备份策略；
+- 未批准采集前默认仅元数据，`store_prompts_in_spend_logs=false`；基础版获批后通过受控发布流程启用原生正文，同时落实读取者、PG清理/容量和备份策略；
 - Authorization、Cookie、Token、Virtual Key、连接串和 Secret 永不记录；
 - 使用统一 Call/Trace ID 贯穿 WAF、ingress、LiteLLM、Guardrail、模型和数据库；
 - LiteLLM 接入 OpenTelemetry；
@@ -699,7 +706,7 @@ general_settings:
 
 **目标**：在合法、透明、最小化和可追责的前提下，审计经过 LiteLLM 网关的员工与 Agent 模型交互，用于安全调查、数据泄漏检测、合规审计和 Agent 风险治理，而不是默认用于个人绩效评价。
 
-> 2026-09-10范围更新，替代2026-09-07默认L3要求：第一阶段采用原生Spend Logs，完成批准范围、受控查询、PG容量/清理/备份与故障验收；自建独立存储、原文双审批/保全和可靠交付作为可选增强。现有代码默认和阶段门禁尚待适配，本条不启用正文。分支范围见[实施路线图12.3节](litellm-security-hardening-implementation-roadmap-zh.md#123-l2l3-上下文审计)。
+> 2026-09-10范围更新，替代2026-09-07默认L3要求：第一阶段采用原生Spend Logs，完成批准范围、受控查询、PG容量/清理/备份与故障验收；自建独立存储、原文双审批/保全和可靠交付作为可选增强。原生发布/受控读取已有代码与隔离验证，真实云端验收仍待完成，本条不启用正文。分支范围见[实施路线图12.3节](litellm-security-hardening-implementation-roadmap-zh.md#123-l2l3-上下文审计)。
 
 **可审计范围**：
 
@@ -751,7 +758,7 @@ general_settings:
 
 **LiteLLM 配置改造**：
 
-- 当前安全默认保持`store_prompts_in_spend_logs=false`；基础版通过待适配的受控发布在获批试点启用，验收后再按批准范围放行；留存、是否扩容及监控由实测决定，不直接套用旧容量；
+- 当前安全默认保持`store_prompts_in_spend_logs=false`；基础版通过受控发布在获批试点启用，验收后再按批准范围放行；留存、是否扩容及监控由实测决定，不直接套用旧容量；
 - 若客户要求强制审计，设置 `global_disable_no_log_param: true`，防止调用方使用 `no-log` 跳过日志；
 - 拒绝或清除未经授权的 `x-litellm-disable-callbacks`、`LiteLLM-Disable-Message-Redaction`、`log_raw_request` 等客户端日志控制参数；
 - 生产日志禁止包含 Authorization、Cookie、Token、完整 Virtual Key、数据库连接串和 Secret；
@@ -820,7 +827,7 @@ general_settings:
 | 原风险 | 对应工作包 | 预期关闭条件 |
 | --- | --- | --- |
 | R01 公网入口缺少边缘防护 | SEC-03、SEC-11 | WAF 为唯一入口，源站不可绕过 |
-| R02 管理面与数据面共用入口 | SEC-04、SEC-05 | 管理路径仅内网管理员可达 |
+| R02 管理面与数据面共用入口 | SEC-04、SEC-05 | API 拒绝管理路径；独立 Admin WAF 来源白名单和私有源站，内层登录；企业身份另验 |
 | R03 长期 Bearer Key | SEC-05、SEC-14 | Entra 身份可归因，Key 独立、短周期、受限 |
 | R04 节点级 Managed Identity | SEC-06 | VMSS 业务 UAMI移除，Pod federation生效 |
 | R05 Secret 注入不完善 | SEC-07、SEC-14 | Key Vault、最小读取、固定 Salt、轮换验证 |
@@ -880,8 +887,8 @@ general_settings:
 | --- | --- | --- |
 | D01 | 网关互联网可达还是仅企业内网 | 按真实客户端位置选择，不双建主入口 |
 | D02 | 公网入口使用 Front Door 还是内网 App Gateway | 互联网：Front Door Premium；内网：App Gateway WAF v2 |
-| D03 | Admin UI 是否必须独立内网域名 | 是 |
-| D04 | 数据面是否启用Entra身份 | 是，由客户自有认证代理验证JWT；Virtual Key仅作为内部授权载体 |
+| D03 | Admin UI 是否独立入口 | 是，独立 Admin Front Door/WAF、PLS 和私有源站；内网模式另选 |
+| D04 | 数据面是否启用Entra身份 | 当前原生 vkey；企业准入延期，启用时企业 Token + 客户端 vkey，不复制模型 ACL |
 | D05 | 是否使用LiteLLM原生JWT | 否，已确认属于Enterprise付费能力，方案中禁止启用 |
 | D06 | 模型配置事实源使用 Git 还是 UI/DB | 生产优先 Git；若保留 UI则强制审批和导出 |
 | D07 | Prompt/Response 是否允许落盘 | 默认不允许，例外按业务审批 |
@@ -896,7 +903,7 @@ general_settings:
 | D16 | LiteLLM目标版本和产品边界 | 固定精确OSS版本与digest，不采购或依赖LiteLLM Enterprise能力 |
 | D17 | 上下文审计用于哪些目的和人群 | 仅安全、合规、数据保护和 Agent 风险治理；禁止默认用于绩效排名 |
 | D18 | 审计哪些内容和协议 | 明确 messages、Responses items、tool call/result、文件及 WebSocket覆盖范围 |
-| D19 | 正文保存位置和期限 | 基础版原生Spend Logs进入私有PG，批准在线/备份留存；增强L3才采用独立存储/保全，原生启用门禁待适配 |
+| D19 | 正文保存位置和期限 | 基础版原生Spend Logs进入私有PG；发布/读取已有代码与隔离验证，云端采集授权/容量/留存仍待验收；增强L3才采用独立存储/保全 |
 | D20 | 谁能查看、搜索和导出原文 | 独立角色、PIM、工单、双人审批和全量访问审计 |
 | D21 | 是否强制审计并禁止 `no-log` | 受监管范围内强制，其他场景按数据分类；先验证反绕过 |
 | D22 | 员工告知、Legal Hold 和数据主体流程 | Legal、HR、Privacy 和 Data Governance批准 |

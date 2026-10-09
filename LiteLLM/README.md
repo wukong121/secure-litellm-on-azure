@@ -4,13 +4,16 @@ This directory preserves the original LiteLLM on AKS deployment and operational 
 
 For the current customer solution, start with the [project overview](../README.md) and [staged migration guide](../docs/customer-migration-guide-zh.md). The target platform uses [Bicep](../infra/README_ZH.md), [Kustomize](../deploy/README_ZH.md) and customer Environment configuration. The legacy script below is not an in-place security upgrade command; retain a verified backup and rollback path. Its public ingress, single in-cluster database and direct UI instructions do not describe the new security baseline.
 
+**Current path (2026-10-09):** West US 3 greenfield test, private AKS, separate API/Admin Front Door Premium endpoints and PLS-backed native ingress, LiteLLM `1.104.0` pinned source build, workload identity for Azure model authentication, Entra-only PostgreSQL/Redis, and distinct private backend/certificate Vaults. Native Admin username/password fallback login and virtual-key Codex Responses inference have user verification; this is not user Entra SSO or full production acceptance. Use the [local Stage 2–9 guide](../local_execution/stage2-9-guide-zh.md), not the legacy commands below. There is no active APIM/App Service container or direct HTTP-IP gateway in this path.
+
 ## Structure
 
 - `deploy_mi_aks_litellm.py`: Deploys AKS, Managed Identity, PostgreSQL, and the LiteLLM Proxy.
 - `azure-openai.json`: Commit-safe placeholder template only; never add real subscription IDs, resource names, or endpoints.
 - `azure-openai.loc.json`: Ignored local deployment configuration. Copy the template here and keep all real Azure values in this file only.
 - `USER_BUDGET_AND_MODEL_ACCESS_ZH.md`: Chinese guide for users, teams, virtual keys, budgets, and model access.
-- FOUNDRY_MODEL_SYNC_ZH.md: Guide for syncing new Foundry/Azure OpenAI deployments into LiteLLM.
+- [Current model-sync runbook](../docs/litellm-model-sync-runbook-zh.md): Authoritative current discovery/synchronization procedure.
+- `FOUNDRY_MODEL_SYNC_ZH.md`: Historical model updates for the legacy script, not the current synchronization procedure.
 - `litellm.config.yaml`: Generated LiteLLM configuration; do not edit it manually because the deployment script regenerates it.
 
 *Tests and dependencies are located at the project root (`../tests/` and `../requirements.txt`).*
@@ -62,6 +65,8 @@ Each `azure-openai-list[].subscription_id` is used to grant the Managed Identity
 
 ## User budgets and model access
 
+For the current gateway, open `https://llm-admin.<customer-domain>/ui` from approved public egress and use native username/password login; inference uses `https://llm-api.<customer-domain>` and a restricted virtual key. Model synchronization remains configuration-managed with database model storage disabled; follow the dedicated runbook above. The following `STORE_MODEL_IN_DB` and direct-IP instructions apply only to the legacy script.
+
 To add models or edit Router Settings from the Admin UI, enable database-backed configuration before deploying:
 
 ```powershell
@@ -81,7 +86,7 @@ Use `Internal Users`, `Teams`, and `Virtual Keys` to configure individual budget
 
 ## PostgreSQL capacity and spend-log retention
 
-This section describes the legacy script's defaults, not the current phase-one deployment procedure. The 2026-09-10 decision is approved native Spend Logs content retention in private PostgreSQL; publishing, query access and stage gates still need adaptation. Do not rerun the legacy script or enable a flag on production to bypass that work. See the [current deployment guide](../docs/customer-deployment-workflows-zh.md).
+This section describes the legacy script's defaults, not the current native Spend Logs procedure. Native publishing and mode-specific stage gates are implemented; approved query access, retention, capacity and failure behavior still require actual acceptance. Do not rerun the legacy script or enable a flag on production to bypass gates. See the [current deployment guide](../docs/customer-deployment-workflows-zh.md).
 
 New in-cluster PostgreSQL deployments request a 20 GiB PVC and retain detailed Spend Logs for 7 days. Prompt and response body storage is disabled by default. The relevant environment variables are:
 
@@ -107,13 +112,13 @@ python ..\tests\test_all_deployments.py `
 
 The test exercises OpenAI-style and Azure-style legacy routes, not the new Entra proxy's authorization contract. See the [test guide](../tests/README.md). On Windows consoles using `cp1252`, pass an ASCII prompt to avoid an encoding error before the first request.
 
-## Notes
+## Legacy notes
 
 - Do not distribute the Admin Master Key; create a Virtual Key for each user.
 - The default service uses a public LoadBalancer. Production deployments should add TLS, network restrictions, and a strong random key.
 - PostgreSQL is currently a single in-cluster replica for lightweight deployments; production environments should use a highly available database with backups.
 
-## Custom domain and HTTPS
+## Legacy custom domain and HTTPS
 
 To serve LiteLLM at `https://litellm.your-domain.com` instead of `http://<IP>:4000`, set `LITELLM_HOSTNAME` and the script will automatically configure ingress-nginx + cert-manager (Let's Encrypt):
 

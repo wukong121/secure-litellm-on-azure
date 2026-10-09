@@ -1,14 +1,18 @@
 # LiteLLM 入口与 TLS 证书设计说明
 
-> 核对日期：2026-09-23
+> 设计核对日期：2026-09-23；原生入口与现状对齐：2026-10-09
 >
 > 适用范围：安全增强版新目标环境的托管部署路径，适用于新建环境及从旧环境迁移。
 >
-> 文档性质：解释当前代码设计、运维流程及尚未完成的闭环；不代表客户环境已部署、验收或具备生产切流条件。
+> 文档性质：区分当前代码、dev/test 核查和生产门禁；不代表全部生命周期或生产切流验收。
 
 ## 1. 结论与适用边界
 
 新目标环境采用 **Traefik 文件配置入口 + 独立 workflow 中的 Python ACME 客户端 + API 源站使用 Let's Encrypt + Key Vault 保存证书材料**，替代旧部署路径中的 **ingress-nginx + cert-manager** 组合。
+
+2026-10-09只读 Azure 管理面核查的参考环境为 West US3 新建 dev/test，已部署独立 API/Admin Front Door Premium、PLS、内部 LB 与隔离私有入口，两侧 WAF 为 Prevention。Admin 以否定 `SocketAddr IPMatch` 阻断白名单外来源，包含三个 IPv4 `/32`、一个 IPv6 `/128` 精确批准出口；这不是信任客户端自报的转发 Header。当前默认原生 LiteLLM `1.104.0`，Traefik 直接转发到 LiteLLM；Entra 代理是延期企业模式，不是共享默认跳点。用户已验证原生 Admin 密码 fallback 登录及 vkey Codex Responses 推理，不是 Entra 用户 SSO、生产证书续期或全部阶段验收。证书 Vault 与私有后端 Secret Vault 分离；无 APIM 或 App Service 运行路径。
+
+两侧自定义域管理状态均为 Approved/Succeeded、ManagedCertificate/TLS12；两条 route 已 Enabled、HttpsOnly + HTTPS redirect，`linkToDefaultDomain=Disabled`。API 只开放 `/chat/completions`、`/v1/chat/completions`、`/responses`、`/v1/responses`、`/embeddings`、`/v1/embeddings`，没有 `/v1/models`。Admin route 为 `/*`，依然先做来源门禁再执行原生授权；边缘通配不等于匿名管理权限。这些状态证明部署配置，不证明全部长流、证书轮换、续期和旁路拒绝实测通过。
 
 需要准确区分：
 
@@ -44,16 +48,18 @@ flowchart TB
     Client[员工或 Agent 客户端] -->|HTTPS：Front Door 托管证书| FD[Front Door Premium]
     FD -->|HTTPS 经 Private Link / PLS| ApiLB[API 内部 LoadBalancer]
     ApiLB -->|TCP 443 转发至 8443| ApiIngress[API Traefik：API 源站证书]
-    ApiIngress -->|HTTP 8080| ApiProxy[API 认证代理]
-    ApiProxy -->|HTTP 4000| Backend[LiteLLM]
+    ApiIngress -->|HTTP 4000 / 原生模式| Backend[LiteLLM 1.104.0]
+    ApiIngress -.延期企业模式 / HTTP 8080.-> ApiProxy[独立 API Entra 代理]
+    ApiProxy -.HTTP 4000.-> Backend
     Admin[批准公网出口的管理终端] -->|HTTPS：WAF来源IP白名单 + 内层登录| AdminFD[Admin Front Door：WAF Prevention]
     AdminFD -->|HTTPS 经独立 Private Link / PLS| AdminLB[Admin 内部 LoadBalancer]
     AdminLB -->|TCP 443 转发至 8443| AdminIngress[Admin Traefik]
-    AdminIngress -->|HTTP 8080| AdminProxy[Admin 认证代理]
-    AdminProxy -->|HTTP 4000| Backend
+    AdminIngress -->|HTTP 4000 / 原生模式| Backend
+    AdminIngress -.延期企业模式 / HTTP 8080.-> AdminProxy[独立 Admin Entra 代理]
+    AdminProxy -.HTTP 4000.-> Backend
 ```
 
-上图描述启用 Front Door 后的目标流量路径。API、Admin分别使用`llm-api.<baseDomain>`和`llm-admin.<baseDomain>`，但绑定不同endpoint、WAF、route、PLS和内部LB。Admin域公网可解析，Admin WAF固定在Prevention模式，仅允许`adminAllowedCidrs`声明的实际公网出口，随后仍须通过Entra或LiteLLM原生登录。
+上图实线描述当前原生流量路径，虚线描述另需批准和验证的企业模式。API、Admin分别使用`llm-api.<baseDomain>`和`llm-admin.<baseDomain>`，但绑定不同endpoint、WAF、route、PLS和内部LB。Admin域公网可解析，Admin WAF固定在Prevention模式，仅允许`adminAllowedCidrs`声明的实际公网出口，随后仍须通过Entra或LiteLLM原生登录。
 
 | TLS 连接 | 服务端出示的证书 | 信任与生命周期责任 |
 | --- | --- | --- |
@@ -102,14 +108,14 @@ flowchart TD
 - `certificates.zoneResourceId` 必须指向批准订阅中覆盖 API 域名的 Azure DNS 公共区域；当前没有其他 DNS 厂商适配器。
 - 必须显式接受 CA 条款及公共证书透明度披露，即 `termsAccepted=true`、`publicApiHostnameAccepted=true`。
 - 自动续期需要不带版本号的 `privateIngress.api.tlsSecretId`；API 与 admin 的证书引用必须分开。
-- ACME 账户、待签发私钥、CSR 与订单状态保存到批准的 API Key Vault；当前写入的是 Secret 对象，不是 Key Vault Certificate 生命周期策略。
+- ACME 账户、待签发私钥、CSR 与订单状态保存到批准的证书 Key Vault（与后端 Secret Vault 分离）；当前写入的是 Secret 对象，不是 Key Vault Certificate 生命周期策略。
 - DNS 修改以 ETag 条件更新，添加或移除本次挑战的准确 TXT 值，保留其他值及记录属性；失败后仍需检查残留状态，不能宣称任何异常都会自动清理。
 - 现有证书有效且剩余超过 30 天时保留；对无法校验且没有本 workflow 管理标记的证书，拒绝自动替换。
 - 新证书写入新 Secret 版本，保留旧版本；签发结果中的 `ingressUpdated=false` 明确表示入口尚未更新。
 
 DNS-01 用公共 DNS TXT 证明域名控制权，不要求私有源站开放公网 80 端口，也不依赖 API 域名的 A/CNAME 将挑战请求送到源站。runner 仍需具备访问 Azure 服务和 ACME 服务的批准网络路径，且 DNS 验证记录必须对公共 CA 可见。
 
-公开 CA 签发可能暴露证书中的域名。管理入口选择企业证书是当前的隐私和治理策略，**并非 Let's Encrypt 在技术上不能为私网服务的公开域名签发证书**。
+公开 CA 签发可能暴露证书中的域名。管理入口选择企业提供的公有 CA 证书是当前的治理策略，**并非 Let's Encrypt 在技术上不能为私网服务的公开域名签发证书**。
 
 ## 6. 证书发布与 Traefik 运行方式
 
@@ -132,10 +138,10 @@ DNS-01 用公共 DNS TXT 证明域名控制权，不要求私有源站开放公�
 | 控制 | 当前行为 | 不能据此宣称的能力 |
 | --- | --- | --- |
 | TLS 服务端验证 | 客户端或 Front Door 验证其连接对端的服务端证书 | 没有因此实现客户端证书认证或 mTLS |
-| API 身份与授权 | 认证代理要求企业 Entra Token 和客户端提供的 LiteLLM vkey；模型权限、预算由 LiteLLM 决定 | 服务端 TLS 证书不代表员工身份，也不能取代 Token 或 vkey |
+| API 身份与授权 | 默认原生 LiteLLM 校验 vkey；延期 Entra 模式要求企业 Token + 客户端 vkey；模型权限、预算仍由 LiteLLM 决定 | 服务端 TLS 证书不代表员工身份，也不能取代 Token 或 vkey |
 | 管理入口认证 | Front Door WAF先限制批准公网出口，私网回源后仍需OIDC或LiteLLM原生登录 | 来源IP不是用户身份，共享NAT内的任意主体不会因此自动获得管理员权限 |
 | 私钥存储 | Key Vault 持久保存，发布时产生 Kubernetes TLS Secret 副本并挂载到入口 Pod | 不是私钥从不离开 Key Vault，也不是 HSM 内不可导出的 TLS 私钥方案 |
-| 集群内传输 | Traefik 到认证代理使用 HTTP 8080，认证代理到 LiteLLM 使用 HTTP 4000 | 不是客户端到 LiteLLM 的全链路 TLS 或 Pod 间 mTLS |
+| 集群内传输 | 原生模式 Traefik 到 LiteLLM 为 HTTP 4000；延期企业模式经代理 HTTP 8080 再到 LiteLLM HTTP 4000 | 不是客户端到 LiteLLM 的全链路 TLS 或 Pod 间 mTLS |
 
 NetworkPolicy 提供网络访问隔离，不为 HTTP 内容加密。若客户要求集群内传输加密，需要另行设计后端 TLS 或服务网格等方案，并验证证书信任、流式响应及相关协议；当前文档不代表这些能力已经实现。
 
@@ -149,7 +155,7 @@ NetworkPolicy 提供网络访问隔离，不为 HTTP 内容加密。若客户要
 | --- | --- | --- |
 | 首次使用自动 API 证书 | 确认域名、DNS 权限、条款及管理证书；`certificate-renew` 计划、审核、执行；再运行 `private-ingress` 计划、审核、执行 | Key Vault 保存成功，实际入口证书和私网地址检查成功；接入 Front Door 后继续验证源站 TLS 和真实客户端 |
 | API 证书续期 | 运行 `certificate-renew`，确有新版本时再运行 `private-ingress` | 以实际提供服务的证书指纹和有效期为准，而非仅检查 Key Vault 最新版本 |
-| 管理证书更新 | 企业 PKI 准备新证书并更新批准的 Key Vault 引用或版本，再运行 `private-ingress` | runner 和管理客户端信任新链，私网管理入口及实际登录验证通过 |
+| 管理证书更新 | 企业准备 Microsoft 信任的公有 CA 证书，更新独立证书 Vault 引用或版本，再运行 `private-ingress` | Front Door 源站信任、SAN/链/指纹、私有入口和实际登录验证通过；仅 runner/浏览器信任私有 CA 不足以回源 |
 | 外部提供 API 证书 | 将符合要求的证书保存到批准的 Key Vault，再运行 `private-ingress` | 入口发布校验及 Front Door 源站验证均通过；外部流程负责后续续期 |
 
 如果引用固定 Secret 版本，新版本不会被该引用自动选中；自动 API 续期则要求使用无版本引用。无版本引用也不意味着已运行 Pod 自动换证，仍需发布。
@@ -174,7 +180,7 @@ NetworkPolicy 提供网络访问隔离，不为 HTTP 内容加密。若客户要
 - API 与管理证书主机名、用途、信任链和有效期正确；不受信任证书、错误主机名及错误入口 Host 被拒绝。
 - 更新后，实际提供服务的证书指纹与批准版本一致，入口 rollout 和长连接、SSE 等客户必需协议满足要求。
 - 两个Front Door边缘证书及两份私有源站TLS分别通过验证；两条PLS连接经过批准，Admin白名单外来源被WAF拒绝，白名单内来源仍须通过内层登录，错误密码不得放行。
-- 真实 API Token 与 vkey 认证、管理登录和来源隔离通过验证，不能仅靠匿名拒绝测试宣布业务可用。
+- 当前原生模式验证真实 vkey、管理密码登录、来源隔离、六条 API 路径与默认域/错误 Host 拒绝；延期企业模式另验 Token + vkey。不能仅靠匿名拒绝宣布业务可用，也不能以域名 Approved 代替实际 TLS/源站链校验。
 - 证书即将到期、签发失败、Key Vault 写入失败、发布失败、CA 信任链变化及可行回退都有明确处理责任和验证结果。
 
 本地单元测试、容器测试和计划校验只能证明对应的代码行为。客户 Azure DNS、Key Vault、Private AKS、Front Door、企业信任链和实际客户端仍须在获得授权的环境中完成验收。

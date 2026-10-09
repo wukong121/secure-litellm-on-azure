@@ -2,6 +2,7 @@ import copy
 import json
 from pathlib import Path
 import tempfile
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -172,6 +173,14 @@ class AdminAllowlistTests(unittest.TestCase):
             summary = {"planSha256": "a" * 64}
             report = {"adminAllowedCidrs": self.config["parameters"]["edge"]["adminAllowedCidrs"]}
             events = []
+            def binding(*args):
+                persisted = json.loads((directory / "allowlist-summary.json").read_text())
+                self.assertTrue(persisted["deploymentPerformed"])
+                self.assertFalse(persisted["bindingRefreshed"])
+                self.assertEqual(persisted["status"], "executing")
+                if failure:
+                    raise failure
+                events.append("bind")
             def deploy(*args, **kwargs):
                 (directory / "plan").mkdir()
                 self.assertEqual(kwargs["allowlist_baseline"], self.config)
@@ -189,8 +198,8 @@ class AdminAllowlistTests(unittest.TestCase):
                     patch("local_execution.admin_allowlist.install_report",
                           side_effect=lambda *args, **kwargs: events.append("persist")), \
                     patch("local_execution.admin_allowlist.refresh_binding",
-                          side_effect=failure or (lambda *args: events.append("bind"))), \
-                    patch("builtins.print"):
+                          side_effect=binding), \
+                    patch("builtins.print") as output:
                 if failure:
                     with self.assertRaisesRegex(MigrationError, "refresh failed"):
                         update(config_path, self.additions, "approved-change", ["owner"], operation, approved)
@@ -201,6 +210,13 @@ class AdminAllowlistTests(unittest.TestCase):
                     outcome = {}
                 else:
                     outcome = update(config_path, self.additions, "approved-change", ["owner"], operation, approved)
+                messages = [call.args[0] for call in output.call_args_list
+                            if call.kwargs.get("file") is sys.stderr]
+                self.assertTrue(any("What-if" in message for message in messages))
+                self.assertTrue(all(call.kwargs.get("flush") is True for call in output.call_args_list))
+                if operation == "execute" and approved == "a" * 64:
+                    self.assertTrue(any("No terminal confirmation" in message for message in messages))
+                    self.assertTrue(any("overwrite is automatic" in message for message in messages))
             return events, outcome
 
     def test_plan_never_deploys_or_persists_customer_configuration(self):

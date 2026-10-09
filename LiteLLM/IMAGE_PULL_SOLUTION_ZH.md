@@ -1,8 +1,10 @@
 # LiteLLM 官方镜像拉取与旧修复镜像迁移说明
 
+> **历史镜像取证/旧脚本参考。** 当前West US 3私有网关使用LiteLLM `1.104.0`固定源码供应链与批准的私有ACR digest，不是下文`1.95.0`默认镜像或个人fork。旧HTTPS/WS/图像回归不能证明当前版本或Front Door入口支持同样协议；当前构建/发布见[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)及[升级验证边界](../docs/litellm-1.104.0-upgrade-validation-2026-10-07.md)。
+
 ## 背景与问题本质
 
-本项目当前默认使用官方镜像 **`docker.litellm.ai/berriai/litellm:1.95.0`**。该版本已实测通过 HTTPS API Key 认证（HTTP 200）及 Responses WebSocket 握手（HTTP 101）。
+旧部署脚本默认使用官方镜像 **`docker.litellm.ai/berriai/litellm:1.95.0`**。该版本在旧参考链路实测通过HTTPS API Key认证（HTTP 200）及Responses WebSocket握手（HTTP 101），不是当前网关版本证明。
 
 镜像默认值在 [`deploy_mi_aks_litellm.py`](deploy_mi_aks_litellm.py) 中，可用环境变量 `LITELLM_IMAGE` 覆盖：
 

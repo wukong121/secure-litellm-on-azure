@@ -4,6 +4,8 @@
 > 入口：[客户迁移指南](../../docs/customer-migration-guide-zh.md)，阶段0可选backup组件。
 > 本模板管理初始专用VNet；阶段4添加子网后禁止重新套用bootstrap模板。不能接管已有共享VNet。
 
+> 当前West US 3为greenfield测试，跳过旧网关dump备份/恢复和本Stage0迁移备份模块，按[本地执行包](../../local_execution/README_ZH.md)选择greenfield bootstrap/network。当前Entra-only PostgreSQL Flexible Server的自动备份/PITR及业务恢复仍须独立验收；本模板成功不证明这些能力。
+
 ## 1. 目的
 
 本目录提供客户新目标资源组中的 PostgreSQL 逻辑备份存储 IaC。
@@ -53,7 +55,7 @@
 3. 若客户最终要求使用 Hub/Shared Services VNet，应在部署前覆盖网络设计，而不是部署后临时移动 Private Endpoint；
 4. 不使用其他业务项目 VNet，也不将 Private Endpoint 放入 AKS node subnet。
 
-当前 AKS `litellm-mi-aks` 位于 AKS 托管资源组中的 VNet。新建的 `litellm-security-vnet` 默认不会自动与当前 AKS VNet建立 Peering，因此现有 AKS 不能自动访问 Blob。直接修改 AKS 托管资源组或把 Private Endpoint 放入节点 subnet 会增加平台耦合，也不作为默认方案。
+旧脚本参考AKS可能位于AKS托管资源组中的VNet。新建的备份VNet默认不与旧AKS VNet建立Peering，因此旧AKS不能自动访问Blob；这不是当前West US 3集群拓扑声明。直接修改AKS托管资源组或把Private Endpoint放入节点subnet会增加耦合，不作为默认方案。
 
 第一次上传前必须从以下任一批准路径验证 DNS 和 TCP 443：
 

@@ -18,26 +18,79 @@ READMES = (
     "docs/litellm-ingress-tls-certificate-design-zh.md",
     "docs/litellm-bom-cost-comparison-zh.md",
     "docs/litellm-azure-security-hardening-zh.md",
-    "docs/litellm-stage7-entra-proxy-domains-2026-09-07.md",
     "docs/customer-migration-guide-zh.md",
     "local_execution/README_ZH.md",
     "local_execution/stage2-9-guide-zh.md",
-    "docs/customer-stage0-acceptance-checklist-zh.md",
-    "docs/customer-stage1-acceptance-checklist-zh.md",
-    "docs/customer-stage2-acceptance-checklist-zh.md",
-    "docs/customer-stage3-acceptance-checklist-zh.md",
     "docs/litellm-1.104.0-upgrade-validation-2026-10-07.md",
-    "docs/customer-stage4-acceptance-checklist-zh.md",
+    "docs/litellm-model-sync-runbook-zh.md",
     "docs/litellm-security-hardening-implementation-roadmap-zh.md",
     "docs/litellm-security-hardening-change-list-zh.md",
     "docs/litellm-code-completion-backlog-2026-09-07.md",
-    "docs/litellm-stage8-l3-audit-observability-2026-09-07.md",
-    "docs/litellm-stage9-edge-cutover-preparation-2026-09-07.md",
     "infra/edge/README_ZH.md",
 )
 
 
 class ProjectDocumentationTests(unittest.TestCase):
+    def test_root_readmes_record_bounded_current_native_baseline(self):
+        for name in ("README.md", "README_ZH.md"):
+            text = (ROOT / name).read_text()
+            with self.subTest(document=name):
+                self.assertIn("2026-10-09", text)
+                self.assertRegex(text, r"(?i)west\s*us\s*3")
+                for token in ("native", "1.104.0", "Balanced_B0", "10000", "SocketAddr"):
+                    self.assertIn(token, text)
+
+    def test_retired_stage_documents_have_no_remaining_references(self):
+        import subprocess
+
+        for pattern in ("litellm-stage[0-9]-*.md", "customer-stage[0-9]-acceptance-checklist-zh.md"):
+            self.assertEqual(list((ROOT / "docs").glob(pattern)), [])
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.md"], cwd=ROOT,
+            capture_output=True, text=True, check=True,
+        ).stdout.split("\0")
+        retired = r"(?:litellm-stage[0-9]-[^\s)\"<>]+\.md|customer-stage[0-9]-acceptance-checklist-zh\.md)"
+        for name in filter(None, tracked):
+            path = ROOT / name
+            if path.is_file():
+                with self.subTest(document=name):
+                    self.assertNotRegex(path.read_text(), retired)
+
+    def test_model_sync_has_one_standalone_runbook(self):
+        import subprocess
+        from scripts.model_configuration import INFO_FIELDS, PARAM_FIELDS
+
+        path = ROOT / "docs/litellm-model-sync-runbook-zh.md"
+        runbook = path.read_text()
+        self.assertIn("!docs/litellm-model-sync-runbook-zh.md", (ROOT / ".gitignore").read_text().splitlines())
+        for token in ("schema_version", "subscriptions", "subscription_id", "resources",
+                      "resource_group", "name", "endpoint", "models", "model_name", "deployment_name",
+                      "litellm_params", "model_info", "input_cost_per_token", "output_cost_per_token",
+                      "model_sync_evidence", "inferenceVerified=false", "预算检查",
+                      "https://docs.litellm.ai/docs/proxy/configs"):
+            self.assertIn(token, runbook)
+        for field in PARAM_FIELDS | INFO_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(f"`{field}`", runbook)
+        for directory in (ROOT / "docs", ROOT / "local_execution"):
+            for document in directory.rglob("*.md"):
+                if document == path:
+                    continue
+                with self.subTest(document=document.relative_to(ROOT)):
+                    self.assertNotRegex(document.read_text(), r"model[_-]sync|azure-openai\.catalog")
+        for source in re.findall(r"```bash\n(.*?)\n```", runbook, re.S):
+            result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        for source in re.findall(r"```json\n(.*?)\n```", runbook, re.S):
+            example = json.loads(source)
+            self.assertIsInstance(example, dict)
+            for subscription in example.get("subscriptions", []):
+                for resource in subscription["resources"]:
+                    self.assertIn("name", resource)
+                    self.assertNotIn("account_name", resource)
+        self.assertIn("预期值核验", runbook)
+        self.assertIn("不把手填 endpoint 当作绕过发现的兜底", runbook)
+
     def test_runtime_kubernetes_authorization_is_identity_and_scope_specific(self):
         import subprocess
 
@@ -290,53 +343,6 @@ class ProjectDocumentationTests(unittest.TestCase):
                     self.assertEqual(output.getvalue(), "")
                 self.assertNotIn("private-value-sentinel", output.getvalue())
 
-    def test_stage_three_guide_matches_checks_and_stage_flags(self):
-        from scripts.customer_migration import parameters_for, stage_checks
-        from tests.test_customer_migration import customer_config
-
-        path = "docs/customer-stage3-acceptance-checklist-zh.md"
-        guide = (ROOT / path).read_text()
-        self.assertIn("!" + path, (ROOT / ".gitignore").read_text().splitlines())
-        main = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
-        section = main.split("### 阶段3：", 1)[1].split("### 阶段4：", 1)[0]
-        self.assertIn(Path(path).name, section)
-        config = customer_config()
-        for check in stage_checks(3, config):
-            self.assertRegex(guide, r"## [2-4]\. " + check + "：")
-        self.assertIn(",".join(stage_checks(3, config)), guide)
-        self.assertIn(",".join(stage_checks(3, config)), section)
-        _, document = parameters_for(config, 3, "platform")
-        for key, value in (("deployContainerRegistry", True), ("deployStage4", False), ("deployStage5", False), ("containerRegistryPublicNetworkAccess", "Disabled")):
-            self.assertEqual(document["parameters"][key]["value"], value)
-            self.assertIn(key, guide)
-        workflow = yaml.load((ROOT / ".github/workflows/customer-acceptance.yml").read_text(), Loader=yaml.BaseLoader)
-        for field in ("reviewed_run_id", "checked_items", "evidence_notes", "confirm_environment"):
-            self.assertIn(workflow["on"]["workflow_dispatch"]["inputs"][field]["description"], guide)
-        for step, operation in (("S3-03", "draft"), ("S3-05", "confirm")):
-            self.assertIn(f"| {step} | {workflow['name']} | {operation} |", section)
-        self.assertIn("S3-04", section)
-        for prefix, count in (("O", 3), ("S", 4), ("T", 4)):
-            for number in range(1, count + 1):
-                self.assertIn(f"### {prefix}-{number} ", guide)
-
-    def test_stage_three_guide_distinguishes_public_source_and_private_evidence(self):
-        guide = (ROOT / "docs/customer-stage3-acceptance-checklist-zh.md").read_text()
-        source = (ROOT / ".github/workflows/source-image-checks.yml").read_text()
-        self.assertNotIn("workflow_security seal", source)
-        workflow = yaml.load(source, Loader=yaml.BaseLoader)
-        uploads = [step["with"] for step in workflow["jobs"]["source"]["steps"] if "upload-artifact@" in step.get("uses", "")]
-        self.assertEqual(len(uploads), 1)
-        for filename in uploads[0]["path"].splitlines():
-            self.assertIn(Path(filename).name, guide)
-        self.assertIn("不需要解密", guide)
-        for required in ("--severity CRITICAL --ignore-unfixed --exit-code 1", "stageAccepted", "不是独立认证或数字签名", "不要求ACR私网拉取成功", "输出中的未来资源名不是部署成功证明", "--assignee-object-id", "--include-inherited", "networkRuleBypassOptions=None", "当前confirm不支持部分通过", "12至4000字符", "independentlyVerified=false", "acceptance-record-test-3-<run ID>"):
-            self.assertIn(required, guide)
-        infrastructure = (ROOT / ".github/workflows/customer-deploy.yml").read_text()
-        self.assertIn("workflow_security seal", infrastructure)
-        for filename in ("reviewed-plan.json", "deployment-receipt.json", "deployment-outputs.json"):
-            self.assertIn(filename, infrastructure)
-            self.assertIn(filename, guide)
-
     def test_litellm_1104_runtime_upgrade_contract_is_aligned(self):
         from scripts.source_supply_chain import RUNTIME_CONTRACT, source_image
         from scripts.validate_manifests import EXPECTED_DIGEST
@@ -359,315 +365,6 @@ class ProjectDocumentationTests(unittest.TestCase):
         evidence = (ROOT / "docs/litellm-1.104.0-upgrade-validation-2026-10-07.md").read_text()
         for required in (digest, "CVE-2026-102268", "gpt-6.1", "189", "operator-managed"):
             self.assertIn(required, evidence)
-
-    def test_stage_three_guide_links_and_shell_examples(self):
-        import subprocess
-
-        path = ROOT / "docs/customer-stage3-acceptance-checklist-zh.md"
-        guide = path.read_text()
-        for target in re.findall(r"\]\(([^)]+)\)", guide):
-            link = urlsplit(target)
-            if link.scheme or not link.fragment:
-                continue
-            with self.subTest(target=target):
-                linked_path = path.parent / unquote(link.path)
-                headings = re.findall(r"^#{1,6} (.+)$", linked_path.read_text(), re.M)
-                anchors = {re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-") for heading in headings}
-                self.assertIn(unquote(link.fragment), anchors)
-        snippets = re.findall(r"```bash\n(.*?)\n```", guide, re.S)
-        self.assertGreaterEqual(len(snippets), 9)
-        for index, source in enumerate(snippets):
-            with self.subTest(snippet=index):
-                result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                for forbidden in ("get-access-token", "credential show", "role assignment create", "acr update", "acr login", "az aks stop", "docker pull", "rm -rf", "curl -k"):
-                    self.assertNotIn(forbidden, source)
-
-    def test_stage_four_guide_matches_checks_workflows_and_artifacts(self):
-        from scripts.customer_migration import stage_checks
-        from tests.test_customer_migration import customer_config
-
-        path = "docs/customer-stage4-acceptance-checklist-zh.md"
-        guide = (ROOT / path).read_text()
-        self.assertIn("!" + path, (ROOT / ".gitignore").read_text().splitlines())
-        main = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
-        section = main.split("### 阶段4：", 1)[1].split("### 阶段5：", 1)[0]
-        self.assertIn(Path(path).name, section)
-        checks = stage_checks(4, customer_config())
-        self.assertEqual(checks, ["private_dns_egress", "private_runner", "target_image_signature_sbom", "workload_identity", "private_ingress"])
-        for index, check in enumerate(checks, start=2):
-            self.assertIn(f"## {index}. {check}：", guide)
-        self.assertIn(",".join(checks), guide)
-        self.assertIn(",".join(checks), section)
-
-        acceptance = yaml.load((ROOT / ".github/workflows/customer-acceptance.yml").read_text(), Loader=yaml.BaseLoader)
-        for field in ("reviewed_run_id", "checked_items", "evidence_notes", "confirm_environment"):
-            self.assertIn(acceptance["on"]["workflow_dispatch"]["inputs"][field]["description"], guide)
-        runner = (ROOT / ".github/workflows/customer-runner-checks.yml").read_text()
-        promotion = (ROOT / ".github/workflows/promote-litellm-image.yml").read_text()
-        runtime = (ROOT / ".github/workflows/customer-runtime.yml").read_text()
-        for value in ("runner-checks-${{ inputs.environment }}-${{ github.run_id }}", "runner-readiness.json"):
-            self.assertIn(value, runner)
-            self.assertIn(value.replace("${{ inputs.environment }}", "test").replace("${{ github.run_id }}", "<run ID>"), guide)
-        for value in ("litellm-sbom-${{ github.run_id }}", "litellm-sbom.spdx.json", "target-image-verification.json", "target-image-summary.json", "Promoted immutable image:"):
-            self.assertIn(value, promotion)
-            self.assertIn(value.replace("${{ github.run_id }}", "<run ID>"), guide)
-        for value in ("runtime-summary.json", "runtime-review.json", "operation-receipt.json"):
-            self.assertIn(value, runtime)
-            self.assertIn(value, guide)
-
-    def test_stage_four_guide_is_explicit_about_evidence_gaps_and_safe_examples(self):
-        import subprocess
-
-        path = ROOT / "docs/customer-stage4-acceptance-checklist-zh.md"
-        guide = path.read_text()
-        for required in (
-            "GitHub Artifacts页面右侧", "不是镜像digest", "currentIngressObservationNotPlanBound",
-            "applied=true", "verified=true", "--severity CRITICAL --ignore-unfixed",
-            "同一个GitHub OIDC登录和临时`az acr login`上下文",
-            "当前Stage4流程没有创建该应用Pod或提供有界probe workflow",
-            "未执行W-3就不能确认此项", "当前confirm不支持部分通过",
-            "12至4000字符", "independentlyVerified=false", "acceptance-record-test-4-<run ID>",
-        ):
-            self.assertIn(required, guide)
-        for target in re.findall(r"\]\(([^)]+)\)", guide):
-            link = urlsplit(target)
-            if link.scheme or not link.fragment:
-                continue
-            with self.subTest(target=target):
-                linked_path = path.parent / unquote(link.path)
-                headings = re.findall(r"^#{1,6} (.+)$", linked_path.read_text(), re.M)
-                anchors = {re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-") for heading in headings}
-                self.assertIn(unquote(link.fragment), anchors)
-        snippets = re.findall(r"```bash\n(.*?)\n```", guide, re.S)
-        self.assertGreaterEqual(len(snippets), 9)
-        for index, source in enumerate(snippets):
-            with self.subTest(snippet=index):
-                result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                for forbidden in ("get-access-token", "role assignment create", "acr update", "az aks stop", "az aks command invoke", "kubectl apply", "docker pull", "rm -rf", "curl -k", "--admin"):
-                    self.assertNotIn(forbidden, source)
-
-    def test_stage_two_guide_matches_native_checks_and_workflow_inputs(self):
-        from scripts.customer_migration import stage_checks
-        from scripts.native_audit import native_audit_settings
-        from tests.test_customer_migration import customer_config
-
-        path = "docs/customer-stage2-acceptance-checklist-zh.md"
-        guide = (ROOT / path).read_text()
-        self.assertIn("!" + path, (ROOT / ".gitignore").read_text().splitlines())
-        main = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
-        section = main.split("### 阶段2：", 1)[1].split("### 阶段3：", 1)[0]
-        self.assertIn(Path(path).name, section)
-        examples = re.findall(r"```json\n(.*?)\n```", guide, re.S)
-        self.assertEqual(len(examples), 1)
-        config = customer_config()
-        config.update(json.loads(examples[0]))
-        self.assertEqual(native_audit_settings(config)["mode"], "native")
-        for check in stage_checks(2, config):
-            self.assertRegex(guide, r"## [2-6]\. " + check + "：")
-        self.assertIn(",".join(stage_checks(2, config)), guide)
-        self.assertIn(",".join(stage_checks(2, config)), section)
-        acceptance = yaml.load((ROOT / ".github/workflows/customer-acceptance.yml").read_text(), Loader=yaml.BaseLoader)
-        migration = yaml.load((ROOT / ".github/workflows/customer-migration.yml").read_text(), Loader=yaml.BaseLoader)
-        for field in ("reviewed_run_id", "checked_items", "evidence_notes", "confirm_environment"):
-            self.assertIn(acceptance["on"]["workflow_dispatch"]["inputs"][field]["description"], guide)
-        for field, value in (("stage", "2"), ("mode", "config-check"), ("component", "none")):
-            self.assertIn(value, migration["on"]["workflow_dispatch"]["inputs"][field]["options"])
-            self.assertIn(f"{field}={value}", section)
-        for step in ("S2-01", "S2-02", "S2-03", "S2-04"):
-            self.assertIn(f"| {step} |", section)
-            self.assertIn(f"| {step} |", guide)
-        for prefix, count in (("N", 3), ("I", 3), ("D", 4), ("C", 4), ("P", 3)):
-            for number in range(1, count + 1):
-                self.assertIn(f"### {prefix}-{number} ", guide)
-
-    def test_stage_two_guide_keeps_decision_and_runtime_evidence_separate(self):
-        from scripts.customer_migration import stage_fingerprint
-        from tests.test_customer_migration import customer_config
-
-        guide = (ROOT / "docs/customer-stage2-acceptance-checklist-zh.md").read_text()
-        for required in ("Stage2没有infrastructure或runtime部署动作", "不授予也不禁止某人读取Prompt", "nativeAuditRead", "AZURE_DATABASE_CLIENT_ID", "仅配置个人User管理员", "RPO", "RTO", "Salt", "WebSocket", "X-LiteLLM-API-Key", "Stage3/platform首次plan前", "不进入Stage2指纹", "当前confirm不支持部分通过", "12至4000字符", "independentlyVerified=false", "acceptance-record-test-2-<run ID>"):
-            self.assertIn(required, guide)
-        config = customer_config()
-        before = stage_fingerprint(config, 2)
-        config["parameters"]["platform"]["containerRegistryName"] = "changedregistry"
-        self.assertEqual(stage_fingerprint(config, 2), before)
-        self.assertIn("bootstrapWorkspaceName", guide)
-        config["contentAudit"] = {"mode": "native", "retentionDays": 7, "contentPolicyAccepted": True}
-        self.assertNotEqual(stage_fingerprint(config, 2), before)
-
-    def test_stage_two_guide_links_and_readonly_shell_examples(self):
-        import subprocess
-
-        path = ROOT / "docs/customer-stage2-acceptance-checklist-zh.md"
-        guide = path.read_text()
-        for target in re.findall(r"\]\(([^)]+)\)", guide):
-            link = urlsplit(target)
-            if link.scheme or not link.fragment:
-                continue
-            with self.subTest(target=target):
-                linked_path = path.parent / unquote(link.path)
-                headings = re.findall(r"^#{1,6} (.+)$", linked_path.read_text(), re.M)
-                anchors = {re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-") for heading in headings}
-                self.assertIn(unquote(link.fragment), anchors)
-        snippets = re.findall(r"```bash\n(.*?)\n```", guide, re.S)
-        self.assertEqual(len(snippets), 3)
-        for index, source in enumerate(snippets):
-            with self.subTest(snippet=index):
-                result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertNotRegex(source, r"\b(create|delete|update|deploy|apply|execute|set-secret)\b")
-                self.assertNotIn("get-access-token", source)
-
-    def test_stage_one_acceptance_guide_matches_checks_and_workflow_inputs(self):
-        from scripts.customer_migration import stage_checks
-        from tests.test_customer_migration import customer_config
-
-        path = "docs/customer-stage1-acceptance-checklist-zh.md"
-        guide = (ROOT / path).read_text()
-        self.assertIn("!" + path, (ROOT / ".gitignore").read_text().splitlines())
-        main = (ROOT / "docs/customer-migration-guide-zh.md").read_text()
-        section = main.split("### 阶段1：", 1)[1].split("### 阶段2：", 1)[0]
-        self.assertIn(Path(path).name, section)
-        config = customer_config()
-        config.pop("legacyAccess", None)
-        for check in stage_checks(1, config):
-            self.assertRegex(guide, r"## [2-4]\. " + check + "：")
-        self.assertIn(",".join(stage_checks(1, config)), guide)
-        config["legacyAccess"] = {"mode": "load-balancer", "allowedCidrs": ["192.0.2.10/32"], "accessImpactAccepted": True}
-        self.assertIn(",".join(stage_checks(1, config)), guide)
-        workflow = yaml.load((ROOT / ".github/workflows/customer-acceptance.yml").read_text(), Loader=yaml.BaseLoader)
-        for field in ("reviewed_run_id", "checked_items", "evidence_notes", "confirm_environment"):
-            self.assertIn(workflow["on"]["workflow_dispatch"]["inputs"][field]["description"], guide)
-        for prefix, count in (("H", 4), ("A", 4), ("R", 4), ("S", 3)):
-            for number in range(1, count + 1):
-                self.assertIn(f"### {prefix}-{number} ", guide)
-        for step, operation in (("S1-11", "draft"), ("S1-13", "confirm")):
-            self.assertIn(f"| {step} | {workflow['name']} | {operation} |", section)
-        self.assertIn("S1-12", section)
-        for required in ("当前confirm不支持部分通过", "12至4000字符", "independentlyVerified=false", "acceptance-record-test-1-<run ID>"):
-            self.assertIn(required, guide)
-
-    def test_stage_one_guide_section_links_resolve(self):
-        path = ROOT / "docs/customer-stage1-acceptance-checklist-zh.md"
-        for target in re.findall(r"\]\(([^)]+)\)", path.read_text()):
-            link = urlsplit(target)
-            if link.scheme or not link.fragment:
-                continue
-            with self.subTest(target=target):
-                linked_path = path.parent / unquote(link.path)
-                headings = re.findall(r"^#{1,6} (.+)$", linked_path.read_text(), re.M)
-                anchors = {re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-") for heading in headings}
-                self.assertIn(unquote(link.fragment), anchors)
-
-    def test_stage_one_guide_distinguishes_alert_and_snapshot_evidence(self):
-        guide = (ROOT / "docs/customer-stage1-acceptance-checklist-zh.md").read_text()
-        monitoring = (ROOT / "infra/monitoring/main.bicep").read_text()
-        rules = re.findall(r"name: '(alert-litellm-[^']+)'", monitoring)
-        self.assertEqual(len(rules), 7)
-        for name in (*rules, "ag-litellm-stage1-owner"):
-            self.assertIn(name, guide)
-        for required in ("ContainerLogV2", "KubePodInventory", "InsightsMetrics", "_ResourceId =~ LegacyAksId", "ValidSamples", "没有磁盘样本不等于使用率0%", "Action Group测试不等于真实告警条件已经触发", "runtime-review.json", "before-postgres.stdout.txt", "before-litellm-mi-proxy.stdout.txt", "不包含这两个完整快照", "不能证明它产生于加固前", "Deployment的strategy", "当前没有`legacy-hardening-restore`", "sha256sum --check"):
-            self.assertIn(required, guide)
-        workflow = yaml.load((ROOT / ".github/workflows/customer-runtime.yml").read_text(), Loader=yaml.BaseLoader)
-        seal_commands = [step["run"] for job in workflow["jobs"].values() for step in job.get("steps", []) if "workflow_security seal" in step.get("run", "")]
-        self.assertEqual(len(seal_commands), 1)
-        self.assertIn("runtime-review.json", seal_commands[0])
-        self.assertNotIn("before-postgres.stdout.txt", seal_commands[0])
-        self.assertNotIn("before-litellm-mi-proxy.stdout.txt", seal_commands[0])
-
-    def test_stage_one_shell_examples_are_syntax_valid_and_non_destructive(self):
-        import subprocess
-
-        guide = (ROOT / "docs/customer-stage1-acceptance-checklist-zh.md").read_text()
-        snippets = re.findall(r"```bash\n(.*?)\n```", guide, re.S)
-        self.assertGreaterEqual(len(snippets), 8)
-        for index, source in enumerate(snippets):
-            with self.subTest(snippet=index):
-                result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True, check=False)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                for forbidden in ("--admin", "view --raw", "get secret", "rollout undo", "rollout restart", "--dry-run=server", "kubectl apply", "kubectl delete", "az aks stop", "enable-addons", "disable-addons", "rm -rf", "curl -k", "chmod 777"):
-                    self.assertNotIn(forbidden, source)
-
-    def test_stage_zero_acceptance_guide_is_actionable_and_matches_contracts(self):
-        import ast
-        from scripts.customer_migration import stage_checks
-        from scripts.runtime_secrets import BACKEND_SECRETS
-        from tests.test_customer_migration import customer_config
-
-        path = "docs/customer-stage0-acceptance-checklist-zh.md"
-        guide = (ROOT / path).read_text()
-        self.assertIn("!" + path, (ROOT / ".gitignore").read_text().splitlines())
-        self.assertIn("customer-stage0-acceptance-checklist-zh.md", (ROOT / "docs/customer-migration-guide-zh.md").read_text())
-        for check in stage_checks(0, customer_config()):
-            self.assertRegex(guide, r"## [2-5]\. " + check + "：")
-        for prefix, count in (("I", 5), ("B", 4), ("K", 4), ("P", 4)):
-            for number in range(1, count + 1):
-                self.assertIn(f"### {prefix}-{number} ", guide)
-        for required in (*BACKEND_SECRETS.values(), "fullRestoreSucceeded", "backupSha256", "getpass.GetPassWarning", "hmac.compare_digest", "--auth-mode login", "default_transaction_read_only=on", "当前没有专门的报告核验/密钥导出workflow", "当前confirm不支持部分通过", "不能假设等于Master", "12至4000字符"):
-            self.assertIn(required, guide)
-        workflow = yaml.load((ROOT / ".github/workflows/customer-acceptance.yml").read_text(), Loader=yaml.BaseLoader)
-        for field in ("reviewed_run_id", "checked_items", "evidence_notes", "confirm_environment"):
-            self.assertIn(workflow["on"]["workflow_dispatch"]["inputs"][field]["description"], guide)
-        self.assertIn(",".join(stage_checks(0, customer_config())), guide)
-        snippets = re.findall(r"\.venv/bin/python - <<'PY'\n(.*?)\nPY", guide, re.S)
-        self.assertEqual(len(snippets), 1)
-        ast.parse(snippets[0])
-
-    def test_stage_zero_kubelogin_guidance_preserves_file_and_host_security(self):
-        guide = (ROOT / "docs/customer-stage0-acceptance-checklist-zh.md").read_text()
-        section = guide.split("### I-2 ", 1)[1].split("### I-3 ", 1)[0]
-        for required in ('namei -l "$PRIVATE_KUBECONFIG"', "type -a kubelogin", "AppArmor", "/snap/bin/kubelogin", "journalctl -k", "az aks install-cli", '--client-version "$KUBECTL_VERSION"', "--kubelogin-version v0.2.19", '--kubelogin-install-location "$HOME/.local/bin/kubelogin"', '--install-location "$HOME/.local/bin/kubectl"', 'export PATH="$HOME/.local/bin:$PATH"', "hash -r", "不需要重新获取凭据", "不需要sudo"):
-            self.assertIn(required, section)
-        commands = "\n".join(re.findall(r"```bash\n(.*?)\n```", section, re.S))
-        for forbidden in ("chmod 777", "sudo ", "--admin", "view --raw", "aa-disable", "systemctl stop apparmor"):
-            self.assertNotIn(forbidden, commands)
-        self.assertLess(commands.index('export PATH="$HOME/.local/bin:$PATH"'), commands.rindex("kubelogin convert-kubeconfig"))
-
-    def test_stage_zero_key_comparison_example_does_not_expose_material(self):
-        from contextlib import redirect_stdout
-        import getpass
-        import io
-        from types import SimpleNamespace
-        from unittest.mock import patch
-        import warnings
-
-        guide = (ROOT / "docs/customer-stage0-acceptance-checklist-zh.md").read_text()
-        source = re.findall(r"\.venv/bin/python - <<'PY'\n(.*?)\nPY", guide, re.S)[0]
-        saved = {"LITELLM_MASTER_KEY": "PRIVATE_SYNTHETIC_MASTER", "LITELLM_SALT_KEY": "PRIVATE_SYNTHETIC_SALT"}
-        good = SimpleNamespace(returncode=0, stdout=json.dumps(saved), stderr="")
-        cases = (
-            ("match", [good, good], list(saved.values()), 0),
-            ("mismatch", [good, SimpleNamespace(returncode=0, stdout=json.dumps({**saved, "LITELLM_SALT_KEY": "PRIVATE_DIFFERENT"}), stderr="")], list(saved.values()), 1),
-            ("absent", [SimpleNamespace(returncode=0, stdout=json.dumps({"LITELLM_MASTER_KEY": saved["LITELLM_MASTER_KEY"]}), stderr="")], list(saved.values()), 1),
-            ("empty", [SimpleNamespace(returncode=0, stdout=json.dumps({**saved, "LITELLM_SALT_KEY": ""}), stderr="")], list(saved.values()), 1),
-            ("invalid-value", [SimpleNamespace(returncode=0, stdout=json.dumps({**saved, "LITELLM_SALT_KEY": 123}), stderr="")], list(saved.values()), 1),
-            ("read-failed", [SimpleNamespace(returncode=1, stdout="PRIVATE_STDOUT", stderr="PRIVATE_STDERR")], list(saved.values()), 1),
-            ("invalid-json", [SimpleNamespace(returncode=0, stdout="PRIVATE_INVALID_JSON", stderr="")], list(saved.values()), 1),
-            ("no-tty", [], getpass.GetPassWarning("PRIVATE_UNSAFE_TTY"), 1),
-        )
-        environment = {"PRIVATE_KUBECONFIG": "/synthetic/private-kubeconfig", "LEGACY_NAMESPACE": "litellm", "BACKEND_PODS": "backend-one backend-two"}
-        for name, responses, recovered, expected in cases:
-            selected_environment = {**environment, "BACKEND_PODS": "backend-one backend-two" if len(responses) == 2 else "backend-one"}
-            with self.subTest(case=name), warnings.catch_warnings(), patch.dict("os.environ", selected_environment, clear=True), patch("getpass.getpass", side_effect=recovered), patch("subprocess.run", side_effect=responses) as run, redirect_stdout(io.StringIO()) as output:
-                with self.assertRaises(SystemExit) as exit_result:
-                    exec(compile(source, "stage0-key-comparison-example", "exec"), {})
-                self.assertEqual(exit_result.exception.code, expected)
-                self.assertNotIn("PRIVATE_", output.getvalue())
-                self.assertIn("MATCH:" if expected == 0 else "NOT VERIFIED:", output.getvalue())
-                if name in {"match", "mismatch", "absent", "empty", "invalid-value"}:
-                    field_status = {"match": "MATCH", "mismatch": "MISMATCH", "absent": "ABSENT", "empty": "EMPTY", "invalid-value": "INVALID"}[name]
-                    self.assertIn("LITELLM_SALT_KEY: " + field_status, output.getvalue())
-                    self.assertIn("LITELLM_MASTER_KEY: MATCH", output.getvalue())
-                if name == "no-tty":
-                    run.assert_not_called()
-                for call in run.call_args_list:
-                    self.assertTrue(call.kwargs["capture_output"])
-                    self.assertEqual(call.kwargs["timeout"], 30)
-                    arguments = call.args[0]
-                    self.assertEqual(arguments[:5], ["kubectl", "--kubeconfig", environment["PRIVATE_KUBECONFIG"], "-n", environment["LEGACY_NAMESPACE"]])
-                    self.assertNotIn("PRIVATE_", " ".join(arguments))
 
     def test_runner_connectivity_workflow_example_and_runbook_stay_aligned(self):
         from scripts.customer_migration import COMPONENTS
@@ -841,7 +538,7 @@ class ProjectDocumentationTests(unittest.TestCase):
         self.assertIn("legacy-access-restore", guide)
         self.assertIn("edge-bind", guide)
 
-    def test_current_guides_select_native_audit_without_claiming_rollout(self):
+    def test_current_guides_select_native_audit_without_claiming_production_acceptance(self):
         for name in ("README.md", "README_ZH.md", "docs/customer-migration-guide-zh.md", "docs/customer-deployment-workflows-zh.md"):
             text = (ROOT / name).read_text()
             with self.subTest(document=name):
@@ -850,7 +547,8 @@ class ProjectDocumentationTests(unittest.TestCase):
                 self.assertNotIn("L3是首发必需", text)
                 self.assertNotIn("L3 is a required release capability", text)
         guide = (ROOT / "docs/customer-deployment-workflows-zh.md").read_text()
-        self.assertIn("不是原生模式已上线", guide)
+        self.assertIn("2026-10-09", guide)
+        self.assertNotIn("不是原生模式已上线", guide)
         self.assertIn("不跳过Stage8进入Stage9", guide)
         self.assertIn("原生模式的observability不再依赖auditRuntime", guide)
         self.assertIn("readyForCustomerMigration", guide)
@@ -861,7 +559,7 @@ class ProjectDocumentationTests(unittest.TestCase):
             "README.md", "README_ZH.md", "auth-proxy/README_ZH.md", "deploy/README_ZH.md",
             "infra/README_ZH.md", "infra/edge/README_ZH.md", "tests/README.md", "tests/README_ZH.md",
             "docs/customer-deployment-workflows-zh.md", "docs/customer-migration-guide-zh.md",
-            "docs/customer-private-runner-preparation-zh.md", "docs/customer-stage2-acceptance-checklist-zh.md",
+            "docs/customer-private-runner-preparation-zh.md",
             "docs/litellm-ingress-tls-certificate-design-zh.md", "local_execution/stage2-9-guide-zh.md",
         )
         forbidden = (

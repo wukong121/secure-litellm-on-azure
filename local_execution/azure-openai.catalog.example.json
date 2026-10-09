@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "subscriptions": [
+    {
+      "subscription_id": "22222222-2222-4222-8222-222222222222",
+      "resources": [
+        {
+          "resource_group": "rg-existing-chat",
+          "name": "foundry-team-east",
+          "endpoint": "https://aoai-team-east.openai.azure.com/",
+          "models": [
+            {
+              "model_name": "customer-chat",
+              "deployment_name": "existing-chat-east",
+              "litellm_params": {
+                "api_version": "2024-10-21",
+                "temperature": 0.7,
+                "max_tokens": 2048,
+                "rpm": 120,
+                "tpm": 120000
+              },
+              "model_info": {
+                "mode": "chat",
+                "base_model": "azure/gpt-4o",
+                "input_cost_per_token": 0.0000025,
+                "output_cost_per_token": 0.00001,
+                "cache_read_input_token_cost": 0.00000125
+              }
+            }
+          ]
+        },
+        {
+          "resource_group": "rg-existing-embedding",
+          "name": "aoai-team-embeddings",
+          "models": [
+            {
+              "model_name": "customer-embedding",
+              "deployment_name": "existing-embedding-large",
+              "litellm_params": {
+                "api_version": "2024-10-21",
+                "dimensions": 1536,
+                "encoding_format": "float"
+              },
+              "model_info": {
+                "mode": "embedding",
+                "input_cost_per_token": 0.00000013,
+                "max_input_tokens": 8191
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "subscription_id": "66666666-6666-4666-8666-666666666666",
+      "resources": [
+        {
+          "resource_group": "rg-existing-west",
+          "name": "aoai-team-west",
+          "models": [
+            {
+              "model_name": "customer-chat",
+              "deployment_name": "existing-chat-west",
+              "litellm_params": {
+                "api_version": "2024-10-21",
+                "temperature": 0.7,
+                "max_tokens": 2048
+              },
+              "model_info": {
+                "mode": "chat",
+                "input_cost_per_token": 0.0000025,
+                "output_cost_per_token": 0.00001
+              }
+            },
+            {
+              "model_name": "customer-chat-small",
+              "deployment_name": "existing-chat-mini",
+              "litellm_params": {
+                "api_version": "2024-10-21",
+                "seed": 42,
+                "response_format": {"type": "json_object"}
+              },
+              "model_info": {
+                "mode": "chat",
+                "base_model": "gpt-4o-mini",
+                "input_cost_per_token": 0.00000015,
+                "output_cost_per_token": 0.0000006
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

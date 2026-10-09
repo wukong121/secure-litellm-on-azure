@@ -1,14 +1,16 @@
 # 客户私网 Runner 准备说明
 
-> 核对日期：2026-09-23
+> 核对日期：2026-10-09
 >
-> 用途：为现有 LiteLLM 安全增强及并行迁移准备 GitHub Actions 执行机。
+> 用途：为LiteLLM从零部署、现有环境安全增强及并行迁移准备GitHub Actions执行机；本地执行的身份与计划流程另按本地指南。
 >
 > 方式：一次性人工准备、注册并复用。不要求自动建机、JIT调度、镜像工厂或自动回收平台。
 
 ## 1. 先看结论
 
-**准备一台独立的 Ubuntu 24.04 LTS、x64 Linux VM，能访问 GitHub 和新旧环境私网，安装 Docker 及下文工具，注册为客户仓库的 self-hosted runner。** 可以由实施人员协助完成。
+**准备一台独立的 Ubuntu 24.04 LTS、x64 Linux VM，能访问 GitHub 和目标环境私网（migration另需旧环境），安装 Docker 及下文工具，注册为客户仓库的 self-hosted runner。** 可以由实施人员协助完成。
+
+当前已运行的是West US 3 greenfield native dev/test网关，Admin原生登录与virtual key的Codex Responses推理已有用户确认；不因此证明GitHub OIDC作业、全部runner权限或生产迁移已验收。greenfield不准备旧AKS/备份路径，不执行Stage1；native-auth不执行Stage7 Graph/代理部署，但仍使用Azure身份、AKS WI/OIDC和私有数据服务。路径边界见[当前部署状态](customer-deployment-workflows-zh.md#当前运行状态与路径边界2026-10-09)，本地操作另见[Stage2–9指南](../local_execution/stage2-9-guide-zh.md)。
 
 没有管理网络时，使用下文Bicep独立创建管理VNet及Runner；已有获准管理子网或专用Linux执行机时也可复用。通过批准的路由和DNS连接新旧环境，不需要GPU，不要求运行在AKS内，也不必安装Kubernetes集群或Docker Desktop。
 
@@ -122,6 +124,8 @@ GitHub中确认Idle后，将输出`runnerLabels`的数组值填入Repository Var
 
 #### 新旧集群的接通顺序
 
+以下旧集群与备份步骤仅适用于migration；greenfield先准备管理网络，再按Stage0 network及Stage4连接目标私网，不为填表虚构旧集群或运行备份检查。
+
 1. 先创建独立管理网络和Runner，完成GitHub注册；不依赖新集群存在。旧AKS未指定自建VNet时通常仍有自动创建的节点VNet，不将Runner塞入该节点子网。
 2. 旧Kubernetes API是公网模式时，从Runner访问获准API端点并验证身份/RBAC；有来源白名单则批准NAT实际出口。旧PG通过Pod内命令备份，不必给PG新增公网入口。私有API则先具备对应私网连接。
 3. Stage0建立私有备份网络后，即需连接管理VNet和备份网络，配置相应Private DNS Zone关联或公司DNS转发，再运行备份上传；不是等新AKS创建才处理网络。
@@ -166,12 +170,12 @@ Docker默认数据目录通常在系统盘。即使挂载了数据盘，也要�
 | 从runner访问的目标 | 端口 | 用途与注意事项 |
 | --- | --- | --- |
 | GitHub Actions、GitHub API及下载服务 | TCP 443出站 | 注册、领任务、下载Actions、OIDC、日志/artifact上传与读取 |
-| Azure Resource Manager、Microsoft Entra ID、Microsoft Graph | TCP 443出站 | OIDC换取Azure身份、资源操作及批准的目录动作 |
+| Azure Resource Manager、Microsoft Entra ID、Microsoft Graph | TCP 443出站 | OIDC换取Azure身份及资源操作；Graph仅用于已批准的Entra目录动作，native-auth延期用户SSO不等于取消Azure身份 |
 | 新旧AKS API端点 | TCP 443 | `kubectl`、获取工作负载、发布、exec/cp/port-forward；旧集群若有API来源限制须允许runner的实际出口 |
 | 批准的Key Vault、ACR及其数据端点、备份Blob | TCP 443 | 通过各自私有端点访问；ACR登录成功不等于其镜像层下载端点可达 |
 | 新PostgreSQL Flexible Server | TCP 5432 | TLS/Entra连接、恢复、角色和schema操作 |
 | 所选Redis服务 | 以部署输出为准，当前托管配置为TCP 10000/TLS | 数据连接验证；不要按普通Redis默认6379直接放行 |
-| API/Admin入口域名 | TCP 443 | Stage4/6通过显式私网地址与SNI验证两个origin；Stage9后正常DNS均指向各自Front Door endpoint，Admin白名单外公网来源必须由WAF拒绝，白名单内仍须通过内层登录 |
+| API/Admin入口域名 | TCP 443 | Stage4/6通过显式私网地址与SNI验证两个origin；Stage9后正常DNS均指向各自Front Door Premium endpoint。Admin WAF按实际批准公网IPv4 `/32`及IPv6 `/128`拒绝其他来源，白名单内仍须内层登录；不推断公司CIDR |
 | 模型服务端点 | TCP 443，按验证需要 | 走批准私网路径；runner成功不能替代Pod Workload Identity验证 |
 | 企业DNS、时间同步服务 | DNS UDP/TCP 53；NTP通常UDP 123 | 仅访问批准的解析器和时间源 |
 
@@ -242,7 +246,7 @@ Python依赖的固定版本以[运行workflow](../.github/workflows/customer-run
 | --- | --- |
 | GitHub接单 | 仓库/组织管理员完成runner注册、访问范围和标签配置；runner出现在列表且Idle |
 | Azure资源与数据平面 | 管理员给workflow的OIDC身份授予所需范围的ARM、Storage、Vault、ACR等权限；注册runner不授予这些权限 |
-| AKS、PostgreSQL与Entra目录 | 分别配置Kubernetes RBAC、PG Entra角色、Graph授权；仅有ARM Contributor不等于可读Secret、exec、恢复数据库或创建Entra应用 |
+| AKS、PostgreSQL与Entra目录 | 按集群配置分别授予AKS Azure RBAC/namespace权限、PG Entra角色及可选Graph授权；当前新AKS已启用Azure RBAC、禁用本地账号及WI/OIDC，不能使用`--admin`绕过授权。仅有ARM Contributor不等于可读Secret、exec、恢复数据库或创建Entra应用 |
 
 OIDC身份仍配置在仓库/Environment变量中，包括`AZURE_TENANT_ID`、`AZURE_SUBSCRIPTION_ID`、部署及运行身份Client ID；专项身份按实际动作配置。Runner只提供执行环境，不能用给VM分配订阅Owner来代替这些授权。
 
@@ -303,11 +307,11 @@ done
 - [ ] OIDC登录到正确租户/订阅；新旧AKS API可达且允许范围内的只读命令成功。
 - [ ] 备份Storage、Key Vault、ACR及其数据端点通过正确私网DNS和TLS访问；新资源尚未创建时记录为待验证，不记为失败或通过。
 - [ ] 目标PG创建后，真实TLS/Entra连接和所需角色操作成功；不能把TCP 5432可连当成恢复权限已验证。
-- [ ] API/admin域名、证书链和来源CIDR验证成功，包含企业管理CA信任；模型与Pod身份检查在相应阶段执行。
+- [ ] API/admin域名、源站公有证书链和批准来源验证成功；企业代理CA仅按实际管理网络需要安装。Admin用户名/密码来自后台Vault的独立`litellm-ui-password`，不是源站证书Vault或Master Key；模型与Pod身份检查在相应阶段执行。
 - [ ] 镜像晋级、私有入口等所选动作所需工具可用；权限和出站缺口按实际失败补齐。
 - [ ] 备份恢复前核对空间和执行时间，运行结束检查敏感临时文件及凭据缓存。
 
-可运行`Customer private runner checks`：选择environment，首次`check_target=false, check_backup=false`；目标AKS建立后再选check_target=true。Stage0备份网络准备后选择`check_backup=true`，额外检查备份资源、Runner到PE的DNS/TLS及同OIDC身份的Blob容器只读列举。公开摘要仅显示固定检查名/状态，详细结果加密上传。**这不是“runner全部权限就绪”证明**，不验证Blob上传/下载、Pod exec/cp、其他资源写权限或模型调用；失败不会自动放宽NSG或授予角色。
+可运行`Customer private runner checks`：首次选择environment、`check_target=false, check_backup=false`；migration另读旧集群，greenfield只核对工具/身份、不读取旧集群，目标访问标为待验证。目标AKS建立后再选check_target=true；greenfield保持check_backup=false，不把旧集群检查作为从零部署前置条件。migration Stage0备份网络准备后选择`check_backup=true`，额外检查备份资源、Runner到PE的DNS/TLS及同OIDC身份的Blob容器只读列举。公开摘要仅显示固定检查名/状态，详细结果加密上传。**这不是“runner全部权限就绪”证明**，不验证Blob上传/下载、Pod exec/cp、其他资源写权限或模型调用；失败不会自动放宽NSG或授予角色。
 
 相关入口：[运行操作](../.github/workflows/customer-runtime.yml)、[镜像晋级](../.github/workflows/promote-litellm-image.yml)、[入口检查](../.github/workflows/customer-gateway-checks.yml)。基础设施部署和部分授权/配置检查使用GitHub托管runner，不要误以为其中一个绿勾就验证了这台私网机器。
 
@@ -320,6 +324,8 @@ done
 | `setup-python`失败 | 3.13下载域名、Ubuntu兼容包、tool cache权限/磁盘；不是直接放宽为root运行 |
 | Docker permission denied | 服务账户组成员与socket权限；加入组后需让服务重新取得组信息，不开放socket给所有人 |
 | 解析为公网IP或超时 | Private DNS Zone关联/转发、实际路由、NSG、Docker网段重叠；不靠临时公网放行绕过 |
+| 私有AKS API A记录缺失、绑定检查挂起 | 先核对AKS是否停止；保持`Running/Succeeded`至rollout/绑定检查结束，获准启动后等待DNS/PE恢复，再按[启动复核](../local_execution/stage2-9-guide-zh.md#私有aks自动停机后的启动复核)检查，不开放AKS公网 |
+| `get-credentials`要求覆盖或身份错配 | 当前自动化在每次操作目录用`--overwrite-existing`非交互取得独立kubeconfig，不应要求输入`y`；核对实际代码revision、显式`--kubeconfig`和Azure RBAC，不改默认context或使用admin凭据 |
 | Azure登录成功，操作403 | 当前workflow的具体OIDC身份、资源范围、数据平面/AKS/PG/Graph授权，不是重新给VM登录一次 |
 | 证书或PG TLS失败 | CA链、域名/SNI、系统时间、libpq支持和企业代理；不使用`--insecure`或关闭验证修复 |
 | 镜像登录成功但拉取/签名失败 | ACR数据端点、源registry/CDN、Sigstore出口、工具版本与权限 |
@@ -327,7 +333,7 @@ done
 
 ## 9. 运行期间与结束后
 
-当前私网runtime作业最长120分钟，镜像晋级最长45分钟，入口检查最长15分钟；首次下载和准备还需时间。任务运行期间不要设置到点关机、抢占回收或自动重启。修改超时本身不能保证数据迁移在批准窗口内完成。
+当前私网runtime作业最长120分钟，镜像晋级最长45分钟，入口检查最长15分钟；首次下载和准备还需时间。任务运行期间不要设置到点关机、抢占回收或自动重启，且保持目标AKS运行至绑定/入口检查完成。修改超时本身不能保证数据迁移在批准窗口内完成。
 
 自托管runner不会像GitHub托管runner一样每次作业后销毁。现有runtime会清理其临时工作目录，但**不保证整个VM、Docker层、runner诊断、Azure CLI、Docker登录缓存或所有失败路径都已清理**。应限制磁盘访问，并在作业空闲后检查本次生成的备份、kubeconfig、认证缓存和失败容器；保留需要的受控备份，禁止直接对共享机器执行全局prune/删除。
 

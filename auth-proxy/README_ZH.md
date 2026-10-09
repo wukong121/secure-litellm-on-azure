@@ -2,6 +2,8 @@
 
 本组件属于[安全增强版LiteLLM on Azure](../README_ZH.md)。客户部署入口为[分阶段迁移指南](../docs/customer-migration-guide-zh.md)，从受保护Environment注入配置；不能把本地合成测试通过当作生产身份、协议和审计验收。
 
+> **可选分支，不是当前网关入口。** 2026-10-09的West US 3 greenfield测试使用隔离native API/Admin ingress、API virtual key及LiteLLM原生用户名/密码fallback登录；用户已验证Admin登录和Codex Responses推理，未采用本组件的用户Entra SSO或API双凭据。Azure模型/数据面的Workload Identity及Entra-only PostgreSQL/Redis不等于用户SSO。当前操作按[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)执行。
+
 ## API双凭据契约（2026-09-10）
 
 采用“企业Token + 客户端LiteLLM vkey”。企业准入与模型业务授权分开，不再将API身份映射为代理保存的内部Key，也不再维护API模型ACL。
@@ -49,7 +51,7 @@ FDID不是Secret，不能替代PLS连接审批、双平面私有LB、Admin WAF�
 
 2026-09-10第一阶段选择原生Spend Logs正文留痕，本节自建L3、独立`/audit`查看、审批/保全与恢复仅是增强分支。2026-09-13已接入原生生成器、模式化发布/证据门禁和核心查询；当前`auditTeamId`/binding.audit.capture仍代表强制自建L3，不能认为原生开关会自动满足它，也不要直接删除binding来绕过失败关闭。普通日志/Trace/artifact仍不能复制正文；已有L3数据、审批与保留要求不因改方案失效。详见[部署指南](../docs/customer-deployment-workflows-zh.md)。
 
-L3首期实现包括按身份选择采集、私有Blob适配器、有界JSON/SSE响应、元数据索引、独立`audit_reader`审批查看、`/audit`页面和留存/保全清理。默认关闭，不改变阶段7已关闭协议。详见[阶段8实施记录](../docs/litellm-stage8-l3-audit-observability-2026-09-07.md)。
+L3首期实现包括按身份选择采集、私有Blob适配器、有界JSON/SSE响应、元数据索引、独立`audit_reader`审批查看、`/audit`页面和留存/保全清理。默认关闭，不改变阶段7已关闭协议。配置、维护窗口与恢复边界见[部署与验收指南](../docs/customer-deployment-workflows-zh.md)；当前客户执行顺序见[迁移指南](../docs/customer-migration-guide-zh.md)。
 
 执行`make validate-stage8`运行回归，`node auth-proxy/test/stage8-demo.mjs`运行内存存储合成HTTP闭环。设置`STAGE8_CONFIG=/etc/stage8/config.json`接入配置；生产仅用Workload Identity，不使用连接密钥。必审计binding设置`audit: {capture: true, teamId: "<受控Team>"}`，服务不可用则拒绝请求。独立审计binding为`plane=admin, role=audit_reader, models=[]`且不配置keyFile。
 

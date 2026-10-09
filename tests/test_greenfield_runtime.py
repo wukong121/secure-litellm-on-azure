@@ -17,6 +17,31 @@ class GreenfieldRuntimeTests(unittest.TestCase):
         self.config.pop("legacy")
         self.config["parameters"].pop("monitoring")
 
+    def test_repeated_cluster_connections_overwrite_only_operation_kubeconfig(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, \
+                patch("scripts.migration_runtime.AzureCommands") as azure, \
+                patch("scripts.migration_runtime.run_command") as command:
+            path = Path(directory)
+            kubeconfig = path / "kubeconfig"
+            azure.return_value.run.return_value = {
+                "tenantId": self.config["azure"]["tenantId"], "id": self.config["azure"]["subscriptionId"],
+            }
+            def capture(arguments, directory, label):
+                if label == "cluster-credentials":
+                    self.assertIn("--overwrite-existing", arguments)
+                    self.assertEqual(arguments[arguments.index("--file") + 1], str(kubeconfig))
+                    kubeconfig.write_text("synthetic credentials")
+                else:
+                    self.assertEqual(kubeconfig.stat().st_mode & 0o777, 0o600)
+                    kubeconfig.write_text("synthetic converted credentials")
+                return ""
+            command.side_effect = capture
+            for _ in range(2):
+                result = connect_cluster(self.config, path, legacy=False)
+                self.assertEqual(result, ["kubectl", "--kubeconfig", str(kubeconfig), "--namespace", "litellm"])
+            self.assertEqual(command.call_count, 4)
+            self.assertEqual(kubeconfig.stat().st_mode & 0o777, 0o600)
+
     def test_rejects_legacy_actions_before_any_cloud_or_cluster_call(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as directory, patch("scripts.migration_runtime.AzureCommands") as azure, patch("scripts.migration_runtime.run_command") as command:
             path = Path(directory)

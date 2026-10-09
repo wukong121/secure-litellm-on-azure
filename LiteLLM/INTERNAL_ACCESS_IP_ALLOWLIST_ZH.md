@@ -1,4 +1,6 @@
-# 限制 LiteLLM 仅公司内网访问（IP 白名单方案）
+# 旧公网ingress参考：公司出口IP白名单
+
+> **不是当前West US 3 Admin门禁的修改流程。** 当前Admin通过独立Front Door Premium endpoint及PLS访问隔离native ingress，WAF固定Prevention，以否定`SocketAddr`规则阻断白名单外来源，精确批准公网IPv4 `/32`和IPv6 `/128`；内层仍须LiteLLM用户名/密码登录，不是用户Entra SSO。当前来源更新/验证按[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)和[edge参数说明](../infra/edge/README_ZH.md)执行，不能用本文ingress注解替代WAF或将PLS NAT地址当作管理员出口。
 
 > 目标：让 `https://<你的域名>` 这个 LiteLLM 入口**只允许公司公网出口 IP 访问**，
 > 其他来源一律返回 `403 Forbidden`。域名仍解析到公网、HTTPS 证书照常使用，
@@ -15,7 +17,7 @@
 | 公司出口 IP **动态变化**（家庭宽带、拨号） | ❌ 白名单会误伤，不适用 |
 
 本方案基于 **ingress-nginx** 的 `whitelist-source-range` 注解，属于**网络层（L3/L4）源 IP 管控**。
-建议与 LiteLLM 的 **API Key（master key / 虚拟 key）** 一起使用，形成「网络 + 鉴权」双保险。
+旧网关推理应同时使用受限Virtual Key，形成「网络 + 鉴权」双保险；不向普通用户分发Master Key。
 
 ---
 

@@ -1,4 +1,6 @@
-# HTTPS 证书签发排障指南
+# 旧网关参考：HTTPS 证书签发排障指南
+
+> 本文只适用于旧部署脚本的公网ingress及cert-manager/Let's Encrypt HTTP-01，不是当前West US 3私有网关。当前Front Door托管边缘证书与私有ingress源站证书分别管理，certificate Vault与backend Vault分离；不要开放源站80端口或重装本文旧controller。当前证书检查/更新见[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)及[证书设计](../docs/litellm-ingress-tls-certificate-design-zh.md)。
 
 部署时设置了 `LITELLM_HOSTNAME` + `LETSENCRYPT_EMAIL` 后，脚本会自动装 ingress-nginx + cert-manager 并用 Let's Encrypt 签发证书。若证书迟迟 `READY=False` / `https` 打不开，多半是下面**三个叠加问题**之一，按顺序排查即可。
 

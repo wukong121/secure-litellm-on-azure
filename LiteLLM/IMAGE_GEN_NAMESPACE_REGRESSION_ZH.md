@@ -1,5 +1,7 @@
 # Codex `image_gen` Namespace 冲突回归报告
 
+> **2026-08-10旧版本/隔离回归证据。** 下文`1.95.0`、loopback和图像路径结果不描述当前West US 3 `1.104.0`源码构建或Front Door private native网关；当前用户Codex Responses推理成功也不证明图像路径或全部工具namespace矩阵。当前版本的有界证据见[升级验证](../docs/litellm-1.104.0-upgrade-validation-2026-10-07.md)，发布/协议验收见[本地Stage2–9指南](../local_execution/stage2-9-guide-zh.md)。
+
 ## 测试目的
 
 验证升级到官方 LiteLLM `1.95.0` 后，Codex 通过 Responses API 调用普通 GPT 模型时，是否仍会出现以下错误：
