@@ -16,17 +16,34 @@ The diagram includes optional and production enhancement paths, not a claim that
 
 **Phase-one audit decision (2026-09-10):** use native Spend Logs for approved prompt/response retention in private PostgreSQL. Native configuration rendering and mode-specific publishing/evidence checks are implemented; static base manifests still disable body logging. Actual retention, access, cleanup, capacity and failure acceptance require separate evidence. Custom L3 capture, Blob/HSM and recovery/governance services are optional enhancements, not a universal launch requirement. See the [phase-one brief](docs/litellm-content-audit-phase1-customer-brief-zh.md) and [deployment guide](docs/customer-deployment-workflows-zh.md). Do not skip gates to enable logging.
 
-```text
-API clients ----------> llm-api.<customer-domain>   -> API Front Door endpoint / WAF ------------> API PLS -> private API ingress
-Admins on approved egress -> llm-admin.<customer-domain> -> Admin Front Door / source-IP WAF gate -> Admin PLS -> private Admin ingress
-                                                                                                            |
-                                                                                               LiteLLM on Private AKS
-                                                                                                            |
-                                                                                               Azure OpenAI / Foundry
+```mermaid
+flowchart TB
+    apiClients["API clients"]
+    admins["Admins on approved egress"]
+    apiEdge["llm-api.&lt;customer-domain&gt;<br/>Front Door API endpoint / WAF"]
+    adminEdge["llm-admin.&lt;customer-domain&gt;<br/>Front Door Admin endpoint / source-IP WAF"]
+    apiPls["API Private Link Service"]
+    adminPls["Admin Private Link Service"]
 
-Supporting services: Key Vault, PostgreSQL Flexible Server, Managed Redis,
-private ACR and metadata-only monitoring. Native Spend Logs retain approved
-content in PostgreSQL; independent L3 storage is an optional enhancement.
+    subgraph aks["Private AKS"]
+        apiIngress["Private API ingress"]
+        adminIngress["Private Admin ingress"]
+        litellm["Native LiteLLM<br/>Virtual keys / Admin password login"]
+        apiIngress --> litellm
+        adminIngress --> litellm
+    end
+
+    apiClients --> apiEdge --> apiPls --> apiIngress
+    admins --> adminEdge --> adminPls --> adminIngress
+    litellm -->|"Workload Identity / Private Endpoint"| models["Azure OpenAI / Microsoft Foundry"]
+    litellm --> postgres["Private PostgreSQL Flexible Server<br/>Budgets / native Spend Logs / approved content retention"]
+    litellm --> redis["Azure Managed Redis<br/>Shared routing and rate-limit state"]
+    backendVault["Private backend Key Vault"] -.->|"Secrets via CSI"| litellm
+    certificateVault["Separate certificate Key Vault"] -.->|"TLS certificates"| apiIngress
+    certificateVault -.->|"TLS certificates"| adminIngress
+    acr["Private ACR<br/>Digest-pinned images"] -.-> litellm
+    litellm -.->|"Metadata only"| monitoring["Azure Monitor / Log Analytics"]
+    litellm -.->|"Optional enhancement"| l3["Independent L3 audit storage"]
 ```
 
 | Area | Design and implementation scope |

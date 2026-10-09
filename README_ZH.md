@@ -16,17 +16,34 @@
 
 **第一阶段审计决策（2026-09-10）**：采用原生Spend Logs将获批的Prompt/Response保存在私有PostgreSQL。原生配置生成及按模式区分的发布/证据检查已实现；静态Base清单仍关闭正文。实际留存、查询权限、清理、容量及故障验收需独立证据。自建L3采集、正文Blob/HSM及恢复治理服务是可选增强项，不作为所有客户的首发前提。详见[基础版方案](docs/litellm-content-audit-phase1-customer-brief-zh.md)及[部署指南](docs/customer-deployment-workflows-zh.md)，不得跳过门禁启用。
 
-```text
-API客户端 --------> llm-api.<客户域名>   -> API Front Door endpoint / WAF ------------> API PLS -> 私有API入口
-批准公网出口的管理员 -> llm-admin.<客户域名> -> Admin Front Door / WAF来源IP白名单 -> Admin PLS -> 私有Admin入口
-                                                                                                  |
-                                                                                     Private AKS上的LiteLLM
-                                                                                                  |
-                                                                                     Azure OpenAI / Foundry
+```mermaid
+flowchart TB
+    apiClients["API 客户端"]
+    admins["使用批准公网出口的管理员"]
+    apiEdge["llm-api.&lt;客户域名&gt;<br/>Front Door API endpoint / WAF"]
+    adminEdge["llm-admin.&lt;客户域名&gt;<br/>Front Door Admin endpoint / WAF 来源白名单"]
+    apiPls["API Private Link Service"]
+    adminPls["Admin Private Link Service"]
 
-配套服务：Key Vault、PostgreSQL Flexible Server、Managed Redis、
-私有ACR和仅接收必要元数据的监控。批准的正文进入PostgreSQL原生Spend Logs；
-独立L3审计存储仅在选择增强方案时部署。
+    subgraph aks["Private AKS"]
+        apiIngress["私有 API 入口"]
+        adminIngress["私有 Admin 入口"]
+        litellm["原生 LiteLLM<br/>Virtual key / Admin 密码登录"]
+        apiIngress --> litellm
+        adminIngress --> litellm
+    end
+
+    apiClients --> apiEdge --> apiPls --> apiIngress
+    admins --> adminEdge --> adminPls --> adminIngress
+    litellm -->|"Workload Identity / Private Endpoint"| models["Azure OpenAI / Microsoft Foundry"]
+    litellm --> postgres["私有 PostgreSQL Flexible Server<br/>预算 / 原生 Spend Logs / 获批正文留存"]
+    litellm --> redis["Azure Managed Redis<br/>共享路由与限流状态"]
+    backendVault["私有后端 Key Vault"] -.->|"CSI 挂载应用 Secret"| litellm
+    certificateVault["独立证书 Key Vault"] -.->|"TLS 证书"| apiIngress
+    certificateVault -.->|"TLS 证书"| adminIngress
+    acr["私有 ACR<br/>镜像 digest 锁定"] -.-> litellm
+    litellm -.->|"仅必要元数据"| monitoring["Azure Monitor / Log Analytics"]
+    litellm -.->|"可选增强"| l3["独立 L3 审计存储"]
 ```
 
 | 领域 | 设计与实现范围 |
