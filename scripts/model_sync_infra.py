@@ -131,8 +131,9 @@ def endpoint_state(account, alias, context, azure):
 
 def role_state(account, identity, source, azure):
     scope = account["accountResourceId"]
-    roles = azure.run(["role", "assignment", "list", "--scope", scope, "--all",
-                      "--subscription", account["subscriptionId"]])
+    roles = azure.run(["role", "assignment", "list", "--scope", scope,
+                      "--subscription", account["subscriptionId"],
+                      "--fill-principal-name", "false", "--fill-role-definition-name", "false"])
     require(isinstance(roles, list), "Unexpected role assignment response")
     matching = [role for role in roles if role.get("scope", "").lower() == scope.lower()
                 and role.get("principalId", "").lower() == identity["properties"]["principalId"].lower()

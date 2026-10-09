@@ -600,3 +600,20 @@ OpenAI hostname，并核对 `groupId=account`；DNS A 记录仍须与对应地�
 
 确认修复已合入并更新 Runner 后重新 plan。不要为绕过旧误判而把 A 记录扩成
 全部 NIC 地址、删除/重建既有 PE，或重跑整套 Stage4 基础设施。
+
+### 8.3 Azure CLI 的资源级角色查询参数
+
+若旧版本报 `group or scope are not required when --all is used`，原因是脚本给
+`az role assignment list` 同时传了 `--scope` 和 `--all`；这是 CLI 参数冲突，
+不是模型权限不足，不要为此扩大 IAM 权限。
+
+修复版本保留账号资源级 `--scope` 和明确的 `--subscription`，不使用订阅级
+`--all`。查询还设置 `--fill-principal-name false` 和
+`--fill-role-definition-name false`，只读取已有角色分配的 ID、scope、
+principal 和条件，不需要 Microsoft Graph 显示名查询或额外角色名称解析。
+精确 scope、workload principal、OpenAI User 角色及条件校验仍然保留；查询失败
+不会被当作“角色不存在”继续执行。
+
+更新到修复版本后重新 plan 并审核新 hash。此修复不修改角色分配，也不保证
+其他资源的读写权限或整条计划已经验收；真正的 `AuthorizationFailed` 仍应按
+受控权限流程处理。
