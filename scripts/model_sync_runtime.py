@@ -13,6 +13,7 @@ from scripts.customer_migration import fingerprint, private_write, require
 from scripts.migration_runtime import connect_cluster
 from scripts.model_sync_catalog import model_list
 from scripts.model_configuration import COST_FIELDS, connection_endpoint, finite_number
+from scripts.runtime_configuration import apply_runtime_settings, runtime_overrides
 
 
 def command(kube, arguments, timeout=120):
@@ -49,6 +50,17 @@ def safe_settings(value, path=()):
             safe_settings(item, (*path, str(index)))
     elif isinstance(value, str) and "://" in value:
         require(urlsplit(value).password is None, "Live runtime configuration contains a credential-bearing URL")
+
+
+def load_runtime_yaml(text):
+    require(isinstance(text, str), "Live runtime YAML must be text")
+    try:
+        value = yaml.safe_load(text)
+    except yaml.YAMLError:
+        from scripts.customer_migration import MigrationError
+        raise MigrationError("Live runtime YAML cannot be parsed; configuration values are withheld") from None
+    require(isinstance(value, dict), "Live runtime YAML must be an object")
+    return value
 
 
 def identity_context(config, azure):
@@ -131,8 +143,10 @@ def baseline(config, identity, kube):
     config_map = json.loads(command(kube, ["get", "configmap", volume["configMap"]["name"], "-o", "json"]))
     require(set(config_map.get("data", {})) == {"config.yaml"} and not config_map.get("binaryData"),
             "Model ConfigMap must contain only config.yaml")
-    runtime = yaml.safe_load(config_map["data"]["config.yaml"])
-    require(isinstance(runtime, dict), "Live runtime YAML must be an object")
+    runtime = load_runtime_yaml(config_map["data"]["config.yaml"])
+    require(all(isinstance(runtime.get(section, {}), dict)
+                for section in ("general_settings", "litellm_settings", "router_settings")),
+            "Live runtime settings sections must be objects")
     safe_settings(runtime)
     require(runtime.get("general_settings", {}).get("store_model_in_db") is False
             and runtime.get("litellm_settings", {}).get("enable_azure_ad_token_refresh") is True,
@@ -141,6 +155,11 @@ def baseline(config, identity, kube):
     require(sorted(runtime.get("model_list", []), key=lambda item: item["model_info"]["id"]) ==
             sorted(expected, key=lambda item: item["model_info"]["id"]),
             "Live model YAML differs from customer mapping; reconcile baseline drift before planning")
+    for section, values in runtime_overrides(config).items():
+        for key, value in values.items():
+            require(key in runtime.get(section, {})
+                    and fingerprint(runtime[section][key]) == fingerprint(value),
+                    "Live runtime setting differs from customer configuration: " + section + "." + key)
     return {"deploymentUid": deployment["metadata"]["uid"],
             "deploymentResourceVersion": deployment["metadata"]["resourceVersion"],
             "deploymentSpecSha256": fingerprint(deployment["spec"]),
@@ -164,6 +183,12 @@ def render(desired, current):
             affinities.pop(name, None)
         for name in sorted(wanted_groups):
             affinities.setdefault(name, copy.deepcopy(prototype))
+    runtime = apply_runtime_settings(runtime, runtime_overrides(desired))
+    return configuration_payload(runtime, current)
+
+
+def configuration_payload(runtime, current):
+    safe_settings(runtime)
     text = yaml.safe_dump(runtime, sort_keys=False)
     name = "litellm-config-" + hashlib.sha256(text.encode()).hexdigest()[:12]
     config_map = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": name, "namespace": "litellm"},
@@ -173,7 +198,7 @@ def render(desired, current):
              {"op": "test", "path": "/metadata/resourceVersion", "value": current["deploymentResourceVersion"]},
              {"op": "test", "path": pointer, "value": current["configMapName"]},
              {"op": "replace", "path": pointer, "value": name}]
-    model_changed = runtime != current["runtime"]
+    model_changed = fingerprint(runtime) != fingerprint(current["runtime"])
     return {"configMap": config_map, "patch": patch, "modelChanged": model_changed,
             "runtimeSha256": fingerprint(runtime)}
 
@@ -224,7 +249,13 @@ def verify_deployment(kube, deployment, current, wanted_name):
     require(deployment["spec"] == expected, "Post-rollout Deployment differs from the exact model-only patch")
 
 
-def apply(kube, payload, current, directory, record):
+def apply(kube, payload, current, directory, record, save_state=None):
+    def save():
+        if save_state is not None:
+            save_state()
+        else:
+            private_write(directory / "model-sync-state.json", json.dumps(record, indent=2))
+
     require("autoscaler" in current, "Approval lacks autoscaler evidence; replan or use separately approved recovery")
     if payload["modelChanged"]:
         fresh = json.loads(command(kube, ["get", "deployment", "litellm", "-o", "json"]))
@@ -237,18 +268,18 @@ def apply(kube, payload, current, directory, record):
         command(kube, ["apply", "--server-side", "--field-manager=llmgw-migration",
                        "-f", str(directory / "configmap.json")])
         record["phase"] = "configmap-created"
-        private_write(directory / "model-sync-state.json", json.dumps(record, indent=2))
+        save()
         command(kube, ["patch", "deployment", "litellm", "--type=json",
                        "--patch-file", str(directory / "deployment-patch.json")])
         record["applicationPatched"] = True
         record["phase"] = "rollout"
-        private_write(directory / "model-sync-state.json", json.dumps(record, indent=2))
+        save()
     command(kube, ["rollout", "status", "deployment/litellm", "--timeout=900s"], timeout=930)
     deployment = json.loads(command(kube, ["get", "deployment", "litellm", "-o", "json"]))
     wanted_name = payload["configMap"]["metadata"]["name"] if payload["modelChanged"] else current["configMapName"]
     verify_deployment(kube, deployment, current, wanted_name)
     config_map = json.loads(command(kube, ["get", "configmap", wanted_name, "-o", "json"]))
-    require(fingerprint(yaml.safe_load(config_map["data"]["config.yaml"])) == payload["runtimeSha256"],
+    require(fingerprint(load_runtime_yaml(config_map["data"]["config.yaml"])) == payload["runtimeSha256"],
             "Post-rollout ConfigMap differs from desired exact model mapping")
     # Check each ready backend Pod actually mounted this YAML, not just the control-plane object.
     selector = ",".join(k + "=" + v for k, v in deployment["spec"]["selector"]["matchLabels"].items())
