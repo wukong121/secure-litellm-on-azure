@@ -42,6 +42,11 @@ jobs:
           python -m unittest tests.test_azure_application tests.test_schema_migration tests.test_schema_runtime
           python -m unittest tests.test_runtime_secrets tests.test_backend_access
           python -m unittest tests.test_backend_manifest
+          python -m unittest tests.test_model_sync tests.test_model_sync_evidence tests.test_model_configuration
+          mkdir -p temp/model-sync-ci
+          chmod 700 temp/model-sync-ci
+          az bicep build --file infra/model-sync/main.bicep --outfile temp/model-sync-ci/main.json
+          chmod 600 temp/model-sync-ci/main.json
           python -m unittest tests.test_proxy_config tests.test_entra_apps tests.test_admin_credentials
           python -m unittest tests.test_entra_access
           python -m unittest tests.test_entra_revoke tests.test_audit_governance tests.test_workflow_artifacts

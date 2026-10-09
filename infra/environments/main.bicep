@@ -32,6 +32,7 @@ type azureOpenAIConnection = {
   subscriptionId: string
   resourceGroupName: string
   accountName: string
+  endpoint: string?
 }
 
 type stage5DataConfiguration = {

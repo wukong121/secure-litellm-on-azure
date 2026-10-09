@@ -27,6 +27,7 @@ READMES = (
     "docs/customer-stage2-acceptance-checklist-zh.md",
     "docs/customer-stage3-acceptance-checklist-zh.md",
     "docs/litellm-1.104.0-upgrade-validation-2026-10-07.md",
+    "docs/litellm-model-sync-runbook-zh.md",
     "docs/customer-stage4-acceptance-checklist-zh.md",
     "docs/litellm-security-hardening-implementation-roadmap-zh.md",
     "docs/litellm-security-hardening-change-list-zh.md",
@@ -38,6 +39,41 @@ READMES = (
 
 
 class ProjectDocumentationTests(unittest.TestCase):
+    def test_model_sync_has_one_standalone_runbook(self):
+        import subprocess
+        from scripts.model_configuration import INFO_FIELDS, PARAM_FIELDS
+
+        path = ROOT / "docs/litellm-model-sync-runbook-zh.md"
+        runbook = path.read_text()
+        self.assertIn("!docs/litellm-model-sync-runbook-zh.md", (ROOT / ".gitignore").read_text().splitlines())
+        for token in ("schema_version", "subscriptions", "subscription_id", "resources",
+                      "resource_group", "name", "endpoint", "models", "model_name", "deployment_name",
+                      "litellm_params", "model_info", "input_cost_per_token", "output_cost_per_token",
+                      "model_sync_evidence", "inferenceVerified=false", "预算检查",
+                      "https://docs.litellm.ai/docs/proxy/configs"):
+            self.assertIn(token, runbook)
+        for field in PARAM_FIELDS | INFO_FIELDS:
+            with self.subTest(field=field):
+                self.assertIn(f"`{field}`", runbook)
+        for directory in (ROOT / "docs", ROOT / "local_execution"):
+            for document in directory.rglob("*.md"):
+                if document == path:
+                    continue
+                with self.subTest(document=document.relative_to(ROOT)):
+                    self.assertNotRegex(document.read_text(), r"model[_-]sync|azure-openai\.catalog")
+        for source in re.findall(r"```bash\n(.*?)\n```", runbook, re.S):
+            result = subprocess.run(["bash", "-n"], input=source, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        for source in re.findall(r"```json\n(.*?)\n```", runbook, re.S):
+            example = json.loads(source)
+            self.assertIsInstance(example, dict)
+            for subscription in example.get("subscriptions", []):
+                for resource in subscription["resources"]:
+                    self.assertIn("name", resource)
+                    self.assertNotIn("account_name", resource)
+        self.assertIn("预期值核验", runbook)
+        self.assertIn("不把手填 endpoint 当作绕过发现的兜底", runbook)
+
     def test_runtime_kubernetes_authorization_is_identity_and_scope_specific(self):
         import subprocess
 
