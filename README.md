@@ -63,6 +63,8 @@ These are bounded current observations and target capabilities, not universal de
 
 ## Start Here
 
+For approval-bound runtime settings updates, including disabling shared environment-credential Admin login, see the [runtime configuration runbook (Chinese)](docs/litellm-runtime-config-runbook-zh.md). Updates roll the existing backend configuration and persist approved overrides; they do not redeploy Azure infrastructure.
+
 1. Choose migration or greenfield in the [deployment guide](docs/customer-deployment-workflows-zh.md). Existing gateway migration details are in the [migration guide](docs/customer-migration-guide-zh.md).
     If GitHub Actions is unavailable, use the bounded [local Stage 0–9 package (Chinese)](local_execution/README_ZH.md), which supports migration and greenfield. Follow the [Stage 2–9 guide](local_execution/stage2-9-guide-zh.md) for the explicit native-auth branch and its release gates; deferring Entra alone is not permission to release traffic.
 2. Fork this repository (public forks are supported), protect the default branch, and configure the selected GitHub Environment and its Azure OIDC identities. Customer operations are manual workflows, never untrusted PR jobs.

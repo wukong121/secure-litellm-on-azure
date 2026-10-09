@@ -63,6 +63,8 @@ flowchart TB
 
 ## 客户从这里开始
 
+需要受控更新运行参数或关闭共享环境凭据的 Admin 登录入口时，使用[运行配置更新手册](docs/litellm-runtime-config-runbook-zh.md)。获批设置通过现有后端滚动更新并持久化，不重新部署 Azure 基础设施。
+
 1. 阅读[客户部署与验收指南](docs/customer-deployment-workflows-zh.md)，选择已有网关迁移或从零部署；迁移细节另见[客户迁移指南](docs/customer-migration-guide-zh.md)。
     无法运行GitHub Actions时，可使用支持migration及greenfield的受限[Stage0–9本地手工执行包](local_execution/README_ZH.md)。显式native-auth分支及其发布门禁见[Stage2–9指南](local_execution/stage2-9-guide-zh.md)；仅延期Entra不等于获准启流量。
 2. fork本仓库，公开fork也可使用；保护默认分支，创建所选Environment并配置Azure OIDC身份。客户操作仅手动运行，不让外部PR使用私网runner。

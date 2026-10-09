@@ -17,6 +17,7 @@ import yaml
 from scripts.backend_access import render_backend_access
 from scripts.customer_migration import ROOT, configured, private_write, require, stage_fingerprint
 from scripts.model_configuration import connection_endpoint, rendered_models, validate_options
+from scripts.runtime_configuration import apply_runtime_settings, runtime_overrides
 
 
 def application_authentication(config):
@@ -32,7 +33,11 @@ def application_authentication(config):
 
 def application_settings(config):
     settings = config.get("application", {})
-    require(isinstance(settings, dict) and {"backendImage", "models"}.issubset(settings) and not set(settings) - {"backendImage", "models", "authentication"}, "application requires backendImage and models")
+    require(isinstance(settings, dict) and {"backendImage", "models"}.issubset(settings) and not set(settings) - {"backendImage", "models", "authentication", "runtimeSettings"}, "application requires backendImage and models")
+    overrides = runtime_overrides(config)
+    require("disable_env_credential_login" not in overrides.get("general_settings", {})
+            or application_authentication(config)["mode"] == "native",
+            "Environment-credential login overrides require native authentication")
     application_authentication(config)
     registry = config["parameters"]["platform"]["containerRegistryName"].lower()
     require(isinstance(settings["backendImage"], str) and re.fullmatch(re.escape(registry) + r"\.azurecr\.io/[a-z0-9][a-z0-9/._-]*@sha256:[0-9a-f]{64}", settings["backendImage"]) is not None, "Backend image must pin a digest in the approved private ACR")
@@ -75,6 +80,7 @@ def render_backend_manifest(config, platform, versions, host, endpoint_subnet):
     affinities = next(iter(runtime["router_settings"]["model_group_affinity_config"].values()))
     runtime["router_settings"]["model_group_affinity_config"] = {name: list(affinities) for name in sorted({model["modelGroup"] for model in settings["models"]})}
     runtime["general_settings"].update(disable_prisma_schema_update=True, store_model_in_db=False)
+    runtime = apply_runtime_settings(runtime, runtime_overrides(config))
     config_text = yaml.safe_dump(runtime, sort_keys=False)
     config_name = "litellm-config-" + hashlib.sha256(config_text.encode()).hexdigest()[:12]
     config_map = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": config_name, "namespace": "litellm"}, "data": {"config.yaml": config_text}}

@@ -39,7 +39,7 @@ def protected_source(path, label):
 def source_fingerprints():
     paths = ["local_execution/model_sync.py", "scripts/model_sync_catalog.py", "scripts/model_configuration.py",
              "local_execution/model_sync_evidence.py",
-             "scripts/model_sync_infra.py", "scripts/model_sync_runtime.py",
+             "scripts/model_sync_infra.py", "scripts/model_sync_runtime.py", "scripts/runtime_configuration.py",
              "local_execution/runner.py", "local_execution/release_report.py",
              "scripts/customer_migration.py", "scripts/backend_manifest.py",
              "scripts/migration_deploy.py", "scripts/migration_runtime.py",
