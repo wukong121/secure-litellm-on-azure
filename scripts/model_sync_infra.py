@@ -157,16 +157,24 @@ def assert_what_if(document, allowed):
 
     def check(changes):
         for change in changes:
-            resource = change.get("resourceId", "").lower()
+            resource = change.get("resourceId")
+            require(isinstance(resource, str) and bool(resource.strip()),
+                    "What-if resourceId must be a non-empty string")
+            resource = resource.lower()
             kind = change.get("changeType")
-            require(resource in allowed, "What-if resource is outside the exact model-sync allowlist")
             require(kind in {"Create", "Modify", "NoChange", "Ignore"}, "What-if Delete/Unsupported/unknown change blocked")
+            children = change.get("resourceChanges", [])
+            require(isinstance(children, list), "What-if resourceChanges must be a list")
+            if children:
+                check(children)
+            # Incremental What-if also lists untouched resources outside the template.
+            if kind == "Ignore":
+                continue
+            require(resource in allowed,
+                    f"What-if resource is outside the exact model-sync allowlist: {kind} {resource}")
             require(kind != "Modify" or allowed[resource] == "deployment",
                     "What-if cannot modify an existing PE, NIC, DNS record/link or role")
             seen.add(resource)
-            children = change.get("resourceChanges", [])
-            if children:
-                check(children)
     check(document["changes"])
     # Do not silently accept an opaque nested deployment or an unresolved What-if.
     require(all(resource in seen for resource, kind in allowed.items() if kind == "required"),
@@ -217,6 +225,7 @@ def infrastructure_plan(config, desired, matches, identity, template, directory,
             arguments = ["deployment", "group", "what-if", "--subscription", config["azure"]["subscriptionId"],
                          "--resource-group", config["target"]["resourceGroup"], "--name", "model-sync-" + alias,
                          "--template-file", str(template), "--parameters", "@" + str(path),
+                         "--mode", "Incremental",
                          "--result-format", "FullResourcePayloads", "--no-pretty-print"]
             what_if = azure.run(arguments)
             private_write(directory / ("what-if-" + alias + ".json"), json.dumps(what_if, indent=2))
