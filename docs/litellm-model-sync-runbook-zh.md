@@ -54,7 +54,7 @@ Admin原生登录和virtual key的Responses调用已由客户验证。只读管�
               "model_name": "customer-chat",
               "deployment_name": "chat-east",
               "litellm_params": {
-                "api_version": "2024-10-21",
+                "api_version": "v1",
                 "rpm": 120,
                 "tpm": 60000
               },
@@ -78,7 +78,7 @@ Admin原生登录和virtual key的Responses调用已由客户验证。只读管�
               "model_name": "customer-chat",
               "deployment_name": "chat-west",
               "litellm_params": {
-                "api_version": "2024-10-21"
+                "api_version": "v1"
               }
             }
           ]
@@ -157,7 +157,7 @@ model_list:
     litellm_params:
       model: azure/chat-east
       api_base: https://<verified-account-host>.openai.azure.com
-      api_version: "2024-10-21"
+      api_version: "v1"
       rpm: 120
       tpm: 60000
     model_info:
@@ -311,8 +311,51 @@ token provider、credential、认证 header、TLS 绕过和内部 `model_info.id
 ```
 
 省略 `litellm_params.api_version` 时，必须在第 5、6 节的 plan 和 execute
-命令中都添加相同的 `--api-version "<客户确认的推理 API version>"`。
-工具不会猜测 API version；不要把上述最小文件当作无需该参数就能执行的配置。
+命令中提供相同的显式 fallback。本文命令已添加 `--api-version v1`，适用于
+第 2.6 节说明的 Azure OpenAI Responses 场景；其他协议须先确认版本再同时修改
+两条命令。工具不会猜测 API version；不要把上述最小文件当作无需该参数就能
+执行的配置。
+
+### 2.6 确认推理 API version：v1 与日期版本
+
+**API version 不一定是日期。** 必须区分：
+
+| 值 | 含义 | 是否能直接用作本工具的 `api_version` |
+| --- | --- | --- |
+| `v1` | Azure OpenAI 新版推理接口，由 LiteLLM 选择 v1 路径 | 可用于已确认支持的协议与部署 |
+| `2025-04-01-preview` 等日期版本 | 旧版日期化推理接口的 API version | 只有对应接口文档或成功请求明确使用时才填写 |
+| 模型版本，例如 `2026-09-03` | 具体模型的发布版本 | 不能据此推断 API version |
+| ARM 查询使用的 `api-version` | Azure 管理接口版本 | 不能作为推理版本 |
+
+微软的 [Responses API 文档](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses)
+列出了 `gpt-6-astra`、`gpt-5.6-terra`、`gpt-5.6-luna` 等受支持模型。
+对于这些模型的 Codex / Responses 接入，优先明确选择 `v1`。
+微软的 [v1 API 生命周期说明](https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle)
+说明新接口不再要求每月更换日期化 `api-version`；不能据此忽略部署区域、
+协议、SDK 和模型功能的兼容性。
+
+当前固定的 [LiteLLM 1.104.0 Azure URL 适配器](https://github.com/BerriAI/litellm/blob/v1.104.0/litellm/llms/azure/common_utils.py)
+识别 `api_version="v1"`，其
+[Responses 适配器](https://github.com/BerriAI/litellm/blob/v1.104.0/litellm/llms/azure/responses/transformation.py)
+据此选择 `/openai/v1/responses`。本目录校验也接受 `v1`；这不是工具的隐式默认，
+仍须在模型配置或 CLI 中明确提供。资源级 `endpoint` 保持账号根地址，
+**不要添加 `/openai/v1/` 或 `/responses` 路径**。
+
+客户确认步骤：
+
+1. 在 Foundry 选择具体部署与所需协议，查看 Playground 的“查看代码 / View code”。
+   若示例使用 `OpenAI` 且 `base_url` 以 `/openai/v1/` 结尾，本工具填写 `v1`；
+   若示例使用 `AzureOpenAI(..., api_version="...")`，核对后使用其明确版本。
+2. 可参考同一部署、同一协议已成功调用的配置，但不能把旧模型的日期版本
+   自动推广给全部新模型。`az ... deployment show` 中的模型版本不是推理版本，
+   管理面发现不会给出所有可用推理 API version。
+3. 完成审批和同步后，按第 6 节用批准的 vkey 对各客户端模型别名做实际推理，
+   再验证所需的流式、tool 调用和费用。文档/源码/目录校验通过或 plan 成功，
+   **不等于具体 deployment 已完成真实推理验证**。
+
+不要将 Responses 场景的 `v1` 建议直接视为 Chat Completions、Embedding 或全部
+模型功能均已验收。不同协议需单独确认；通用 JSON 示例中的日期版本也只是格式
+示例，不是新推理模型的通用建议。
 
 ## 3. 同步与合并规则
 
@@ -368,6 +411,7 @@ read -r -p "本次实际批准人的 Entra Object ID: " APPROVER_OBJECT_ID
 .venv/bin/python -m local_execution.model_sync \
   --config "$CFG" \
   --catalog "$MODEL_CATALOG" \
+  --api-version v1 \
   --operation plan \
   --change-ticket "$CHANGE_TICKET" \
   --approved-by "$APPROVER_OBJECT_ID"
@@ -376,9 +420,10 @@ read -r -p "本次实际批准人的 Entra Object ID: " APPROVER_OBJECT_ID
 上例适用于已有明确风险接受的单操作员 governance。双人审批配置必须重复
 `--approved-by` 提供两个真实且合格的批准人。所有调用均使用一致的审批参数。
 
-每个模型建议填写 `litellm_params.api_version`。可选 `--api-version` 只给未填写
-该字段的模型提供显式 fallback；模型级值优先。没有模型级值也没有 fallback
-时失败，没有默认 API version。示例版本不是兼容性测试结论。
+上述命令针对第 2.6 节的 Responses 场景提供显式 `v1` fallback，所以可省略
+`litellm_params`。也可以在各模型填写 `litellm_params.api_version`；模型级值
+优先，不会被 CLI 的 `v1` 覆盖。若使用了其他协议或不兼容的模型，先核验并调整
+对应版本。没有模型级值也没有 fallback 时失败，没有默认 API version。
 
 plan 进行管理面发现、FullResourcePayloads What-if、Kubernetes server dry-run
 和有限现场检查，不部署资源、不更新客户配置、不发送推理请求。
@@ -402,6 +447,7 @@ read -r -p "本次已审核的 model-sync planSha256: " MODEL_SYNC_PLAN_SHA256
 .venv/bin/python -m local_execution.model_sync \
   --config "$CFG" \
   --catalog "$MODEL_CATALOG" \
+  --api-version v1 \
   --operation execute \
   --change-ticket "$CHANGE_TICKET" \
   --approved-by "$APPROVER_OBJECT_ID" \
@@ -510,3 +556,24 @@ ARM 部署内容见受保护的 `receipt-*.json`；旧、新客户配置分别�
 新订阅的未知账号、真实 endpoint 类型不支持、未知模型配置字段或错误成本
 均应在 plan 阶段处理。不要先执行再依赖 UI 检查；不要用免费价格兜底、
 API Key、公开网络或关闭 TLS 来绕过发现/连接失败。
+
+### 8.1 凭据检查与 Managed Redis 的身份认证开关
+
+若旧版本在 plan 中报
+`Live runtime configuration contains a credential literal or unsupported credential source`，
+不一定说明账号内存在真实 token 字面量。旧检查器会把仓库生成的
+`router_settings.cache_kwargs.azure_redis_ad_token: true` 误当作 token；
+它实际上是 Managed Redis 使用 Entra 身份认证的布尔开关。
+
+修复版本仅在以下精确路径接受严格布尔值 `true`：
+
+- `litellm_settings.enable_azure_ad_token_refresh`
+- `router_settings.cache_kwargs.azure_redis_ad_token`
+
+其他路径的同名字段、字符串/数字形式的开关及实际 Key、密码、token 字面量
+继续拒绝；错误信息不输出凭据值。不要把开关改为环境变量引用或 `false`，
+不要删掉 Redis 身份认证，也不要移除整个凭据检查来绕过问题。
+
+确认修复已合入并更新 Runner 后，重新执行第 5 节 plan 并审核新 hash。
+代码 revision 变化后不能沿用旧批准 hash。若仍报错，通过受控检查核对字段名和
+类型，不在工单、终端输出或聊天中粘贴完整 ConfigMap、环境变量、Secret 或 token。

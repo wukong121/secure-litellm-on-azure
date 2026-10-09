@@ -9,10 +9,12 @@ from unittest.mock import Mock, patch
 import yaml
 
 from local_execution import model_sync
+from scripts.backend_manifest import render_backend_manifest
 from scripts.customer_migration import MigrationError, ROOT, fingerprint, stage_fingerprint
 from scripts.model_sync_catalog import account_id, discover, model_list, parse_catalog, reconcile, ROLE
 from scripts.model_sync_infra import assert_what_if, endpoint_state, role_state, infrastructure_plan, execute_infrastructure
 from scripts import model_sync_runtime as runtime
+from scripts.runtime_secrets import backend_secrets
 from tests.test_backend_manifest import backend_customer
 
 
@@ -89,11 +91,12 @@ class CatalogAzure:
 
 
 def runtime_documents(config):
-    runtime_yaml = {"model_list": model_list(config), "general_settings": {"store_model_in_db": False,
-                                                                        "master_key": "os.environ/LITELLM_MASTER_KEY"},
-                    "litellm_settings": {"enable_azure_ad_token_refresh": True},
-                    "router_settings": {"model_group_affinity_config": {"coding": ["region"]}},
-                    "non_model": {"audit": True}}
+    source = yaml.safe_load((ROOT / "deploy/components/stage6-ha/config-patch.yaml").read_text())
+    runtime_yaml = yaml.safe_load(source["data"]["config.yaml"])
+    runtime_yaml["model_list"] = model_list(config)
+    runtime_yaml["general_settings"].update(store_model_in_db=False, master_key="os.environ/LITELLM_MASTER_KEY")
+    runtime_yaml["router_settings"]["model_group_affinity_config"] = {"coding": ["region"]}
+    runtime_yaml["non_model"] = {"audit": True}
     deployment = {"metadata": {"uid": "deployment-uid", "resourceVersion": "42"},
                   "spec": {"replicas": 2, "selector": {"matchLabels": {"app": "litellm"}},
                            "template": {"metadata": {"labels": {"azure.workload.identity/use": "true"}},
@@ -480,6 +483,61 @@ class ModelSyncRuntimeTests(unittest.TestCase):
         for value in ({"redis_password": "literal"}, {"database": "postgresql://user:password@database/db"}):
             with self.assertRaises(MigrationError):
                 runtime.safe_settings(value)
+
+    def test_rendered_backend_identity_settings_pass_credential_validation(self):
+        for mode in ("native", "entra"):
+            with self.subTest(mode=mode):
+                config = customer()
+                config["application"]["authentication"] = {"mode": mode}
+                if mode == "native":
+                    config["application"]["authentication"]["adminUsername"] = "gateway-admin"
+                platform = {
+                    "keyVaultName": "synthetic-backend", "workloadIdentityClientId": CLIENT,
+                    "workloadIdentityPrincipalId": PRINCIPAL,
+                    "managedRedisHostName": "synthetic.westus.redis.azure.net",
+                }
+                versions = {
+                    name: {"id": f"https://synthetic-backend.vault.azure.net/secrets/{name}/" + "a" * 32,
+                           "version": "a" * 32}
+                    for name in backend_secrets(config)
+                }
+                documents = render_backend_manifest(
+                    config, platform, versions, "synthetic.postgres.database.azure.com", "10.30.8.0/24",
+                )
+                config_map = next(item for item in documents if item["kind"] == "ConfigMap"
+                                  and "config.yaml" in item.get("data", {}))
+                settings = yaml.safe_load(config_map["data"]["config.yaml"])
+                self.assertIs(settings["router_settings"]["cache_kwargs"]["azure_redis_ad_token"], True)
+                runtime.safe_settings(settings)
+
+    def test_identity_switches_require_true_booleans_at_exact_paths(self):
+        for path in runtime.IDENTITY_SWITCH_PATHS:
+            for value in (False, None, 0, 1, "true", "literal-token", "os.environ/TOKEN", {}, []):
+                with self.subTest(path=path, value=value):
+                    settings = value
+                    for field in reversed(path):
+                        settings = {field: settings}
+                    with self.assertRaisesRegex(MigrationError, "identity authentication switch must be true"):
+                        runtime.safe_settings(settings)
+        for settings in (
+            {"azure_redis_ad_token": True},
+            {"router_settings": {"azure_redis_ad_token": True}},
+            {"general_settings": {"enable_azure_ad_token_refresh": True}},
+            {"nested": [{"litellm_settings": {"enable_azure_ad_token_refresh": True}}]},
+        ):
+            with self.subTest(settings=settings), self.assertRaises(MigrationError):
+                runtime.safe_settings(settings)
+
+    def test_identity_switch_does_not_allow_inline_credentials(self):
+        sentinel = "credential-value-must-not-be-logged"
+        for field in ("api_key", "master_key", "password", "token", "secret", "redis_password"):
+            settings = {
+                "router_settings": {"cache_kwargs": {"azure_redis_ad_token": True, field: sentinel}},
+                "litellm_settings": {"enable_azure_ad_token_refresh": True},
+            }
+            with self.subTest(field=field), self.assertRaises(MigrationError) as failure:
+                runtime.safe_settings(settings)
+            self.assertNotIn(sentinel, str(failure.exception))
 
     def test_identity_federation_must_match_actual_aks_issuer_and_serviceaccount(self):
         config = customer()
