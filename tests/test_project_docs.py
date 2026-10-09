@@ -31,6 +31,25 @@ READMES = (
 
 
 class ProjectDocumentationTests(unittest.TestCase):
+    def test_root_mermaid_architecture_preserves_separate_ingress_planes(self):
+        for name in ("README.md", "README_ZH.md"):
+            text = (ROOT / name).read_text()
+            diagrams = re.findall(r"```mermaid\n(.*?)\n```", text, re.S)
+            with self.subTest(document=name):
+                self.assertEqual(len(diagrams), 1)
+                diagram = diagrams[0]
+                self.assertTrue(diagram.startswith("flowchart TB\n"))
+                for path in (
+                    "apiClients --> apiEdge --> apiPls --> apiIngress",
+                    "admins --> adminEdge --> adminPls --> adminIngress",
+                    "apiIngress --> litellm", "adminIngress --> litellm",
+                    'subgraph aks["Private AKS"]',
+                    'backendVault[', 'certificateVault[', 'models[', 'postgres[', 'redis[',
+                    'acr[', 'monitoring[', 'l3[',
+                ):
+                    self.assertIn(path, diagram)
+                self.assertNotIn("```text", text)
+
     def test_root_architecture_images_are_tracked_and_embedded_in_readmes(self):
         import subprocess
 
