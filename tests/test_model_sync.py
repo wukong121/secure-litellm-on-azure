@@ -130,16 +130,76 @@ def current_baseline(config):
 
 
 class ModelSyncCatalogTests(unittest.TestCase):
+    def test_replace_uses_only_catalog_mappings_across_the_entire_gateway(self):
+        config = customer()
+        original = copy.deepcopy(config)
+        document = catalog(("synthetic-astra", "synthetic-terra", "synthetic-luna"))
+        for index, resource in enumerate(document["subscriptions"][0]["resources"]):
+            resource["models"][0]["model_name"] = "model-" + str(index)
+        accounts = parse_catalog(document, "v1")
+        _, matches = discover(config, accounts, CatalogAzure(accounts))
+        desired = reconcile(config, matches)
+        self.assertEqual(desired, reconcile(config, matches, "replace"))
+        self.assertEqual(len(desired["application"]["models"]), 3)
+        self.assertEqual({m["modelGroup"] for m in desired["application"]["models"]}, {"model-0", "model-1", "model-2"})
+        self.assertNotIn("coding", {m["modelGroup"] for m in desired["application"]["models"]})
+        self.assertIn(config["parameters"]["platform"]["azureOpenAIConnections"][0],
+                      desired["parameters"]["platform"]["azureOpenAIConnections"])
+        self.assertEqual(config, original)
+        self.assertEqual(reconcile(desired, matches, "replace"), desired)
+        current = current_baseline(config)
+        rendered = yaml.safe_load(runtime.render(desired, current)["configMap"]["data"]["config.yaml"])
+        self.assertEqual(list(rendered["router_settings"]["model_group_affinity_config"]),
+                         ["model-0", "model-1", "model-2"])
+
+    def test_replace_removes_old_alias_for_the_same_account_and_deployment(self):
+        config = customer()
+        document = catalog()
+        resource = document["subscriptions"][0]["resources"][0]
+        resource["name"] = config["parameters"]["platform"]["azureOpenAIConnections"][0]["accountName"]
+        resource["models"][0]["deployment_name"] = config["application"]["models"][0]["deploymentName"]
+        resource["models"][0]["model_name"] = "new-alias"
+        accounts = parse_catalog(document, "v1")
+        _, matches = discover(config, accounts, CatalogAzure(accounts))
+        merged = reconcile(config, matches, "merge")
+        replaced = reconcile(merged, matches, "replace")
+        self.assertEqual([m["modelGroup"] for m in merged["application"]["models"]], ["coding", "new-alias"])
+        self.assertEqual(replaced["application"]["models"], [merged["application"]["models"][1]])
+        self.assertEqual(len(replaced["parameters"]["platform"]["azureOpenAIConnections"]), 1)
+
+    def test_replace_retains_exact_ids_and_omitted_settings_but_removes_unlisted_backends(self):
+        accounts = parse_catalog(catalog(), "v1")
+        _, matches = discover(customer(), accounts, CatalogAzure(accounts))
+        config = reconcile(customer(), matches, "merge")
+        retained = config["application"]["models"][1]
+        retained["litellmParams"] = {"rpm": 100}
+        retained["modelInfo"] = {"input_cost_per_token": 0.000003}
+        other = copy.deepcopy(retained)
+        other.update(id="other-backend", deploymentName="unlisted")
+        config["application"]["models"].append(other)
+        desired = reconcile(config, matches, "replace")
+        self.assertEqual(desired["application"]["models"], [retained])
+        self.assertEqual(desired["application"]["models"][0]["id"], retained["id"])
+        self.assertEqual(desired["application"]["models"][0]["litellmParams"], {"rpm": 100})
+        self.assertEqual(desired["application"]["models"][0]["modelInfo"], {"input_cost_per_token": 0.000003})
+
+    def test_unknown_model_policy_and_empty_discovery_cannot_delete_models(self):
+        for policy in ("replace", "merge"):
+            with self.subTest(policy=policy), self.assertRaisesRegex(MigrationError, "at least one"):
+                reconcile(customer(), [], policy)
+        with self.assertRaisesRegex(MigrationError, "Model policy"):
+            reconcile(customer(), [], "unknown")
+
     def test_multiple_subscriptions_balance_same_group_keep_coding(self):
         config = customer()
         accounts = parse_catalog(catalog(("synthetic-chat", "synthetic-west"), [SUB, OTHER_SUB]), "2024-10-21")
         observations, matches = discover(config, accounts, CatalogAzure(accounts))
-        desired = reconcile(config, matches)
+        desired = reconcile(config, matches, "merge")
         self.assertEqual(desired["application"]["models"][0], config["application"]["models"][0])
         self.assertEqual([m["modelGroup"] for m in desired["application"]["models"]], ["coding", "chat", "chat"])
         self.assertEqual({m["baseModel"] for m in desired["application"]["models"][1:]}, {"azure/gpt-4o"})
         self.assertEqual(len(observations), 2)
-        self.assertEqual(reconcile(desired, matches), desired)
+        self.assertEqual(reconcile(desired, matches, "merge"), desired)
         self.assertTrue(all(stage_fingerprint(config, s) != stage_fingerprint(desired, s) for s in range(4, 10)))
 
     def test_missing_specific_account_fails_even_if_target_exists_elsewhere(self):
@@ -190,13 +250,13 @@ class ModelSyncCatalogTests(unittest.TestCase):
     def test_exact_mapping_update_keeps_identity_and_unlisted_backends_in_same_group(self):
         accounts = parse_catalog(catalog(), "v1")
         _, matches = discover(customer(), accounts, CatalogAzure(accounts))
-        desired = reconcile(customer(), matches)
+        desired = reconcile(customer(), matches, "merge")
         mapping = desired["application"]["models"][1]
         mapping["apiVersion"] = "old"
         mapping["baseModel"] = "azure/old-family"
         identifier = mapping["id"]
         desired["application"]["models"].append({**desired["application"]["models"][0], "modelGroup": "chat", "id": "old-chat"})
-        updated = reconcile(desired, matches)
+        updated = reconcile(desired, matches, "merge")
         self.assertEqual(len(updated["application"]["models"]), 3)
         self.assertEqual(updated["application"]["models"][2]["id"], "old-chat")
         self.assertEqual(updated["application"]["models"][1]["id"], identifier)
@@ -555,6 +615,24 @@ class ModelSyncInfrastructureTests(unittest.TestCase):
 
 
 class ModelSyncRuntimeTests(unittest.TestCase):
+    def test_replace_removes_obsolete_model_affinity_and_preserves_unrelated_settings(self):
+        config = customer()
+        current = current_baseline(config)
+        current["runtime"]["router_settings"]["model_group_affinity_config"].update(
+            {"custom-unmapped-group": ["preserve-this"]})
+        accounts = parse_catalog(catalog(), "v1")
+        _, matches = discover(config, accounts, CatalogAzure(accounts))
+        desired = reconcile(config, matches, "replace")
+        payload = runtime.render(desired, current)
+        rendered = yaml.safe_load(payload["configMap"]["data"]["config.yaml"])
+        self.assertEqual([m["model_name"] for m in rendered["model_list"]], ["chat"])
+        self.assertEqual(rendered["router_settings"]["model_group_affinity_config"],
+                         {"chat": ["region"], "custom-unmapped-group": ["preserve-this"]})
+        self.assertIn("coding", current["runtime"]["router_settings"]["model_group_affinity_config"])
+        self.assertEqual(rendered["non_model"], current["runtime"]["non_model"])
+        self.assertEqual(rendered["general_settings"], current["runtime"]["general_settings"])
+        self.assertTrue(payload["modelChanged"])
+
     def test_autoscaler_binds_backend_identity_and_spec_not_volatile_status(self):
         hpa = autoscaler_document()
         unrelated = copy.deepcopy(hpa)
@@ -935,7 +1013,7 @@ class ModelSyncRuntimeTests(unittest.TestCase):
 
 
 class ModelSyncCliTests(unittest.TestCase):
-    def run_sync(self, destination, operation, approved="", failure=None, catalog_document=None):
+    def run_sync(self, destination, operation, approved="", failure=None, catalog_document=None, model_policy="replace"):
         config = customer()
         config_path, catalog_path = destination / "customer.json", destination / "catalog.json"
         document = {**config, "localExecution": {"preserved": True}}
@@ -967,8 +1045,66 @@ class ModelSyncCliTests(unittest.TestCase):
                 patch.object(runtime, "baseline", return_value=current), \
                 patch.object(runtime, "apply", side_effect=MigrationError("rollout failed") if failure == "rollout" else None) as apply, \
                 patch.object(model_sync, "install_report", side_effect=OSError("write failed") if failure == "config" else None) as install:
-            result = model_sync.sync(config_path, catalog_path, "v1", operation, approved, "CHG-real", APPROVERS)
+            result = model_sync.sync(config_path, catalog_path, "v1", operation, approved, "CHG-real", APPROVERS,
+                                     model_policy=model_policy)
             return result, infra, apply, install
+
+    def test_replace_plan_explicitly_previews_removed_mappings_and_client_names(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:
+            path = Path(destination)
+            result, infra, apply, install = self.run_sync(path, "plan", model_policy="replace")
+            review = json.loads((path / "model-sync-review.json").read_text())
+            desired = json.loads((path / "desired-customer.json").read_text())
+            self.assertEqual(result["modelPolicy"], "replace")
+            self.assertEqual(review["modelPolicy"], "replace")
+            self.assertEqual(result["removedModelGroups"], ["coding"])
+            expected_removed = [{key: mapping[key] for key in ("id", "modelGroup", "connectionAlias", "deploymentName")}
+                                for mapping in customer()["application"]["models"]]
+            self.assertEqual(result["removedModels"], expected_removed)
+            self.assertEqual(result["removedModels"], review["removedModels"])
+            self.assertEqual([m["modelGroup"] for m in desired["application"]["models"]], ["chat"])
+            rendered = yaml.safe_load(review["application"]["configMap"]["data"]["config.yaml"])
+            self.assertEqual([m["model_name"] for m in rendered["model_list"]], ["chat"])
+            infra.assert_not_called()
+            apply.assert_not_called()
+            install.assert_not_called()
+
+    def test_changing_model_policy_invalidates_approval_before_any_writes(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:
+            path = Path(destination)
+            planned, _, _, _ = self.run_sync(path, "plan", model_policy="merge")
+            self.assertEqual(planned["modelPolicy"], "merge")
+            self.assertEqual(planned["removedModels"], [])
+            with self.assertRaisesRegex(MigrationError, "no writes"):
+                self.run_sync(path, "execute", planned["planSha256"], model_policy="replace")
+            state = json.loads((path / "model-sync-state.json").read_text())
+            self.assertFalse(state["applicationPatched"])
+            self.assertFalse(state["configInstalled"])
+            self.assertEqual(state["infrastructureCompleted"], [])
+            self.assertFalse((path / "previous-customer.json").exists())
+
+    def test_cli_defaults_to_replace_and_merge_requires_explicit_option(self):
+        base = ["model-sync", "--config", "customer.json", "--catalog", "catalog.json",
+                "--operation", "plan", "--change-ticket", "CHG-real", "--approved-by", TENANT]
+        for options, expected in (([], "replace"), (["--model-policy", "merge"], "merge")):
+            with self.subTest(options=options), patch("sys.argv", base + options), \
+                    patch.object(model_sync, "sync", return_value={"status": "planned"}) as sync:
+                model_sync.main()
+            self.assertEqual(sync.call_args.args[-1], expected)
+
+    def test_replace_execute_installs_only_catalog_models_without_touching_vkeys(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:
+            path = Path(destination)
+            planned, _, _, _ = self.run_sync(path, "plan", model_policy="replace")
+            completed, infra, apply, install = self.run_sync(path, "execute", planned["planSha256"], model_policy="replace")
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["removedModelGroups"], ["coding"])
+            installed = install.call_args.args[0]
+            self.assertEqual([m["modelGroup"] for m in installed["application"]["models"]], ["chat"])
+            self.assertEqual(installed["localExecution"], {"preserved": True})
+            infra.assert_called_once()
+            apply.assert_called_once()
+            self.assertEqual(apply.call_args.args[1]["patch"][-1]["op"], "replace")
 
     def test_plan_no_writes_stdout_result_private_review(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "temp") as destination:

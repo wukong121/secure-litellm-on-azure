@@ -10,8 +10,10 @@ Azure 订阅中选择多个 Foundry/Azure OpenAI 账号，并为每个账号明�
 当前连接器只支持提供标准 Azure OpenAI endpoint 的 OpenAI 模型部署；不是
 任意 Foundry 模型或第三方 endpoint 的通用连接器。
 
-命令不会创建、修改或删除 Azure 模型部署，也不会删除文件未列出的 LiteLLM
-模型。现有 `coding` 等组、未列出的后端、vkey、预算、日志和数据库保留。
+默认策略是 `replace`：`MODEL_CATALOG` 是整个网关的完整模型清单，
+未列出的 LiteLLM 模型映射会移除，包括其他资源中的模型和同一部署的旧客户端别名。
+命令不会创建、修改或删除 Azure 模型部署，不删除 PE/DNS/角色或已有连接记录，
+也不自动修改 vkey、预算、日志和数据库。
 同一客户端 `model_name` 可以在多个账号配置不同 deployment 名，接入同一模型组。
 不要把不同用途或不兼容的模型混到同一个组；同组真实模型家族必须一致。
 
@@ -361,13 +363,24 @@ token provider、credential、认证 header、TLS 绕过和内部 `model_info.id
 
 精确映射身份为客户端模型名、账号资源 ID 和 deployment 名。
 
+- 默认 `replace` 以 catalog 为完整清单，只保留文件中列出的精确映射；
+  同一 Foundry deployment 的 `coding`、`gpt-6-astra` 是不同客户端名称。
+  若文件只列 `gpt-6-astra`，旧 `coding` 映射会移除。
+- 只有显式传入 `--model-policy merge` 才使用增量合并，保留未列出的模型组及后端，
+  包括同一组中未列出的旧后端。本文的 plan/execute 显式使用 `replace` 以便审核，
+  不传该参数时行为相同。
 - 新映射生成稳定内部 ID；更新已有映射保留其原 ID。
-- 未列出的模型组及后端不删除，包括同一组中未列出的旧后端。
 - 成本或参数更新也属于实际配置变更，要经过计划审核和 rollout。
 - 输入文件省略的已有配置保留；明确提供的字段覆盖该映射的相应值。
 - 不通过 `null` 猜测删除或恢复默认；不支持的值明确失败。
 - 请求默认值是否被客户端请求覆盖，遵循实际 LiteLLM/模型接口行为。
 - 完全相同的期望目录为 no-op，但仍核验真实私网、工作负载和挂载状态。
+
+正常更新只修改 `MODEL_CATALOG`，不要提前手工修改 `$CFG`；它是当前配置基线，
+execute 验证 rollout/挂载后自动更新。replace 的删除列表记录在 review/state 的
+`removedModels` 和 `removedModelGroups` 中；移除旧名称会使仍使用该名称的请求失效，
+需要单独核对客户端和 vkey 的允许模型范围，不会自动改名或扩大 vkey 权限。
+已移除模型组对应的 router affinity 项同步移除，其余非模型配置保留。
 
 应用渲染、当前 baseline 比较、review hash、CSI/ConfigMap 挂载验证和后续
 重验证使用同一模型配置，不能只让价格出现在客户 JSON 而漏掉实际运行 YAML。
@@ -412,6 +425,7 @@ read -r -p "本次实际批准人的 Entra Object ID: " APPROVER_OBJECT_ID
   --config "$CFG" \
   --catalog "$MODEL_CATALOG" \
   --api-version v1 \
+  --model-policy replace \
   --operation plan \
   --change-ticket "$CHANGE_TICKET" \
   --approved-by "$APPROVER_OBJECT_ID"
@@ -434,9 +448,11 @@ plan 进行管理面发现、FullResourcePayloads What-if、Kubernetes server dr
 
 1. `discovery.json`：每个订阅/资源的身份、实际 deployment 和家族映射。
 2. `model-sync-review.json`：批准范围、baseline、输入/代码/现场 hash 和期望配置。
+   核对 `modelPolicy=replace`、`removedModels` 和 `removedModelGroups`，确认删除范围
+   包括所有未列出的模型，不只是本次列出的 Foundry 资源。
 3. What-if：仅允许计划中的 PE/DNS/调用权限和必要 nested deployment。
 4. `desired-customer.json`、ConfigMap YAML 和 JSON Patch：模型及成本正确、
-   未列出的模型保留、非模型设置不变。
+   完整模型清单与 catalog 一致，删除列表符合批准范围、非模型设置不变。
 5. 确认没有账号/模型 deployment、数据库、镜像、env、CSI、ingress 或流量变更。
 
 ## 6. 审核后执行
@@ -448,6 +464,7 @@ read -r -p "本次已审核的 model-sync planSha256: " MODEL_SYNC_PLAN_SHA256
   --config "$CFG" \
   --catalog "$MODEL_CATALOG" \
   --api-version v1 \
+  --model-policy replace \
   --operation execute \
   --change-ticket "$CHANGE_TICKET" \
   --approved-by "$APPROVER_OBJECT_ID" \
@@ -456,7 +473,8 @@ read -r -p "本次已审核的 model-sync planSha256: " MODEL_SYNC_PLAN_SHA256
 
 execute 重新发现并计算计划，任何实际写入前必须匹配已批准 SHA。输入、代码、
 现场或审批参数变化后重新 plan，不复用旧 hash。需要 fallback API version 时，
-plan 和 execute 均传相同的 `--api-version`。
+plan 和 execute 均传相同的 `--api-version` 和 `--model-policy`；切换 merge/replace
+也会改变批准 hash，不能沿用另一模式的计划。
 
 先部署缺失的私网/权限并重验证，再生成 immutable/hash-named ConfigMap，
 通过带 UID/resourceVersion/test 的 optimistic patch 仅替换配置 volume 的引用。
@@ -470,7 +488,12 @@ rollout 后读取工作负载和 Ready Pod 的实际挂载 YAML，核验成本�
 token usage 和 Spend Logs 成本；不要把 vkey 或正文写进部署证据/公开日志。
 新模型要核对 vkey 的模型访问范围，不能把 Azure deployment 名直接当客户端别名。
 
-## 7. 下游回执重验证
+## 7. 按需执行：下游回执重验证
+
+本节不是模型发布生效或 UI 显示更新的前提。开发/测试中仅更新模型并做实际推理
+验证时，可以暂不执行；不执行不会回滚配置或影响已经生效的模型。
+若要继续依赖这些回执的阶段部署、受控发布或正式验收，则需要重验证相应证据，
+不能用旧回执证明新配置已经验收。UI 可见也不代表推理、成本或 vkey 权限已验证。
 
 连接、模型、成本或参数变化可能改变阶段 fingerprint。以本次 review/state 的
 `staleStageFingerprints` 为准，不手算/复制旧 hash 或伪造历史阶段验收。

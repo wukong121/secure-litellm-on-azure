@@ -89,8 +89,9 @@ def prepare(config, settings, desired, matches, identity, kube, template, direct
     return current, payload, infrastructure
 
 
-def sync(config_path, catalog_path, api_version, operation, approved="", ticket="", approvers=()):
+def sync(config_path, catalog_path, api_version, operation, approved="", ticket="", approvers=(), model_policy="replace"):
     require(operation in {"plan", "execute"}, "Operation must be plan or execute")
+    require(model_policy in {"merge", "replace"}, "Model policy must be merge or replace")
     protected_source(config_path, "Customer config")
     protected_source(catalog_path, "Azure OpenAI catalog")
     require(config_path.resolve() != catalog_path.resolve(), "Config and catalog must be separate files")
@@ -111,7 +112,15 @@ def sync(config_path, catalog_path, api_version, operation, approved="", ticket=
         azure = AzureCommands(config, directory)
         observations, matches = discover(config, accounts, azure)
         private_write(directory / "discovery.json", json.dumps(observations, indent=2))
-        desired = reconcile(config, matches)
+        desired = reconcile(config, matches, model_policy)
+        retained_ids = {mapping["id"] for mapping in desired["application"]["models"]}
+        removed = [{key: mapping[key] for key in ("id", "modelGroup", "connectionAlias", "deploymentName")}
+                   for mapping in config["application"]["models"]
+                   if mapping["id"] not in retained_ids]
+        groups = {mapping["modelGroup"] for mapping in desired["application"]["models"]}
+        removed_groups = sorted({mapping["modelGroup"] for mapping in removed} - groups)
+        for group in removed_groups:
+            progress("Planned removal of client model name " + group + "; update dependent clients/vkey permissions separately.")
         warnings = pricing_warnings(desired)
         for warning in warnings:
             progress(warning)
@@ -129,6 +138,7 @@ def sync(config_path, catalog_path, api_version, operation, approved="", ticket=
         review = {"schemaVersion": 1, "operation": "model-sync", "revision": revision, "sourceSha256": sources,
                   "configInputSha256": hashlib.sha256(config_bytes).hexdigest(),
                   "catalogInputSha256": hashlib.sha256(catalog_bytes).hexdigest(), "apiVersion": api_version,
+                  "modelPolicy": model_policy, "removedModels": removed, "removedModelGroups": removed_groups,
                   "approval": authorization, "identity": identity, "discovery": observations,
                   "baseline": current, "desiredConfigSha256": fingerprint(desired_document),
                   "templateSha256": sha(template), "infrastructure": infra, "application": payload,
@@ -137,6 +147,7 @@ def sync(config_path, catalog_path, api_version, operation, approved="", ticket=
         digest = fingerprint(review)
         private_write(directory / "model-sync-review.json", json.dumps({**review, "planSha256": digest}, indent=2))
         record.update(planSha256=digest, status="planned", staleStageFingerprints=stale, pricingWarnings=warnings,
+                      modelPolicy=model_policy, removedModels=removed, removedModelGroups=removed_groups,
                       unusedAccounts=[o["account"]["accountName"] for o in observations if not o["matchedDeployments"]])
         private_write(directory / "model-sync-state.json", json.dumps(record, indent=2))
         if operation == "plan":
@@ -196,13 +207,15 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--api-version", help="Optional explicit fallback; per-model litellm_params.api_version takes precedence")
+    parser.add_argument("--model-policy", choices=("merge", "replace"), default="replace",
+                        help="replace uses catalog as the complete gateway model list (default); merge preserves unlisted models")
     parser.add_argument("--operation", choices=("plan", "execute"), required=True)
     parser.add_argument("--approved-plan-sha256", default="")
     parser.add_argument("--change-ticket", required=True)
     parser.add_argument("--approved-by", action="append", required=True)
     args = parser.parse_args()
     result = sync(args.config, args.catalog, args.api_version, args.operation,
-                  args.approved_plan_sha256, args.change_ticket, args.approved_by)
+                  args.approved_plan_sha256, args.change_ticket, args.approved_by, args.model_policy)
     print(json.dumps(result), flush=True)
 
 
