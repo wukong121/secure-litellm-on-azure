@@ -87,7 +87,7 @@ jobs:
           AUDIT_TO: ${{ inputs.to }}
           AUDIT_UNTIL: ${{ inputs.until }}
         run: python -m scripts.audit_governance --operation plan
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: audit-governance-plan-${{ inputs.environment }}-${{ github.run_id }}
           path: temp/audit-governance/governance-plan.json
@@ -135,7 +135,7 @@ jobs:
           CUSTOMER_ENVIRONMENT: ${{ inputs.environment }}
           GH_TOKEN: ${{ github.token }}
         run: python -m scripts.audit_governance --operation execute
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: audit-governance-receipt-${{ inputs.environment }}-${{ github.run_id }}
           path: temp/audit-governance/governance-receipt.json
